@@ -102,6 +102,12 @@ export function registerPolicy(policy: AgentBudgetPolicy): void {
   _policies.set(key, policy)
 }
 
+function getApplicablePolicy(agentId: string, taskId?: string): AgentBudgetPolicy | undefined {
+  const taskPolicy = taskId ? _policies.get(policyKey(agentId, taskId)) : undefined
+  const agentPolicy = _policies.get(policyKey(agentId))
+  return taskPolicy ?? agentPolicy
+}
+
 /**
  * Get accumulated spend for an agent within the policy's rolling window.
  */
@@ -147,9 +153,7 @@ export function evaluateSpan(attrs: OTelSpanCostAttributes): BudgetDecision | nu
   _spendLedger.push(record)
 
   // Find applicable policy (task-specific first, then agent-level)
-  const taskPolicy = taskId ? _policies.get(policyKey(agentId, taskId)) : undefined
-  const agentPolicy = _policies.get(policyKey(agentId))
-  const policy = taskPolicy ?? agentPolicy
+  const policy = getApplicablePolicy(agentId, taskId)
 
   if (!policy) {
     // No policy = allow (but we still recorded the spend)
@@ -166,7 +170,8 @@ export function evaluateSpan(attrs: OTelSpanCostAttributes): BudgetDecision | nu
     }
   }
 
-  const accumulated = getAccumulatedSpend(agentId, taskId, policy.windowMs)
+  const spendScopeTaskId = policy.taskId === undefined ? undefined : taskId
+  const accumulated = getAccumulatedSpend(agentId, spendScopeTaskId, policy.windowMs)
   const remaining = Math.max(0, policy.maxSpendUsd - accumulated)
   const utilization = (accumulated / policy.maxSpendUsd) * 100
 
@@ -195,6 +200,56 @@ export function evaluateSpan(attrs: OTelSpanCostAttributes): BudgetDecision | nu
 
   _decisions.push(decision)
   return decision
+}
+
+export async function invokeKillCallback(
+  policy: AgentBudgetPolicy,
+  decision: BudgetDecision
+): Promise<
+  | {
+      attempted: boolean
+      ok: boolean
+      status?: number
+      error?: string
+    }
+  | null
+> {
+  if (decision.action !== 'kill' || !policy.killCallbackUrl) {
+    return null
+  }
+
+  try {
+    const response = await fetch(policy.killCallbackUrl, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({
+        event: 'agentpay.budget.kill',
+        decision,
+        policy: {
+          agentId: policy.agentId,
+          taskId: policy.taskId,
+          maxSpendUsd: policy.maxSpendUsd,
+          windowMs: policy.windowMs,
+          breachAction: policy.breachAction,
+        },
+      }),
+    })
+
+    return {
+      attempted: true,
+      ok: response.ok,
+      status: response.status,
+      ...(response.ok ? {} : { error: `Kill callback returned HTTP ${response.status}` }),
+    }
+  } catch (error: unknown) {
+    return {
+      attempted: true,
+      ok: false,
+      error: error instanceof Error ? error.message : String(error),
+    }
+  }
 }
 
 /**
@@ -356,6 +411,7 @@ export async function handleOTelEvaluateSpend(
   input: OTelEvaluateSpendInput
 ): Promise<{ content: Array<{ type: 'text'; text: string }>; isError?: boolean }> {
   try {
+    const policy = getApplicablePolicy(input.agentId, input.taskId)
     const decision = evaluateSpan({
       'agentcore.agent.id': input.agentId,
       'agentcore.task.id': input.taskId,
@@ -375,6 +431,9 @@ export async function handleOTelEvaluateSpend(
     }
 
     const otelEvent = decisionToOTelEvent(decision)
+    const killCallback = policy
+      ? await invokeKillCallback(policy, decision)
+      : null
 
     return {
       content: [
@@ -382,6 +441,7 @@ export async function handleOTelEvaluateSpend(
           JSON.stringify({
             decision,
             otelEvent,
+            killCallback,
           })
         ),
       ],

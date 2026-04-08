@@ -1,19 +1,27 @@
 /**
  * Tests for OTel Budget Circuit-Breaker module
  */
-import { describe, it, expect, beforeEach } from 'vitest'
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import {
   registerPolicy,
   evaluateSpan,
   decisionToOTelEvent,
   getDecisionHistory,
+  handleOTelEvaluateSpend,
   listPolicies,
   _resetOTelBudgetState,
 } from '../src/tools/otel-budget.js'
 
+const originalFetch = global.fetch
+
 describe('OTel Budget Circuit-Breaker', () => {
   beforeEach(() => {
     _resetOTelBudgetState()
+    vi.restoreAllMocks()
+  })
+
+  afterEach(() => {
+    global.fetch = originalFetch
   })
 
   describe('registerPolicy', () => {
@@ -181,6 +189,33 @@ describe('OTel Budget Circuit-Breaker', () => {
       expect(decision!.action).toBe('kill')
     })
 
+    it('aggregates spend across tasks when using an agent-level policy', () => {
+      registerPolicy({
+        agentId: 'agent-001',
+        maxSpendUsd: 5.0,
+        windowMs: 0,
+        breachAction: 'block',
+      })
+
+      evaluateSpan({
+        'agentcore.agent.id': 'agent-001',
+        'agentcore.task.id': 'task-a',
+        'agentcore.cost.usd': 3.0,
+        spanId: 'span-1',
+      })
+
+      const decision = evaluateSpan({
+        'agentcore.agent.id': 'agent-001',
+        'agentcore.task.id': 'task-b',
+        'agentcore.cost.usd': 2.5,
+        spanId: 'span-2',
+      })
+
+      expect(decision).not.toBeNull()
+      expect(decision!.action).toBe('block')
+      expect(decision!.accumulatedSpendUsd).toBe(5.5)
+    })
+
     it('reads gen_ai.usage.cost as fallback', () => {
       registerPolicy({
         agentId: 'agent-001',
@@ -270,6 +305,39 @@ describe('OTel Budget Circuit-Breaker', () => {
 
       const history = getDecisionHistory('agent-001', 3)
       expect(history).toHaveLength(3)
+    })
+  })
+
+  describe('handleOTelEvaluateSpend', () => {
+    it('invokes kill callback when kill policy trips', async () => {
+      const fetchMock = vi.fn().mockResolvedValue({ ok: true, status: 204 })
+      global.fetch = fetchMock as typeof global.fetch
+
+      registerPolicy({
+        agentId: 'agent-001',
+        maxSpendUsd: 1.0,
+        windowMs: 0,
+        breachAction: 'kill',
+        killCallbackUrl: 'https://example.com/kill',
+      })
+
+      const result = await handleOTelEvaluateSpend({
+        agentId: 'agent-001',
+        costUsd: 1.5,
+        spanId: 'span-1',
+      })
+
+      const data = JSON.parse(result.content[0].text)
+      expect(fetchMock).toHaveBeenCalledWith(
+        'https://example.com/kill',
+        expect.objectContaining({ method: 'POST' })
+      )
+      expect(data.decision.action).toBe('kill')
+      expect(data.killCallback).toEqual({
+        attempted: true,
+        ok: true,
+        status: 204,
+      })
     })
   })
 })
