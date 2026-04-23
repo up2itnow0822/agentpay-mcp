@@ -99,6 +99,20 @@ import {
 
 import { createEscrowTool, handleCreateEscrow, CreateEscrowSchema } from './tools/escrow.js';
 
+// ─── Tool imports (v4.2.0 — OTel budget circuit-breaker for AWS AgentCore) ──
+
+import {
+  otelRegisterPolicyTool,
+  handleOTelRegisterPolicy,
+  OTelRegisterPolicySchema,
+  otelEvaluateSpendTool,
+  handleOTelEvaluateSpend,
+  OTelEvaluateSpendSchema,
+  otelBudgetStatusTool,
+  handleOTelBudgetStatus,
+  OTelBudgetStatusSchema,
+} from './tools/otel-budget.js';
+
 // ─── Server configuration ──────────────────────────────────────────────────
 
 const SERVER_INFO = {
@@ -147,6 +161,10 @@ const ALL_TOOLS = [
   verifyAgentUAIDTool,
   // v4.0.0 — escrow
   createEscrowTool,
+  // v4.2.0 — OTel budget circuit-breaker (AWS AgentCore integration)
+  otelRegisterPolicyTool,
+  otelEvaluateSpendTool,
+  otelBudgetStatusTool,
 ];
 
 // ─── Server initialization ─────────────────────────────────────────────────
@@ -308,6 +326,23 @@ server.setRequestHandler(CallToolRequestSchema, async (request: CallToolRequest)
       case 'create_escrow': {
         const input = CreateEscrowSchema.parse(args);
         return handleCreateEscrow(input);
+      }
+
+      // ── v4.2.0 — OTel budget circuit-breaker ─────────────────────────
+
+      case 'otel_register_budget_policy': {
+        const input = OTelRegisterPolicySchema.parse(args);
+        return handleOTelRegisterPolicy(input);
+      }
+
+      case 'otel_evaluate_spend': {
+        const input = OTelEvaluateSpendSchema.parse(args);
+        return handleOTelEvaluateSpend(input);
+      }
+
+      case 'otel_budget_status': {
+        const input = OTelBudgetStatusSchema.parse(args);
+        return handleOTelBudgetStatus(input);
       }
 
       default:
