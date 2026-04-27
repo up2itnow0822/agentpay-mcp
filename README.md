@@ -83,6 +83,7 @@ AgentPay MCP is built for enterprise MCP deployments where supply chain security
 - **Auditable, minimal dependency tree.** The server runs on `viem`, `@modelcontextprotocol/sdk`, and a small set of auditable npm packages. No PyPI. No Python runtime required.
 - **Enterprise trust signal.** Integrated into [NVIDIA's official NeMo Agent Toolkit Examples](https://github.com/NVIDIA/NeMo-Agent-Toolkit-Examples/pull/17) (PR #17, merged). NVIDIA's review process validated the security posture before merge.
 - **Non-custodial architecture.** Private keys never leave the local machine. On-chain spend caps enforce limits even if the agent or its key is compromised.
+- **Vercel deployment hardening.** If you deploy AI agents on Vercel, review the [Vercel deployment hardening checklist](docs/vercel-deployment-hardening.md) before reconnecting paid tools after any OAuth, dashboard, CI, or environment-variable exposure.
 
 If your security team is auditing MCP server dependencies after the LiteLLM incident, `npm ls` on agentpay-mcp gives you a short, reviewable tree with zero Python supply chain exposure.
 
@@ -198,6 +199,7 @@ Both projects enable agent payments. They solve different problems at different 
 > x402-mcp adds payments to your agent. agentpay-mcp adds *governed* payments — spend caps, session limits, human approval, and audit trails that enterprises require before deploying agents against production budgets.
 
 ---
+
 
 ## Quick Start
 
