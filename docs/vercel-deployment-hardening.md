@@ -69,15 +69,14 @@ AgentPay MCP v4.1.3 already documents the native AI SDK approval bridge. Preserv
 
 Never let a model retry a denied paid tool until a human creates a new approval. Add a system instruction such as: `When a tool execution is not approved, do not retry the same paid call.`
 
-Run the validation example before deploy:
+Run the existing approval-validation test before deploy:
 
 ```bash
-cd examples/vercel-ai-sdk-http-elicitation
 npm install
-npm run validate
+npm test -- tests/payments.test.ts
 ```
 
-The validation must show that decline, cancel, missing approval, and incomplete approval do not call the signing callback.
+This test suite covers approval queue behavior and must remain fail-closed: decline, cancel, missing approval, and incomplete approval paths must not reach signing.
 
 ## Activity and deployment review
 
@@ -113,4 +112,4 @@ Do not ship a Vercel-hosted agent with paid tools until all of these pass:
 - Vercel sensitive environment variables: https://vercel.com/docs/environment-variables/sensitive-environment-variables
 - Vercel activity logs: https://vercel.com/docs/cli/activity
 - Vercel AI SDK tool execution approval: https://ai-sdk.dev/docs/ai-sdk-core/tools-and-tool-calling#tool-execution-approval
-- AgentPay MCP Vercel AI SDK approval example: ../examples/vercel-ai-sdk-http-elicitation
+- AgentPay MCP approval validation tests: ../tests/payments.test.ts
