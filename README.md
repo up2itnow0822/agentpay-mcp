@@ -84,6 +84,9 @@ AgentPay MCP is built for enterprise MCP deployments where supply chain security
 - **Enterprise trust signal.** Integrated into [NVIDIA's official NeMo Agent Toolkit Examples](https://github.com/NVIDIA/NeMo-Agent-Toolkit-Examples/pull/17) (PR #17, merged). NVIDIA's review process validated the security posture before merge.
 - **Non-custodial architecture.** Private keys never leave the local machine. On-chain spend caps enforce limits even if the agent or its key is compromised.
 - **Vercel deployment hardening.** If you deploy AI agents on Vercel, review the [Vercel deployment hardening checklist](docs/vercel-deployment-hardening.md) before reconnecting paid tools after any OAuth, dashboard, CI, or environment-variable exposure.
+- **x402 scanner readiness.** For paid API demos that need scanner-readable x402 support, use the [x402 scanner-readiness recipe](docs/x402-scanner-readiness.md).
+- **WhatsApp and SMB agent controls.** For channel-native paid agents, use the [WhatsApp and SMB paid-agent controls recipe](docs/whatsapp-smb-agent-controls.md).
+- **x402 chain drift.** For PaymentWrapper and paywall template changes, follow the [x402 chain-drift compatibility note](docs/x402-chain-drift-compatibility.md).
 
 If your security team is auditing MCP server dependencies after the LiteLLM incident, `npm ls` on agentpay-mcp gives you a short, reviewable tree with zero Python supply chain exposure.
 
