@@ -125,6 +125,7 @@ AgentPay MCP is designed to be discovered and used by AI agents. Compatible with
 - **[claude-mem](https://github.com/thedotmack/claude-mem)** - Payment state (transaction history, budgets, session tokens) persists as agent memory across sessions via claude-mem's observation layer
 - **[AgentSkills](https://agentskills.io)** - Installable as a cross-framework skill in any AgentSkills-compatible harness (Claude Code, Cursor, Gemini CLI, Antigravity)
 - **[Chrome DevTools MCP](https://github.com/ChromeDevTools/chrome-devtools-mcp)** - Pairs as the payment layer for browser-native agents
+- **[Satoshi API paid MCP fixture](docs/paid-mcp-integration-fixture.md)** - Live x402 Foundation MCP target for developing `x402_mcp_call` approval, payment retry, and receipt-preservation tests
 
 ### Install as a Skill
 
