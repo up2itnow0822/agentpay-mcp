@@ -86,7 +86,7 @@ AgentPay MCP is built for enterprise MCP deployments where supply chain security
 - **Vercel deployment hardening.** If you deploy AI agents on Vercel, review the [Vercel deployment hardening checklist](docs/vercel-deployment-hardening.md) before reconnecting paid tools after any OAuth, dashboard, CI, or environment-variable exposure.
 - **x402 scanner readiness.** For paid API demos that need scanner-readable x402 support, use the [x402 scanner-readiness recipe](docs/x402-scanner-readiness.md).
 - **WhatsApp and SMB agent controls.** For channel-native paid agents, use the [WhatsApp and SMB paid-agent controls recipe](docs/whatsapp-smb-agent-controls.md).
-- **x402 chain drift.** For PaymentWrapper and paywall template changes, follow the [x402 chain-drift compatibility note](docs/x402-chain-drift-compatibility.md).
+- **x402 chain drift.** AgentPay MCP tracks the x402 Foundation paywall-template baseline with `viem` `^2.47.12` or newer, and fails closed for unmapped chains. For PaymentWrapper and paywall template changes, follow the [x402 chain-drift compatibility note](docs/x402-chain-drift-compatibility.md).
 
 If your security team is auditing MCP server dependencies after the LiteLLM incident, `npm ls` on agentpay-mcp gives you a short, reviewable tree with zero Python supply chain exposure.
 

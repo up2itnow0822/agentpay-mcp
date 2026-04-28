@@ -2,11 +2,11 @@
 
 x402 paywall templates are moving faster than static client examples. The risk is simple: a paid-agent demo assumes yesterday's chain list, then a PaymentWrapper or paywall update emits payment metadata for a chain the client does not recognize.
 
-AgentPay MCP must not silently coerce unknown x402 chains to Base.
+AgentPay MCP must not silently coerce unknown x402 chains to Base. The package now depends on `viem` `^2.47.12`, matching or exceeding the x402 Foundation paywall-template baseline that added Mezo, MegaETH, Stable, and Radius chain definitions.
 
 ## Current boundary
 
-AgentPay MCP `4.1.1` supports Base Mainnet and Base Sepolia for the core configured wallet client. Other tools in the repo support broader token, bridge, and swap surfaces, but x402 payment execution should treat unsupported chains as a fail-closed condition until the chain is explicitly mapped, tested, and funded.
+AgentPay MCP `4.1.4` supports Base Mainnet and Base Sepolia for the core configured wallet client. Other tools in the repo support broader token, bridge, and swap surfaces, but x402 payment execution should treat unsupported chains as a fail-closed condition until the chain is explicitly mapped, tested, and funded.
 
 This is safer than guessing. A failed payment is recoverable. A wrong-chain signature is not.
 
@@ -28,9 +28,11 @@ Track x402 Foundation paywall and PaymentWrapper changes for these chain definit
 - Never fall back to `8453` when the server requested a different chain.
 - Keep docs, tests, and package examples aligned with the current x402 Foundation template set.
 
-## Test plan
+## Test coverage
 
-Add fixture-driven tests for x402 payment metadata:
+`tests/chain-drift.test.ts` is the current smoke gate. It verifies that the installed `viem/chains` baseline exposes Mezo, MegaETH, Stable, and Radius, then verifies that AgentPay MCP still rejects those chain IDs instead of routing them through Base.
+
+Future fixture-driven tests for x402 payment metadata should use this shape:
 
 ```ts
 const paymentRequirements = [
