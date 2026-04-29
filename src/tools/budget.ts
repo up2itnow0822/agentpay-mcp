@@ -6,7 +6,7 @@
  */
 import { z } from 'zod'
 import { SpendingPolicy, checkBudget } from 'agentwallet-sdk'
-import { zeroAddress, type Address } from 'viem'
+import { parseEther, zeroAddress, type Address } from 'viem'
 import { getWallet } from '../utils/client.js'
 import { textContent, formatError } from '../utils/format.js'
 
@@ -18,17 +18,22 @@ interface PolicyConfig {
   allowedRecipients?: string[]
 }
 
-let _policyConfig: PolicyConfig | null = null
-let _spendingPolicy: InstanceType<typeof SpendingPolicy> | null = null
+const DEFAULT_POLICY_SCOPE = 'global'
+const _policyConfigByScope = new Map<string, PolicyConfig>()
+const _spendingPolicyByScope = new Map<string, InstanceType<typeof SpendingPolicy>>()
 
 export function _resetPolicyStore(): void {
-  _policyConfig = null
-  _spendingPolicy = null
+  _policyConfigByScope.clear()
+  _spendingPolicyByScope.clear()
 }
 
 // ─── set_spend_policy ──────────────────────────────────────────────────────
 
 export const SetSpendPolicySchema = z.object({
+  scopeKey: z
+    .string()
+    .optional()
+    .describe('Optional session/scope key. Defaults to "global".'),
   dailyLimitEth: z
     .string()
     .optional()
@@ -54,6 +59,10 @@ export const setSpendPolicyTool = {
   inputSchema: {
     type: 'object' as const,
     properties: {
+      scopeKey: {
+        type: 'string',
+        description: 'Optional session/scope key (default: "global")',
+      },
       dailyLimitEth: {
         type: 'string',
         description: 'Daily spend limit in ETH-equivalent (e.g. "0.1")',
@@ -76,45 +85,55 @@ export async function handleSetSpendPolicy(
   input: SetSpendPolicyInput
 ): Promise<{ content: Array<{ type: 'text'; text: string }>; isError?: boolean }> {
   try {
-    const ethToWei = (eth: string): bigint => {
-      const val = parseFloat(eth)
-      if (isNaN(val) || val < 0) throw new Error(`Invalid ETH amount: "${eth}"`)
-      return BigInt(Math.round(val * 1e18))
+    const ethToWeiNumber = (eth: string): number => {
+      const normalized = eth.trim()
+      if (normalized.length === 0) throw new Error(`Invalid ETH amount: "${eth}"`)
+      if (!/^\d*\.?\d+$/.test(normalized)) throw new Error(`Invalid ETH amount: "${eth}"`)
+
+      const wei = parseEther(normalized)
+      if (wei <= 0n) throw new Error(`Invalid ETH amount: "${eth}"`)
+      const weiAsNumber = Number(wei)
+      if (!Number.isFinite(weiAsNumber)) {
+        throw new Error(`ETH amount is too large: "${eth}"`)
+      }
+      return weiAsNumber
     }
 
+    const scopeKey = input.scopeKey?.trim() || DEFAULT_POLICY_SCOPE
     const merchantAllowlist = input.allowedRecipients ?? []
 
     // Build SpendingPolicyConfig from inputs
     // rollingCap uses a 24-hour window for dailyLimitEth
     const rollingCap = input.dailyLimitEth
       ? {
-          maxAmount: Number(ethToWei(input.dailyLimitEth)),
+          maxAmount: ethToWeiNumber(input.dailyLimitEth),
           windowMs: 86_400_000, // 24 hours
         }
       : undefined
 
     // draftThreshold maps to perTxCap — payments above this go to draft
     const draftThreshold = input.perTxCapEth
-      ? Number(ethToWei(input.perTxCapEth))
+      ? ethToWeiNumber(input.perTxCapEth)
       : undefined
 
-    _spendingPolicy = new SpendingPolicy({
+    _spendingPolicyByScope.set(scopeKey, new SpendingPolicy({
       merchantAllowlist,
       rollingCap,
       draftThreshold,
-    })
+    }))
 
-    _policyConfig = {
+    _policyConfigByScope.set(scopeKey, {
       dailyLimitEth: input.dailyLimitEth,
       perTxCapEth: input.perTxCapEth,
       allowedRecipients: merchantAllowlist,
-    }
+    })
 
     return {
       content: [
         textContent(
           JSON.stringify({
             success: true,
+            scopeKey,
             policy: {
               dailyLimitEth: input.dailyLimitEth ?? null,
               perTxCapEth: input.perTxCapEth ?? null,
@@ -135,6 +154,10 @@ export async function handleSetSpendPolicy(
 // ─── check_budget ──────────────────────────────────────────────────────────
 
 export const CheckBudgetSchema = z.object({
+  scopeKey: z
+    .string()
+    .optional()
+    .describe('Optional session/scope key. Defaults to "global".'),
   token: z
     .string()
     .optional()
@@ -156,6 +179,10 @@ export const checkBudgetTool = {
   inputSchema: {
     type: 'object' as const,
     properties: {
+      scopeKey: {
+        type: 'string',
+        description: 'Optional session/scope key (default: "global")',
+      },
       token: {
         type: 'string',
         description: 'Token address (default: ETH / zero address)',
@@ -170,6 +197,7 @@ export async function handleCheckBudget(
 ): Promise<{ content: Array<{ type: 'text'; text: string }>; isError?: boolean }> {
   try {
     const wallet = getWallet()
+    const scopeKey = input.scopeKey?.trim() || DEFAULT_POLICY_SCOPE
     const token = (input.token as Address | undefined) ?? zeroAddress
 
     const budget = await checkBudget(wallet, token)
@@ -179,9 +207,10 @@ export async function handleCheckBudget(
         textContent(
           JSON.stringify({
             token,
+            scopeKey,
             perTxLimit: budget.perTxLimit.toString(),
             remainingInPeriod: budget.remainingInPeriod.toString(),
-            policy: _policyConfig ?? null,
+            policy: _policyConfigByScope.get(scopeKey) ?? null,
           })
         ),
       ],
