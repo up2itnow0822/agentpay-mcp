@@ -38,6 +38,7 @@ describe('set_spend_policy', () => {
 
   it('creates a policy with daily limit and per-tx cap', async () => {
     const result = await handleSetSpendPolicy({
+      scopeKey: 'session-1',
       dailyLimitEth: '0.1',
       perTxCapEth: '0.01',
       allowedRecipients: [],
@@ -46,6 +47,7 @@ describe('set_spend_policy', () => {
     expect(result.isError).toBeUndefined()
     const data = JSON.parse(result.content[0].text)
     expect(data.success).toBe(true)
+    expect(data.scopeKey).toBe('session-1')
     expect(data.policy.dailyLimitEth).toBe('0.1')
     expect(data.policy.perTxCapEth).toBe('0.01')
     expect(MockSpendingPolicy).toHaveBeenCalledWith(
@@ -85,6 +87,20 @@ describe('set_spend_policy', () => {
     expect(result.isError).toBe(true)
     expect(result.content[0].text).toContain('set_spend_policy failed')
   })
+
+  it('returns error for non-positive ETH amount', async () => {
+    const result = await handleSetSpendPolicy({ perTxCapEth: '-0.01' })
+
+    expect(result.isError).toBe(true)
+    expect(result.content[0].text).toContain('set_spend_policy failed')
+  })
+
+  it('returns error for scientific notation ETH amount', async () => {
+    const result = await handleSetSpendPolicy({ dailyLimitEth: '1e-3' })
+
+    expect(result.isError).toBe(true)
+    expect(result.content[0].text).toContain('set_spend_policy failed')
+  })
 })
 
 describe('check_budget', () => {
@@ -116,7 +132,7 @@ describe('check_budget', () => {
 
   it('includes policy config when policy has been set', async () => {
     // First set a policy
-    await handleSetSpendPolicy({ dailyLimitEth: '0.5' })
+    await handleSetSpendPolicy({ scopeKey: 'session-a', dailyLimitEth: '0.5' })
 
     mockCheckBudget.mockResolvedValue({
       token: '0x0000000000000000000000000000000000000000',
@@ -124,11 +140,31 @@ describe('check_budget', () => {
       remainingInPeriod: 500000000000000000n,
     } as any)
 
-    const result = await handleCheckBudget({})
+    const result = await handleCheckBudget({ scopeKey: 'session-a' })
 
     const data = JSON.parse(result.content[0].text)
     expect(data.policy).not.toBeNull()
     expect(data.policy.dailyLimitEth).toBe('0.5')
+  })
+
+  it('isolates policy config across scope keys', async () => {
+    await handleSetSpendPolicy({ scopeKey: 'session-a', dailyLimitEth: '1.0' })
+    await handleSetSpendPolicy({ scopeKey: 'session-b', dailyLimitEth: '2.0' })
+
+    mockCheckBudget.mockResolvedValue({
+      token: '0x0000000000000000000000000000000000000000',
+      perTxLimit: 1000000000000000000n,
+      remainingInPeriod: 500000000000000000n,
+    } as any)
+
+    const aResult = await handleCheckBudget({ scopeKey: 'session-a' })
+    const bResult = await handleCheckBudget({ scopeKey: 'session-b' })
+
+    const aData = JSON.parse(aResult.content[0].text)
+    const bData = JSON.parse(bResult.content[0].text)
+
+    expect(aData.policy.dailyLimitEth).toBe('1.0')
+    expect(bData.policy.dailyLimitEth).toBe('2.0')
   })
 
   it('returns error when checkBudget fails', async () => {

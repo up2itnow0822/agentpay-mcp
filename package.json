@@ -24,6 +24,7 @@
     "test:coverage": "vitest run --coverage",
     "typecheck": "tsc --noEmit",
     "lint": "eslint src/ tests/ --config eslint.config.mjs",
+    "security": "node scripts/security-check.mjs",
     "prepublishOnly": "npm run clean && npm run build && npm run typecheck"
   },
   "keywords": [
