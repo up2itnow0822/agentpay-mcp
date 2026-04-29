@@ -90,3 +90,41 @@ Reason: Check supplier stock before replying to customer
 - Operators can set daily and per-call caps per WhatsApp agent.
 - Every paid call joins channel context, payment metadata, policy version, and settlement reference.
 - Deny, cancel, expired session, cap exceeded, and unknown chain paths all fail closed.
+
+## Persona creation approval gate
+
+Axon-style vertical personas make the first spend decision happen before the first paid API call. When a shop owner creates an inventory assistant, booking assistant, legal intake assistant, or support persona, AgentPay MCP should attach payment authority at creation time instead of waiting for the first x402 challenge.
+
+Recommended creation flow:
+
+1. Operator creates or edits a persona in the channel agent dashboard.
+2. The dashboard asks AgentPay MCP for a spend profile before enabling paid tools.
+3. AgentPay MCP returns default caps, chain allowlist, recipient allowlist, and approval threshold.
+4. The operator approves the persona's payment authority in WhatsApp or the admin UI.
+5. The runtime stores the persona ID, policy version, cap, approver, and allowed tool set.
+6. Every later x402 or USDC call must reference the persona policy before signing.
+
+Minimal policy attachment:
+
+```json
+{
+  "persona_id": "inventory-assistant-ptbr",
+  "persona_vertical": "retail_inventory",
+  "created_by": "operator:shop-owner-17",
+  "approval_surface": "whatsapp",
+  "policy_version": "2026-04-29.persona-controls.v1",
+  "daily_cap_usdc": "10.00",
+  "per_call_cap_usdc": "0.25",
+  "approval_required_above_usdc": "0.05",
+  "allowed_tools": ["supplier_stock_lookup", "delivery_quote"],
+  "allowed_recipients": ["api.supplier.example", "api.delivery.example"],
+  "allowed_chains": ["base", "base-sepolia"]
+}
+```
+
+Acceptance additions:
+
+- Persona creation cannot enable paid tools without an attached AgentPay MCP policy.
+- Persona edits that raise spend caps, add recipients, add chains, or add paid tools require fresh approval.
+- WhatsApp receipts include both `agent_id` and `persona_id` so the owner can see which persona spent money.
+- Revoking a persona immediately disables its payment authority, even if the agent runtime still has an active session.
