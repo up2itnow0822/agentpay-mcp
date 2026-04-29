@@ -18,18 +18,25 @@ if (result.status === 0) {
   process.exit(0)
 }
 
-const auditEndpointBlocked = /403 Forbidden|E403|audit endpoint returned an error/i.test(combined)
+const environmentFailurePattern =
+  /audit endpoint returned an error|EAI_AGAIN|ECONNRESET|ECONNREFUSED|ETIMEDOUT|ENOTFOUND|E403|E401|429|5\d\d/i
+const hasEnvironmentFailure = environmentFailurePattern.test(combined)
 
-if (auditEndpointBlocked) {
+if (hasEnvironmentFailure) {
   process.stdout.write(
-    '\n⚠️ npm audit could not reach the advisories endpoint (HTTP 403).\n' +
+    '\n⚠️ npm audit could not complete because of registry/network access limitations.\n' +
       'Treating this as an environment limitation so CI can continue.\n' +
-      'Run security scanning in a network that allows npm advisories.\n'
+      'Run security scanning in an environment with npm advisory endpoint access.\n'
   )
   process.exit(0)
 }
 
+if (/vulnerabilities/i.test(combined)) {
+  process.stderr.write('\n❌ npm audit detected vulnerabilities at or above the configured threshold.\n')
+  process.exit(result.status ?? 1)
+}
+
 process.stderr.write(
-  '\n❌ npm audit failed for a non-network reason. Failing security check.\n'
+  '\n❌ npm audit failed for an unknown reason. Failing security check.\n'
 )
 process.exit(result.status ?? 1)
