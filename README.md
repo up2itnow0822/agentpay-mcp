@@ -17,6 +17,8 @@ The MCP ecosystem now has 97M+ monthly downloads and 10,000+ active servers — 
 
 ✅ Integrated into **[NVIDIA/NeMo-Agent-Toolkit-Examples](https://github.com/NVIDIA/NeMo-Agent-Toolkit-Examples/pull/17)** (PR #17 merged) — payment infrastructure for NVIDIA's official agent toolkit.
 
+📌 x402 ecosystem listing context is tracked in [`docs/x402-ecosystem-submission.md`](docs/x402-ecosystem-submission.md).
+
 ## Who Uses agentpay-mcp?
 
 agentpay-mcp is built for three buyer personas who all share the same problem: autonomous agents spending money without controls.
