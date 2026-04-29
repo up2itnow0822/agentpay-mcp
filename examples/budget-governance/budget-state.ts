@@ -47,12 +47,25 @@ export class BudgetState {
       },
       remainingSessionUsd: this.round(Math.max(0, this.limits.sessionCapUsd - this.spentTotalUsd)),
       paymentsLastHour: this.paymentTimestamps.length,
-      limits: this.limits,
+      limits: {
+        sessionCapUsd: this.round(this.limits.sessionCapUsd),
+        perCallCapUsd: this.round(this.limits.perCallCapUsd),
+        categoryCapsUsd: {
+          data: this.round(this.limits.categoryCapsUsd.data),
+          compute: this.round(this.limits.categoryCapsUsd.compute),
+          infra: this.round(this.limits.categoryCapsUsd.infra),
+        },
+        maxPaymentsPerHour: this.limits.maxPaymentsPerHour,
+      },
     };
   }
 
   authorizeSpend(amountUsd: number, category: SpendCategory, now = Date.now()): PaymentDecision {
     this.pruneWindow(now);
+
+    if (!Number.isFinite(amountUsd) || amountUsd <= 0) {
+      return this.reject('Denied: amount must be a finite number greater than zero.', now);
+    }
 
     const currentCategorySpend = this.spentByCategoryUsd[category];
 
