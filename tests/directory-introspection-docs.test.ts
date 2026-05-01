@@ -15,6 +15,7 @@ describe('directory introspection readiness docs', () => {
       'tools/list',
       'x402_pay',
       'glama.json',
+      'https://glama.ai/mcp/servers/up2itnow0822/claw-pay-mcp',
     ]) {
       expect(doc).toContain(required);
     }
@@ -25,7 +26,7 @@ describe('directory introspection readiness docs', () => {
       'does not create or manage a hot wallet by default',
       'does not ask a catalog to custody keys',
       'AGENT_PRIVATE_KEY stays local',
-      'Do not claim a live directory listing until the page can be verified by URL',
+      'do not claim a live Smithery listing until Smithery verifies it',
     ]) {
       expect(doc).toContain(required);
     }

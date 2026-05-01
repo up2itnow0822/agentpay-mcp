@@ -1,6 +1,6 @@
 {
   "name": "agentpay-mcp",
-  "version": "4.1.5",
+  "version": "4.1.6",
   "mcpName": "io.github.up2itnow0822/agentpay",
   "description": "AgentPay MCP Server - Non-custodial x402 payment layer for AI agents. Multi-chain wallets, spending limits, and machine-to-machine payments. Patent Pending.",
   "main": "dist/index.js",
@@ -50,7 +50,7 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/up2itnow0822/agentpay-mcp"
+    "url": "git+https://github.com/up2itnow0822/agentpay-mcp.git"
   },
   "author": "AgentNexus",
   "engines": {

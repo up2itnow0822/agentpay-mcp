@@ -74,4 +74,4 @@ This is a catalog metadata file, not a hosting custody model. Hosted directory o
 
 ## Listing status
 
-As of 2026-05-01, Glama and Smithery public pages were not fetchable from this runtime (`web_fetch` failed for Glama and Smithery returned a Vercel security checkpoint). Do not claim a live directory listing until the page can be verified by URL. The verified live paths today are npm, GitHub, repository metadata (`glama.json`, `smithery.yaml`, `Dockerfile`), and the open AgentPay MCP PR carrying this readiness note.
+As of 2026-05-01, the Glama listing is live at `https://glama.ai/mcp/servers/up2itnow0822/claw-pay-mcp` and returned HTTP 200 during validation. The current Glama slug still reflects the older `claw-pay-mcp` crawl identity, so keep `glama.json`, the npm package name, and the MCP `mcpName` aligned for the next catalog refresh. Smithery listing URLs checked today returned HTTP 404, so do not claim a live Smithery listing until Smithery verifies it. The verified live paths today are npm, GitHub, Glama, repository metadata (`glama.json`, `smithery.yaml`, `Dockerfile`), and the open AgentPay MCP PR carrying this readiness note.
