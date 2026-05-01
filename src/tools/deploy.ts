@@ -8,7 +8,7 @@ import { privateKeyToAccount } from 'viem/accounts';
 import { base, baseSepolia } from 'viem/chains';
 import { deployWallet } from 'agentwallet-sdk';
 import { getConfig } from '../utils/client.js';
-import { textContent, formatAddress, explorerAddressUrl, explorerTxUrl, chainName, formatError } from '../utils/format.js';
+import { textContent, explorerAddressUrl, explorerTxUrl, chainName, formatError } from '../utils/format.js';
 
 // ─── Schema ────────────────────────────────────────────────────────────────
 

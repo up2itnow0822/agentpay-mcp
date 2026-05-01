@@ -246,7 +246,7 @@ export async function handleX402SessionStart(
     // The signMessage function uses viem's wallet client, signing locally with the agent's key
     const signMessage = async (message: string): Promise<string> => {
       // Access the walletClient from the wallet instance for local signing
-      const wc = (wallet as unknown as { walletClient: { signMessage: (args: { message: string }) => Promise<string> } }).walletClient;
+      const wc = (wallet as unknown as { walletClient: { signMessage: (_args: { message: string }) => Promise<string> } }).walletClient;
       return wc.signMessage({ message });
     };
 
