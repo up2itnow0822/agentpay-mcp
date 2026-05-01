@@ -18,6 +18,7 @@ import { z } from 'zod';
 import { createX402Client } from 'agentwallet-sdk';
 import { getWallet, getConfig } from '../utils/client.js';
 import { textContent, formatError, chainName } from '../utils/format.js';
+import { supportedX402NetworksForChainId } from '../utils/x402-networks.js';
 import {
   createSession,
   lookupSession,
@@ -179,6 +180,7 @@ export async function handleX402SessionStart(
     const x402Client = createX402Client(wallet, {
       autoPay: true,
       maxRetries: 1,
+      supportedNetworks: supportedX402NetworksForChainId(config.chainId),
       globalPerRequestMax: maxPaymentWei,
       onBeforePayment: (req) => {
         const amount = BigInt(req.amount);

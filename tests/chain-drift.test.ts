@@ -56,4 +56,13 @@ describe('x402 chain-drift compatibility', () => {
       );
     }
   });
+
+  it('rejects TVM chain identifiers with explicit fail-closed guidance', () => {
+    Object.assign(process.env, REQUIRED_ENV, { CHAIN_ID: 'tvm:-3' });
+    _resetSingletons();
+
+    expect(() => loadConfig()).toThrow(
+      'Unsupported CHAIN_ID: "tvm:-3". AgentPay MCP currently supports 8453 (Base Mainnet) and 84532 (Base Sepolia) for x402 exact payments.'
+    );
+  });
 });

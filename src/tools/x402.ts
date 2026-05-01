@@ -12,8 +12,91 @@ import { z } from 'zod';
 import { createX402Client } from 'agentwallet-sdk';
 import { getWallet, getConfig } from '../utils/client.js';
 import { textContent, formatError, chainName } from '../utils/format.js';
+import {
+  describeSupportedX402Networks,
+  isTvmOrTonNetwork,
+  supportedX402NetworksForChainId,
+} from '../utils/x402-networks.js';
 import { findSessionForUrl, buildSessionHeaders } from './session.js';
 import { recordSessionCall } from '../session/manager.js';
+
+type X402PaymentAccept = {
+  scheme?: string;
+  network?: string;
+  asset?: string;
+  amount?: string;
+  payTo?: string;
+};
+
+type X402PaymentRequired = {
+  x402Version?: number;
+  accepts?: X402PaymentAccept[];
+};
+
+function parsePaymentRequiredFromHeader(headerValue: string | null): X402PaymentRequired | null {
+  if (!headerValue) return null;
+
+  try {
+    const decoded = Buffer.from(headerValue, 'base64').toString('utf8');
+    const parsed = JSON.parse(decoded) as X402PaymentRequired;
+    return Array.isArray(parsed.accepts) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function parsePaymentRequiredFromBody(responseText: string): X402PaymentRequired | null {
+  try {
+    const parsed = JSON.parse(responseText) as X402PaymentRequired;
+    return Array.isArray(parsed.accepts) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function describeUnsupported402(
+  input: X402PayInput,
+  response: Response,
+  responseText: string,
+  chainId: number
+): string {
+  const requirements =
+    parsePaymentRequiredFromHeader(response.headers.get('payment-required')) ??
+    parsePaymentRequiredFromHeader(response.headers.get('x-payment-required')) ??
+    parsePaymentRequiredFromBody(responseText);
+
+  const supportedNetworks = describeSupportedX402Networks(chainId);
+  const offeredNetworks = Array.from(
+    new Set((requirements?.accepts ?? []).map((req) => req.network).filter((network): network is string => Boolean(network)))
+  );
+  const offeredSchemes = Array.from(
+    new Set((requirements?.accepts ?? []).map((req) => req.scheme).filter((scheme): scheme is string => Boolean(scheme)))
+  );
+  const tvmDetected = offeredNetworks.some(isTvmOrTonNetwork);
+
+  let out = `❌ **Unsupported x402 Payment Requirement - Failed Closed**\n\n`;
+  out += `  URL:       ${input.url}\n`;
+  out += `  Method:    ${input.method ?? 'GET'}\n`;
+  out += `  Status:    ${response.status} ${response.statusText}\n`;
+  out += `  Supported: ${supportedNetworks}\n`;
+  out += `  Offered:   ${offeredNetworks.length > 0 ? offeredNetworks.join(', ') : 'not parseable'}\n`;
+  if (offeredSchemes.length > 0) out += `  Schemes:   ${offeredSchemes.join(', ')}\n`;
+  out += `\nAgentPay MCP did not sign or send a payment. The server returned HTTP 402, ` +
+    `but none of the offered x402 payment options matched the configured AgentPay network.\n`;
+
+  if (tvmDetected) {
+    out += `\nTVM/TON exact-payment requirements are currently watch-only. AgentPay must add ` +
+      `explicit support for TVM signing, account deployment, gas, jettons, facilitator settlement, ` +
+      `and receipt audit rows before these payments can be enabled.\n`;
+  }
+
+  out += `\nGuidance: fund and publish a Base-compatible x402 exact option, or keep this ` +
+    `endpoint disabled for AgentPay MCP until TVM support ships deliberately.\n`;
+  out += `\n📄 **402 Response Body**\n`;
+  out += '```\n' + responseText.slice(0, 4000) + (responseText.length > 4000 ? '\n... [truncated]' : '') + '\n```';
+
+  return out;
+}
 
 // ─── Schema ────────────────────────────────────────────────────────────────
 
@@ -212,6 +295,7 @@ export async function handleX402Pay(
     const x402Client = createX402Client(wallet, {
       autoPay: true,
       maxRetries: 1,
+      supportedNetworks: supportedX402NetworksForChainId(config.chainId),
       // If cap is set, use it as globalPerRequestMax
       globalPerRequestMax: maxPaymentWei,
       onBeforePayment: (req, url) => {
@@ -263,6 +347,13 @@ export async function handleX402Pay(
     const displayText = truncated
       ? responseText.slice(0, MAX_RESPONSE_LEN) + '\n\n... [response truncated]'
       : responseText;
+
+    if (response.status === 402 && !paymentMade) {
+      return {
+        content: [textContent(describeUnsupported402(input, response, responseText, config.chainId))],
+        isError: true,
+      };
+    }
 
     let out = `🌐 **x402 Fetch Result**\n\n`;
     out += `  URL:     ${input.url}\n`;
