@@ -1,0 +1,1 @@
+AgentPay MCP v4.1.6 started. Wallet: 0x0000000000000000000000000000000000000000 | Chain: 8453 (Base Mainnet) | Session TTL: 3600s
