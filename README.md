@@ -95,6 +95,7 @@ AgentPay MCP is built for enterprise MCP deployments where supply chain security
 - **x402 MCP funding UX.** For hosted fund-link and managed-wallet comparisons, use the [x402 MCP funding UX benchmark](docs/x402-mcp-funding-ux-benchmark.md) to keep onboarding speed separate from approval gates, daily caps, auditability, and non-custodial controls.
 - **Directory introspection readiness.** For Glama, Smithery, and other MCP catalogs, use the [directory introspection readiness note](docs/directory-introspection-readiness.md) for verified `npx`, Docker, MCP name, and non-custodial metadata paths.
 - **x402-native vs Stripe-proxy MCP.** For builders comparing AgentPay MCP with emerging Stripe-proxy MCP repos, use the [x402-native vs Stripe-proxy note](docs/x402-native-vs-stripe-proxy.md) to keep approval gates, spend caps, audit rows, and non-custodial signing separate from proxy billing claims.
+- **Hosted x402 proxy verification.** Before an agent pays a hosted x402 MCP gateway, use the [hosted x402 proxy buyer checklist](docs/hosted-x402-proxy-verification.md) to verify `payment-required` headers, non-zero `payTo`, network and asset allowlists, approval state, spend cap, audit correlation, and pooled-token lock-in.
 - **WhatsApp and SMB agent controls.** For channel-native paid agents, use the [WhatsApp and SMB paid-agent controls recipe](docs/whatsapp-smb-agent-controls.md).
 - **Channel-agent affiliate payout controls.** For Axon-style affiliate and referral revenue shares, use the [channel-agent affiliate controls spec](docs/channel-agent-affiliate-controls.md) to keep payout caps, per-contact approval, audit rows, and optional x402 settlement separate from paid tool spend approval.
 - **x402 chain drift.** AgentPay MCP tracks the x402 Foundation paywall-template baseline with `viem` `^2.47.12` or newer, and fails closed for unmapped chains. For PaymentWrapper and paywall template changes, follow the [x402 chain-drift compatibility note](docs/x402-chain-drift-compatibility.md).
@@ -239,6 +240,8 @@ A proxy can help with billing and account aggregation. It does not automatically
 Lightning Wallet MCP is a Bitcoin wallet MCP with Glama-facing badge work and x402 fallback positioning. AgentPay MCP is focused on x402 payment-tool governance: approval gates, hard spend caps, non-custodial local signing, directory metadata, and audit rows tied to paid tool calls.
 
 For the full checklist, see [x402-native AgentPay MCP vs Stripe-proxy MCP patterns](docs/x402-native-vs-stripe-proxy.md).
+
+For hosted paid-MCP gateways, use [Hosted x402 proxy buyer verification checklist](docs/hosted-x402-proxy-verification.md) before signing. It checks `payment-required` headers, `payTo`, chain, asset, spend cap, approval gate, audit log, and pooled-token lock-in.
 
 ---
 
