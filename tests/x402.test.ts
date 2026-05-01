@@ -57,9 +57,10 @@ vi.mock('../src/utils/client.js', () => ({
 
 import { handleX402Pay } from '../src/tools/x402.js';
 import { handleGetTransactionHistory } from '../src/tools/history.js';
-import { getActivityHistory } from 'agentwallet-sdk';
+import { createX402Client, getActivityHistory } from 'agentwallet-sdk';
 
 const mockGetActivityHistory = vi.mocked(getActivityHistory);
+const mockCreateX402Client = vi.mocked(createX402Client);
 
 // ─── x402_pay tests ────────────────────────────────────────────────────────
 
@@ -90,6 +91,45 @@ describe('x402_pay tool', () => {
     expect(result.content[0]!.text).toContain('200');
     expect(result.content[0]!.text).toContain('No payment required');
     expect(result.content[0]!.text).toContain('success');
+    expect(mockCreateX402Client).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ supportedNetworks: ['base:8453'] })
+    );
+  });
+
+  it('fails closed with clear guidance for unsupported TVM exact-payment requirements', async () => {
+    const tvmPaymentRequired = {
+      x402Version: 1,
+      accepts: [
+        {
+          scheme: 'exact',
+          network: 'tvm:-3',
+          asset: 'jetton:USDT',
+          amount: '1000000',
+          payTo: 'EQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAM9c',
+          maxTimeoutSeconds: 60,
+        },
+      ],
+    };
+
+    mockX402Fetch.mockResolvedValueOnce(
+      new Response(JSON.stringify(tvmPaymentRequired), {
+        status: 402,
+        statusText: 'Payment Required',
+        headers: { 'Content-Type': 'application/json' },
+      })
+    );
+
+    const result = await handleX402Pay({
+      url: 'https://api.example.com/tvm-paid-data',
+    });
+
+    expect(result.isError).toBe(true);
+    expect(result.content[0]!.text).toContain('Unsupported x402 Payment Requirement - Failed Closed');
+    expect(result.content[0]!.text).toContain('Supported: base:8453');
+    expect(result.content[0]!.text).toContain('Offered:   tvm:-3');
+    expect(result.content[0]!.text).toContain('TVM/TON exact-payment requirements are currently watch-only');
+    expect(result.content[0]!.text).not.toContain('No payment required');
   });
 
   // ─── Happy path: payment made ──────────────────────────────────────────
@@ -101,10 +141,7 @@ describe('x402_pay tool', () => {
     });
 
     // Simulate payment callback being triggered by modifying the client mock
-    const { createX402Client } = await import('agentwallet-sdk');
-    const mockCreate = vi.mocked(createX402Client);
-
-    mockCreate.mockImplementationOnce((_wallet, config) => {
+    mockCreateX402Client.mockImplementationOnce((_wallet, config) => {
       return {
         fetch: async (url: string, init?: RequestInit) => {
           // Simulate the onPaymentComplete callback
@@ -182,10 +219,7 @@ describe('x402_pay tool', () => {
   // ─── Error paths ───────────────────────────────────────────────────────
 
   it('returns error when payment cap would be exceeded', async () => {
-    const { createX402Client } = await import('agentwallet-sdk');
-    const mockCreate = vi.mocked(createX402Client);
-
-    mockCreate.mockImplementationOnce((_wallet, config) => ({
+    mockCreateX402Client.mockImplementationOnce((_wallet, config) => ({
       fetch: async (_url: string, _init?: RequestInit) => {
         if (config?.onBeforePayment) {
           // This should throw when cap is exceeded

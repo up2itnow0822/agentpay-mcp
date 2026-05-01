@@ -1,0 +1,37 @@
+# Smithery deployment config for AgentPay MCP
+# Catalog metadata only. AgentPay MCP remains non-custodial: users provide their own wallet key and wallet address.
+
+runtime: typescript
+startCommand:
+  type: stdio
+  command: node
+  args: ["dist/index.js"]
+configSchema:
+  type: object
+  required:
+    - AGENT_PRIVATE_KEY
+    - AGENT_WALLET_ADDRESS
+  properties:
+    AGENT_PRIVATE_KEY:
+      type: string
+      title: Agent private key
+      description: User-controlled 0x-prefixed agent hot wallet private key. Keep this local to the MCP runtime.
+      format: password
+    AGENT_WALLET_ADDRESS:
+      type: string
+      title: Agent wallet address
+      description: Deployed AgentAccountV2 contract address controlled by the operator.
+    CHAIN_ID:
+      type: string
+      title: Chain ID
+      description: Supported x402 exact-payment chain. Defaults to Base mainnet.
+      enum: ["8453", "84532"]
+      default: "8453"
+    RPC_URL:
+      type: string
+      title: RPC URL
+      description: Optional RPC endpoint. Defaults to public Base RPC when omitted.
+    SESSION_TTL_SECONDS:
+      type: string
+      title: Session TTL seconds
+      description: Optional x402 session token TTL. Defaults to 3600 seconds.

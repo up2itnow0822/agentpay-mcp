@@ -1,0 +1,4 @@
+http_code=200
+effective_url=https://glama.ai/mcp/servers/up2itnow0822/claw-pay-mcp
+contains_agentpay_mcp=True
+contains_up2itnow0822=True

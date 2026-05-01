@@ -77,7 +77,17 @@ export function loadConfig(): AgentPayConfig {
     );
   }
 
-  const chainId = parseInt(process.env['CHAIN_ID'] ?? '8453', 10);
+  const chainIdRaw = process.env['CHAIN_ID'] ?? '8453';
+  if (!/^\d+$/.test(chainIdRaw)) {
+    throw new Error(
+      `Unsupported CHAIN_ID: "${chainIdRaw}". AgentPay MCP currently supports ` +
+      '8453 (Base Mainnet) and 84532 (Base Sepolia) for x402 exact payments. ' +
+      'TVM/TON values such as "tvm:-3" are watch-only and fail closed until ' +
+      'AgentPay adds deliberate TVM signing, gas, jetton, wallet deployment, and settlement support.'
+    );
+  }
+
+  const chainId = parseInt(chainIdRaw, 10);
   if (!CHAIN_MAP[chainId]) {
     throw new Error(
       `Unsupported CHAIN_ID: ${chainId}. Supported values: 8453 (Base Mainnet), 84532 (Base Sepolia).`
