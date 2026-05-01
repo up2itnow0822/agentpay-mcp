@@ -214,7 +214,7 @@ export async function handleX402Pay(
       maxRetries: 1,
       // If cap is set, use it as globalPerRequestMax
       globalPerRequestMax: maxPaymentWei,
-      onBeforePayment: (req, url) => {
+      onBeforePayment: (req, _url) => {
         const amount = BigInt(req.amount);
         if (maxPaymentWei && amount > maxPaymentWei) {
           throw new Error(

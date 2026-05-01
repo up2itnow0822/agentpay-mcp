@@ -8,7 +8,6 @@ import { agentExecute, agentTransferToken } from 'agentwallet-sdk';
 import { getWallet, getConfig } from '../utils/client.js';
 import {
   textContent,
-  formatEth,
   explorerTxUrl,
   chainName,
   formatError,

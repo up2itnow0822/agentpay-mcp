@@ -113,7 +113,7 @@ export interface CreateSessionOptions {
   paymentRecipient: string;
   walletAddress: string;
   /** viem signMessage function — must match walletAddress */
-  signMessage: (message: string) => Promise<string>;
+  signMessage: (_message: string) => Promise<string>;
 }
 
 // ─── Session lookup result ────────────────────────────────────────────────

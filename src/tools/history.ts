@@ -10,7 +10,6 @@ import {
   explorerTxUrl,
   chainName,
   formatEth,
-  formatTimestamp,
   formatError,
 } from '../utils/format.js';
 import type { ActivityEntry } from 'agentwallet-sdk';
