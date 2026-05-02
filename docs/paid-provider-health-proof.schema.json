@@ -1,0 +1,89 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/up2itnow0822/agentpay-mcp/blob/main/docs/paid-provider-health-proof.schema.json",
+  "title": "AgentPay paid-provider health proof",
+  "type": "object",
+  "required": ["schema", "generated_at", "source", "health", "ok", "summary", "providers", "routing"],
+  "properties": {
+    "schema": { "const": "agentpay-paid-provider-health-proof/v1" },
+    "generated_at": { "type": "string", "format": "date-time" },
+    "source": {
+      "type": "object",
+      "required": ["name"],
+      "properties": {
+        "name": { "type": "string", "minLength": 1 },
+        "url": { "type": "string", "format": "uri" },
+        "commit": { "type": "string", "minLength": 7 },
+        "raw_schema": { "type": "string", "minLength": 1 }
+      },
+      "additionalProperties": false
+    },
+    "health": {
+      "type": "object",
+      "required": ["ok"],
+      "properties": {
+        "ok": { "type": "boolean" },
+        "latency_ms": { "type": "number", "minimum": 0 }
+      },
+      "additionalProperties": false
+    },
+    "ok": { "type": "boolean" },
+    "summary": {
+      "type": "object",
+      "required": ["providers_probed", "providers_ok", "providers_failing", "success_rate"],
+      "properties": {
+        "providers_probed": { "type": "integer", "minimum": 0 },
+        "providers_ok": { "type": "integer", "minimum": 0 },
+        "providers_failing": { "type": "integer", "minimum": 0 },
+        "success_rate": { "type": "number", "minimum": 0, "maximum": 1 }
+      },
+      "additionalProperties": false
+    },
+    "providers": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["provider_id", "status", "stale_streak", "receipt_state", "verified"],
+        "properties": {
+          "provider_id": { "type": "string", "minLength": 1 },
+          "capability": { "type": "string", "minLength": 1 },
+          "capability_id": { "type": "string", "minLength": 1 },
+          "status": { "enum": ["ok", "failed", "stale", "unknown"] },
+          "stale_streak": { "type": "integer", "minimum": 0 },
+          "receipt_state": { "enum": ["verified", "pending_acceptance_verified", "missing", "invalid", "unverified"] },
+          "receipt_id": { "type": "string", "minLength": 1 },
+          "verified": { "type": "boolean" },
+          "latency_ms": { "type": "number", "minimum": 0 },
+          "error": { "type": "string", "minLength": 1 },
+          "x402_payment": {
+            "type": "object",
+            "required": ["scheme", "network", "asset", "payTo"],
+            "properties": {
+              "scheme": { "const": "exact" },
+              "network": { "type": "string", "minLength": 1 },
+              "asset": { "type": "string", "minLength": 1 },
+              "payTo": { "type": "string", "pattern": "^0x[a-fA-F0-9]{40}$" },
+              "amountRequired": { "type": "string", "pattern": "^[1-9][0-9]*$" },
+              "maxAmountRequired": { "type": "string", "pattern": "^[1-9][0-9]*$" },
+              "resource": { "type": "string", "format": "uri" },
+              "facilitator": { "type": "string", "minLength": 1 }
+            },
+            "additionalProperties": false
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    "routing": {
+      "type": "object",
+      "required": ["fail_closed", "decision", "reason"],
+      "properties": {
+        "fail_closed": { "const": true },
+        "decision": { "enum": ["allow", "deny", "degraded"] },
+        "reason": { "type": "array", "items": { "type": "string", "minLength": 1 } }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

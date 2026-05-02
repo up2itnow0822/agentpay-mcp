@@ -3,7 +3,7 @@
 [![npm version](https://img.shields.io/npm/v/agentpay-mcp.svg)](https://www.npmjs.com/package/agentpay-mcp)
 [![Glama MCP Server](https://img.shields.io/badge/glama.ai-MCP%20server-1ee495?logo=githubsponsors&logoColor=1ee495&labelColor=0a0a0a)](https://glama.ai/mcp/servers/up2itnow0822/claw-pay-mcp)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-195%20passing-brightgreen.svg)](tests/)
+[![Tests](https://img.shields.io/badge/tests-219%20passing-brightgreen.svg)](tests/)
 [![Patent Pending](https://img.shields.io/badge/patent-pending-orange.svg)](https://uspto.gov)
 
 **Compatible with x402 V1/V2 + Stripe MPP — protocol-agnostic spend controls.**
@@ -99,6 +99,7 @@ AgentPay MCP is built for enterprise MCP deployments where supply chain security
 - **Paid MCP discovery and budget response.** For SettleGrid-style discovery, metering, and budget-platform comparisons, use the [paid MCP discovery and budget response](docs/settlegrid-paid-mcp-discovery-response.md) to separate directory discovery from x402 buyer authorization.
 - **Buyer-flow parity for one-command x402 tools.** For AgentScore Pay-style buyer CLI comparisons, use the [AgentPay buyer-flow parity checklist](docs/agentpay-buyer-flow-parity.md) to prove discover, check, dry-run, pay, spend caps, typed payment errors, quota envelopes, no-charge failures, idempotency, MCP exposure, and audit before signing.
 - **Paid MCP gateway hardening.** For create-mcpay-style Worker scaffolds, use the [paid MCP gateway hardening checklist](docs/paid-mcp-gateway-hardening.md) to test signup, challenge parsing, key minting, atomic billing, scope defaults, no-charge validation failures, and buyer audit rows.
+- **Paid-provider health proof.** For Voidly-style public provider health feeds, use the [paid-provider health proof checklist](docs/paid-provider-health-proof.md) to verify provider success rate, stale streaks, receipt state, x402 network, asset, payTo, and fail-closed routing before signing.
 - **WhatsApp and SMB agent controls.** For channel-native paid agents, use the [WhatsApp and SMB paid-agent controls recipe](docs/whatsapp-smb-agent-controls.md).
 - **Channel-agent affiliate payout controls.** For Axon-style affiliate and referral revenue shares, use the [channel-agent affiliate controls spec](docs/channel-agent-affiliate-controls.md) to keep payout caps, per-contact approval, audit rows, and optional x402 settlement separate from paid tool spend approval.
 - **x402 chain drift.** AgentPay MCP tracks the x402 Foundation paywall-template baseline with `viem` `^2.47.12` or newer, and fails closed for unmapped chains. For PaymentWrapper and paywall template changes, follow the [x402 chain-drift compatibility note](docs/x402-chain-drift-compatibility.md).

@@ -1,0 +1,104 @@
+{
+  "schema": "agentpay-paid-provider-health-proof/v1",
+  "generated_at": "2026-05-02T21:26:24.103Z",
+  "source": {
+    "name": "Voidly Pay public pay-health feed",
+    "url": "https://raw.githubusercontent.com/voidly-ai/voidly-pay/main/pay-health/latest.json",
+    "commit": "a907e56db0782e43ff36adf448e493d5632fba42",
+    "raw_schema": "voidly-pay-network-health/v1"
+  },
+  "health": {
+    "ok": true,
+    "latency_ms": 720
+  },
+  "ok": false,
+  "summary": {
+    "providers_probed": 5,
+    "providers_ok": 2,
+    "providers_failing": 3,
+    "success_rate": 0.4
+  },
+  "providers": [
+    {
+      "provider_id": "did:voidly:Ck56rQkhsBe3bJa62bg81t",
+      "capability": "echo.text-1777170057372",
+      "capability_id": "4f862bbb-050b-47a6-a189-71a23d10b936",
+      "status": "failed",
+      "stale_streak": 207,
+      "receipt_state": "missing",
+      "verified": false,
+      "latency_ms": 61778,
+      "error": "hire did not reach claimed state"
+    },
+    {
+      "provider_id": "did:voidly:3bzjV3jSMCuTwZ6NRzrS8m",
+      "capability": "echo.text-1777170066728",
+      "capability_id": "ea0ac3a8-b35c-44c2-bf76-4c964c8dd559",
+      "status": "failed",
+      "stale_streak": 207,
+      "receipt_state": "missing",
+      "verified": false,
+      "latency_ms": 61721,
+      "error": "hire did not reach claimed state"
+    },
+    {
+      "provider_id": "did:voidly:AsAVzZ2dtMrntgGRco8KkW",
+      "capability": "hash.sha256",
+      "capability_id": "e00a3caf-5090-4414-aab9-89e5420bf871",
+      "status": "ok",
+      "stale_streak": 0,
+      "receipt_state": "pending_acceptance_verified",
+      "receipt_id": "22640d76-9eca-4730-bbbc-b10e42e7a736",
+      "verified": true,
+      "latency_ms": 13750,
+      "x402_payment": {
+        "scheme": "exact",
+        "network": "base-sepolia",
+        "asset": "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
+        "payTo": "0x1111111111111111111111111111111111111111",
+        "maxAmountRequired": "800",
+        "resource": "https://api.voidly.example/pay/hash.sha256"
+      }
+    },
+    {
+      "provider_id": "did:voidly:Eg8JvTNrBLcpbX3r461jJB",
+      "capability": "hash.sha256",
+      "capability_id": "1b32805f-07e0-426e-a7a2-53ac41396303",
+      "status": "ok",
+      "stale_streak": 0,
+      "receipt_state": "pending_acceptance_verified",
+      "receipt_id": "df261343-afc2-49f4-8f25-4fc32e291d9e",
+      "verified": true,
+      "latency_ms": 8999,
+      "x402_payment": {
+        "scheme": "exact",
+        "network": "base-sepolia",
+        "asset": "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
+        "payTo": "0x2222222222222222222222222222222222222222",
+        "maxAmountRequired": "1000",
+        "resource": "https://api.voidly.example/pay/hash.sha256"
+      }
+    },
+    {
+      "provider_id": "did:voidly:mkt-b-1776622972",
+      "capability": "translate",
+      "capability_id": "af7719a4-f4bf-4a8c-aafb-8c1a7b8e226c",
+      "status": "failed",
+      "stale_streak": 312,
+      "receipt_state": "missing",
+      "verified": false,
+      "latency_ms": 61627,
+      "error": "hire did not reach claimed state"
+    }
+  ],
+  "routing": {
+    "fail_closed": true,
+    "decision": "deny",
+    "reason": [
+      "Provider success_rate is 0.4 across five probed providers.",
+      "Three providers have repeated stale failure streaks.",
+      "Only two providers have verified receipt state.",
+      "Buyer must verify x402 network, asset, and payTo before signing."
+    ]
+  }
+}
