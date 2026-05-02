@@ -19,12 +19,19 @@ describe('buyer flow and paid MCP gateway hardening docs', () => {
       'MCP tools',
       'audit',
       '@agent-score/pay@0.1.0-rc.13',
+      'PaymentRequiredError',
+      'QuotaExceededError',
+      'TokenExpiredError',
+      'X-Quota-*',
+      'retry_after_quota_reset',
+      'no-charge failure semantics',
       'Do not claim AgentPay MCP has a one-command buyer CLI',
     ]) {
       expect(buyerDoc).toContain(required);
     }
     expect(buyerSource).toContain('verifyX402BuyerFlow');
     expect(buyerSource).toContain('createX402IdempotencyKey');
+    expect(buyerSource).toContain('classifyX402PaymentError');
   });
 
   it('documents create-mcpay gateway hardening checks as testable controls', () => {
@@ -47,5 +54,7 @@ describe('buyer flow and paid MCP gateway hardening docs', () => {
   it('links both response artifacts from the README', () => {
     expect(readme).toContain('docs/agentpay-buyer-flow-parity.md');
     expect(readme).toContain('docs/paid-mcp-gateway-hardening.md');
+    expect(readme).toContain('typed payment errors');
+    expect(readme).toContain('quota envelopes');
   });
 });

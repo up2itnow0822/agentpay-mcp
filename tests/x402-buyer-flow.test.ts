@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { createX402IdempotencyKey, verifyX402BuyerFlow } from '../src/utils/x402-buyer-flow.js';
+import { classifyX402PaymentError, createX402IdempotencyKey, verifyX402BuyerFlow } from '../src/utils/x402-buyer-flow.js';
 
 const signer = '0x2222222222222222222222222222222222222222';
 const payTo = '0x1111111111111111111111111111111111111111';
@@ -22,6 +22,20 @@ const baseFlow = {
   maxSpendAtomic: '25000',
   dryRunCompleted: true,
   approvalState: 'approved' as const,
+  typedError: {
+    name: 'PaymentRequiredError' as const,
+    noCharge: true,
+  },
+  quota: {
+    limit: '100',
+    remaining: '99',
+    resetAt: '2026-05-02T10:00:00Z',
+    sourceHeaders: {
+      'X-Quota-Limit': '100',
+      'X-Quota-Remaining': '99',
+      'X-Quota-Reset': '2026-05-02T10:00:00Z',
+    },
+  },
   mcpTools: ['x402_pay', 'check_budget', 'set_spend_policy', 'get_transaction_history', 'queue_approval'],
   audit: {
     destination: 'otel',
@@ -46,6 +60,21 @@ describe('x402 buyer-flow parity helper', () => {
       idempotency: true,
       mcpExposure: true,
       audit: true,
+      typedErrors: true,
+      retryability: true,
+      quotaEnvelope: true,
+      noChargeFailures: true,
+    });
+    expect(result.recovery).toEqual({
+      errorName: 'PaymentRequiredError',
+      retryability: 'retry_after_payment',
+      noCharge: true,
+      quotaVisible: true,
+    });
+    expect(result.envelope.spend).toEqual({
+      maxSpendAtomic: '25000',
+      amountRequiredAtomic: '10000',
+      remainingAfterPaymentAtomic: '15000',
     });
   });
 
@@ -61,6 +90,14 @@ describe('x402 buyer-flow parity helper', () => {
       },
       dryRunCompleted: false,
       approvalState: 'pending',
+      typedError: {
+        name: 'QuotaExceededError',
+        noCharge: false,
+      },
+      quota: {
+        limit: '10',
+        remaining: '11',
+      },
       mcpTools: ['x402_pay'],
       audit: {},
     });
@@ -75,11 +112,38 @@ describe('x402 buyer-flow parity helper', () => {
         'Challenge amount exceeds the buyer max spend cap.',
         'Buyer flow must complete a dry-run plan before signing.',
         'Buyer flow approval state must be approved or not_required before signing; received pending.',
+        'Typed payment errors must explicitly preserve no-charge failure semantics before retry or operator action.',
+        'Quota envelope remaining must not exceed quota limit.',
         'MCP exposure is missing required AgentPay tool: check_budget.',
         'MCP exposure is missing required AgentPay tool: set_spend_policy.',
         'MCP exposure is missing required AgentPay tool: get_transaction_history.',
         'Buyer flow audit must include destination, correlationId, and receiptSink.',
       ])
     );
+  });
+
+  it('maps typed payment errors to deterministic recovery guidance', () => {
+    expect(classifyX402PaymentError({ name: 'PaymentRequiredError', noCharge: true })).toBe('retry_after_payment');
+    expect(classifyX402PaymentError({ name: 'QuotaExceededError', noCharge: true }, { remaining: '0', resetAt: '2026-05-02T10:00:00Z' })).toBe(
+      'retry_after_quota_reset'
+    );
+    expect(classifyX402PaymentError({ name: 'TokenExpiredError', noCharge: true })).toBe('refresh_token_then_retry');
+    expect(classifyX402PaymentError({ name: 'SpendLimitExceededError', noCharge: true })).toBe('do_not_retry');
+    expect(classifyX402PaymentError({ name: 'UnknownPaymentError', noCharge: true })).toBe('operator_review');
+  });
+
+  it('fails closed when a quota error omits the quota envelope', () => {
+    const result = verifyX402BuyerFlow({
+      ...baseFlow,
+      typedError: {
+        name: 'QuotaExceededError',
+        noCharge: true,
+      },
+      quota: undefined,
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.recovery.retryability).toBe('operator_review');
+    expect(result.failures).toContain('QuotaExceededError must include quota visibility from X-Quota-* headers or an equivalent envelope.');
   });
 });
