@@ -1,0 +1,40 @@
+{
+  "schema_version": "2026-05-03.agentpay-mcp.directory-proof.v1",
+  "name": "AgentPay MCP",
+  "package": "agentpay-mcp",
+  "mcp_name": "io.github.up2itnow0822/agentpay",
+  "repository": "https://github.com/up2itnow0822/agentpay-mcp",
+  "homepage": "https://github.com/up2itnow0822/agentpay-mcp#readme",
+  "description": "Non-custodial x402 payment, budget, and receipt tools for MCP clients.",
+  "install": {
+    "npx": {
+      "command": "npx",
+      "args": ["-y", "agentpay-mcp"]
+    },
+    "docker": {
+      "build": "docker build -t agentpay-mcp:registry-check .",
+      "run": "docker run --rm -i -e AGENT_WALLET_ADDRESS=0x0000000000000000000000000000000000000000 agentpay-mcp:registry-check"
+    }
+  },
+  "metadata_files": [
+    "glama.json",
+    "smithery.yaml",
+    "llms.txt",
+    "docs/directory-introspection-readiness.md",
+    "docs/mcp-registry-listing-proof.md"
+  ],
+  "listing_proofs": {
+    "glama": "https://glama.ai/mcp/servers/up2itnow0822/claw-pay-mcp",
+    "npm": "https://www.npmjs.com/package/agentpay-mcp"
+  },
+  "custody_model": "operator_supplied_non_custodial_wallet",
+  "supported_x402_networks": [
+    { "chain_id": 8453, "network": "base", "purpose": "production" },
+    { "chain_id": 84532, "network": "base-sepolia", "purpose": "test" }
+  ],
+  "do_not_use_when": [
+    "The buyer expects the MCP directory to custody private keys.",
+    "The paid endpoint offers only unsupported networks.",
+    "The buyer cannot enforce a spend cap before signing."
+  ]
+}

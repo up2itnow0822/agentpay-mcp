@@ -95,18 +95,14 @@ export type X402SessionStartInput = z.infer<typeof X402SessionStartSchema>;
 export const x402SessionStartTool = {
   name: 'x402_session_start',
   description:
-    'Establish an x402 V2 payment session: make a SINGLE on-chain payment and receive ' +
-    'a cryptographically signed session token. All subsequent calls to the same endpoint ' +
-    'within the session lifetime use x402_session_fetch — no additional payments required. ' +
-    'Agents pay once per session rather than once per API call. ' +
-    'Session tokens are signed locally by your wallet key (non-custodial). ' +
-    'Returns a session_id you pass to x402_session_fetch for all future calls.',
+    'Use when a paid endpoint supports a reusable x402 session or entitlement. Makes one capped payment, stores a non-custodial signed session token, and returns a session_id for x402_session_fetch. ' +
+    'Do not use for providers without session semantics, unknown networks, missing spend caps, or calls where the buyer cannot store and audit the returned mcp-session-id/session_id.',
   inputSchema: {
     type: 'object' as const,
     properties: {
       endpoint: {
         type: 'string',
-        description: 'Base URL to establish a session for (e.g., "https://api.example.com/v1")',
+        description: 'Base URL to establish a paid session for. For Streamable HTTP MCP gateways, initialize before tools/list or tools/call.',
       },
       scope: {
         type: 'string',
@@ -124,7 +120,7 @@ export const x402SessionStartTool = {
       },
       max_payment_eth: {
         type: 'string',
-        description: 'Maximum ETH to pay for this session. Rejects if price exceeds this.',
+        description: 'Maximum ETH-equivalent payment cap for opening the session. The call fails closed before signing if the required payment exceeds this cap.',
       },
       method: {
         type: 'string',
@@ -135,7 +131,7 @@ export const x402SessionStartTool = {
       headers: {
         type: 'object',
         additionalProperties: { type: 'string' },
-        description: 'Additional request headers',
+        description: 'Additional request headers for the initial paid request. Do not put private keys here.',
       },
       body: {
         type: 'string',
@@ -341,21 +337,18 @@ export type X402SessionFetchInput = z.infer<typeof X402SessionFetchSchema>;
 export const x402SessionFetchTool = {
   name: 'x402_session_fetch',
   description:
-    'Make an HTTP request within an established x402 V2 session — NO payment required. ' +
-    'The session token (signed by your wallet) is automatically attached to the request. ' +
-    'The server recognises your session and grants access without a new on-chain payment. ' +
-    'Requires a session_id from x402_session_start. ' +
-    'Returns an error if the session has expired (call x402_session_start again to renew).',
+    'Use after x402_session_start returns a valid session_id. Injects the stored session token and makes a covered request without a new payment. ' +
+    'Do not use before initialize/session creation, as a payment bypass, after expiry, or for URLs outside the session scope.',
   inputSchema: {
     type: 'object' as const,
     properties: {
       session_id: {
         type: 'string',
-        description: 'Session ID from x402_session_start',
+        description: 'Session ID returned by x402_session_start. Required so AgentPay can attach the correct session token.',
       },
       url: {
         type: 'string',
-        description: 'URL to fetch (must be covered by the session)',
+        description: 'Absolute URL to fetch. Must be covered by the session scope or the call fails closed.',
       },
       method: {
         type: 'string',
@@ -366,15 +359,15 @@ export const x402SessionFetchTool = {
       headers: {
         type: 'object',
         additionalProperties: { type: 'string' },
-        description: 'Additional headers (session token is injected automatically)',
+        description: 'Additional request headers. The session token is injected automatically; do not supply private keys.',
       },
       body: {
         type: 'string',
-        description: 'Request body for POST/PUT/PATCH',
+        description: 'Request body for POST/PUT/PATCH covered by this paid session.',
       },
       timeout_ms: {
         type: 'number',
-        description: 'Timeout in milliseconds (default: 30000)',
+        description: 'Request timeout in milliseconds (default: 30000). The call returns an error instead of retrying payment on timeout.',
         default: 30000,
       },
     },
