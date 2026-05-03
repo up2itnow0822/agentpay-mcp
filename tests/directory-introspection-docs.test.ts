@@ -59,7 +59,7 @@ describe('directory introspection readiness docs', () => {
       'Lightning Wallet MCP comparison',
       'Glama MCP Server',
       'docs/x402-native-vs-stripe-proxy.md',
-      'agentpay-mcp@4.1.8',
+      'agentpay-mcp@4.1.9',
     ]) {
       expect(`${proxyDoc}\n${readme}`).toContain(required);
     }

@@ -1,6 +1,6 @@
 {
   "name": "agentpay-mcp",
-  "version": "4.1.8",
+  "version": "4.1.9",
   "mcpName": "io.github.up2itnow0822/agentpay",
   "description": "AgentPay MCP Server - Non-custodial x402 payment layer for AI agents. Multi-chain wallets, spending limits, and machine-to-machine payments. Patent Pending.",
   "main": "dist/index.js",
@@ -32,7 +32,8 @@
     "typecheck": "tsc --noEmit",
     "lint": "eslint src/ tests/ --config eslint.config.mjs",
     "security": "node scripts/security-check.mjs",
-    "prepublishOnly": "npm run clean && npm run build && npm run typecheck"
+    "prepublishOnly": "npm run clean && npm run build && npm run typecheck && npm run smoke:clean-install",
+    "smoke:clean-install": "node scripts/clean-install-x402-smoke.mjs"
   },
   "keywords": [
     "mcp",
@@ -62,11 +63,11 @@
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.0.4",
     "agentwallet-sdk": "^6.2.1",
-    "viem": "^2.47.12",
+    "viem": "2.48.7",
     "zod": "^3.22.4"
   },
   "overrides": {
-    "viem": "^2.47.12"
+    "viem": "2.48.7"
   },
   "devDependencies": {
     "@types/node": "^20.11.0",
