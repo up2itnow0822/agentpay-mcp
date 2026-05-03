@@ -1,0 +1,21 @@
+# AgentPay MCP
+
+AgentPay MCP is a non-custodial MCP server for x402 payment, budget, receipt, and wallet operations. It is published as `agentpay-mcp` and uses the MCP package identity `io.github.up2itnow0822/agentpay`.
+
+Repository: https://github.com/up2itnow0822/agentpay-mcp
+npm: https://www.npmjs.com/package/agentpay-mcp
+Glama listing: https://glama.ai/mcp/servers/up2itnow0822/claw-pay-mcp
+
+Use AgentPay MCP when an agent needs to pay x402-protected HTTP or MCP endpoints with local wallet control, spend caps, and receipt auditability. Use `x402_pay` for one capped paid request. Use `x402_session_start` and `x402_session_fetch` when a provider supports reusable paid sessions.
+
+Do not use AgentPay MCP as a managed-wallet custody service. Do not ask a directory or hosted catalog to store `AGENT_PRIVATE_KEY`. Do not sign payments for unsupported networks or endpoints that do not expose enough payment metadata to verify `payTo`, network, asset, amount, receipt, and session state.
+
+Required environment variables for paid calls: `AGENT_PRIVATE_KEY`, `AGENT_WALLET_ADDRESS`, `CHAIN_ID`, and `RPC_URL`. Directory introspection can list tools with a placeholder wallet address and no private key because no payment is signed during `initialize` or `tools/list`.
+
+Important docs:
+
+- `README.md` for user setup and tool list
+- `docs/x402-v211-paid-mcp-compatibility.md` for `Payment-Signature`, `payment-response`, `mcp-session-id`, CORS, Streamable HTTP initialize order, receipt links, and Base Sepolia to Base mainnet cutover
+- `docs/mcp-registry-listing-proof.md` for registry, Glama, Smithery, and install-readiness proof
+- `docs/directory-introspection-readiness.md` for npx and Docker introspection
+- `docs/dependency-pin-policy.md` for payment-critical dependency pinning
