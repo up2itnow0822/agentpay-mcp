@@ -117,7 +117,7 @@ import {
 
 const SERVER_INFO = {
   name: 'agentpay-mcp',
-  version: '4.1.15',
+  version: '4.1.16',
 };
 
 const SERVER_CAPABILITIES = {
@@ -390,7 +390,7 @@ async function main(): Promise<void> {
 
   // Log to stderr (not stdout — stdout is reserved for MCP protocol)
   process.stderr.write(
-    `AgentPay MCP v4.1.15 started. ` +
+    `AgentPay MCP v4.1.16 started. ` +
     `Wallet: ${process.env['AGENT_WALLET_ADDRESS'] ?? '(not configured)'} | ` +
     `Chain: ${process.env['CHAIN_ID'] ?? '8453 (Base Mainnet)'} | ` +
     `Session TTL: ${process.env['SESSION_TTL_SECONDS'] ?? '3600'}s\n`
