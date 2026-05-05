@@ -1,0 +1,54 @@
+{
+  "schema": "agentpay-wallet-action-preflight/v1",
+  "source": {
+    "name": "merx-mcp market signal",
+    "repo": "nicosmall503/merx-mcp",
+    "evidenceUrl": "https://github.com/nicosmall503/merx-mcp",
+    "observedAt": "2026-05-05T01:10:00.000Z"
+  },
+  "action": {
+    "kind": "resource_purchase",
+    "chainNamespace": "tvm",
+    "chainId": "tron-mainnet",
+    "asset": "TRX",
+    "amount": "12.5",
+    "recipient": "TAllowlistedRecipient111111111111111111111",
+    "nonce": "simulation-required-before-nonce-lock",
+    "irreversible": true
+  },
+  "simulation": {
+    "required": true,
+    "status": "passed",
+    "simulationId": "merx-style-tron-resource-sim-2026-05-05",
+    "expectedOutcome": "Buy bandwidth or energy for one allowlisted wallet action without transferring custody.",
+    "resourceEstimate": {
+      "feeAsset": "TRX",
+      "maxNetworkFee": "1.0",
+      "energy": 25000,
+      "bandwidth": 600
+    }
+  },
+  "policy": {
+    "perActionSpendCap": "25",
+    "dailyChainSpendCap": "100",
+    "allowedRecipients": ["TAllowlistedRecipient111111111111111111111"],
+    "allowedAssets": ["TRX", "USDT", "USDC", "USDD"],
+    "resourceCaps": {
+      "maxNetworkFee": "2.5",
+      "maxEnergy": 50000,
+      "maxBandwidth": 1000
+    },
+    "requireHumanApproval": true
+  },
+  "approvalCopy": {
+    "title": "Approve TRON wallet resource purchase?",
+    "summary": "AgentPay detected an irreversible wallet-action request. Simulation passed and policy caps are satisfied.",
+    "lineItems": [
+      "Recipient: TAllowlistedRecipient111111111111111111111",
+      "Amount: 12.5 TRX, cap 25 TRX per action",
+      "Simulation: merx-style-tron-resource-sim-2026-05-05 passed",
+      "Resource cost: max 1.0 TRX network fee, 25,000 energy, 600 bandwidth"
+    ],
+    "irreversibleWarning": "Signing will authorize an irreversible TRON resource purchase. Decline if recipient, amount, or resource estimate differs from the intended task."
+  }
+}

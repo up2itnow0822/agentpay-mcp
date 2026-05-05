@@ -1,0 +1,43 @@
+{
+  "source": "https://x402-sol.cryptorugmuncher.workers.dev/.well-known/x402",
+  "checked_at": "2026-05-04T01:59:55Z",
+  "serviceName": "Rug Munch Intelligence",
+  "x402Version": 2,
+  "paymentHeader": "Payment-Signature",
+  "receiptHeader": "payment-response",
+  "networks": [
+    {
+      "network": "eip155:8453",
+      "name": "Base Mainnet",
+      "gateway": "https://x402-base.cryptorugmuncher.workers.dev",
+      "namespace": "eip155"
+    },
+    {
+      "network": "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp",
+      "name": "Solana Mainnet",
+      "gateway": "https://x402-sol.cryptorugmuncher.workers.dev",
+      "namespace": "solana"
+    }
+  ],
+  "facilitator": "https://facilitator.payai.network",
+  "settlement": {
+    "custody": "facilitator",
+    "description": "Live profile names PayAI facilitator and advertises Base plus Solana gateways. Buyer agents still need settlement, receipt, and refund consistency checks before signing."
+  },
+  "trial": {
+    "enabled": false,
+    "description": "Top-level profile says no free trials while endpoint rows mention one free call. Treat this as a policy consistency check before payment."
+  },
+  "refund": {
+    "supported": true,
+    "mode": "automatic",
+    "description": "Capability list advertises auto_refund. Buyers should require receipt-level refund state before relying on it."
+  },
+  "manifests": {
+    "wellKnownX402": "https://x402-sol.cryptorugmuncher.workers.dev/.well-known/x402",
+    "glama": "https://github.com/Rug-Munch-Media-LLC/x402-gateway-solana/blob/main/glama.json",
+    "smithery": "https://github.com/Rug-Munch-Media-LLC/x402-gateway-solana/blob/main/smithery.json",
+    "mcpCatalog": "https://x402-sol.cryptorugmuncher.workers.dev/mcp",
+    "openapi": "https://x402-sol.cryptorugmuncher.workers.dev/openapi.json"
+  }
+}

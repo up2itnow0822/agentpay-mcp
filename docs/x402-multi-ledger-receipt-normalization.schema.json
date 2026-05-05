@@ -1,0 +1,67 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/up2itnow0822/agentpay-mcp/docs/x402-multi-ledger-receipt-normalization.schema.json",
+  "title": "AgentPay x402 multi-ledger receipt",
+  "type": "object",
+  "required": ["schema", "observedAt", "source", "payment", "ledger", "settlement", "verification", "boundary"],
+  "properties": {
+    "schema": { "const": "agentpay-x402-multi-ledger-receipt/v1" },
+    "observedAt": { "type": "string", "format": "date-time" },
+    "source": {
+      "type": "object",
+      "required": ["name"],
+      "properties": {
+        "name": { "type": "string", "minLength": 1 },
+        "repo": { "type": "string" },
+        "evidenceUrl": { "type": "string" },
+        "pushedAt": { "type": "string", "format": "date-time" }
+      }
+    },
+    "payment": {
+      "type": "object",
+      "required": ["x402Version", "paymentHeader", "receiptHeader"],
+      "properties": {
+        "x402Version": { "type": "string" },
+        "paymentHeader": { "const": "Payment-Signature" },
+        "receiptHeader": { "const": "payment-response" }
+      }
+    },
+    "ledger": {
+      "type": "object",
+      "required": ["label", "namespace"],
+      "properties": {
+        "label": { "type": "string" },
+        "namespace": { "enum": ["eip155", "xrpl", "tvm", "solana", "other"] },
+        "chainId": {}
+      }
+    },
+    "settlement": {
+      "type": "object",
+      "required": ["asset", "target"],
+      "properties": {
+        "asset": { "type": "string" },
+        "target": { "type": "string" },
+        "reference": { "type": "string" }
+      }
+    },
+    "verification": {
+      "type": "object",
+      "required": ["status", "checkedAt"],
+      "properties": {
+        "status": { "enum": ["verified", "pending", "unsupported_refused", "failed", "unknown"] },
+        "verifier": { "type": "string" },
+        "checkedAt": { "type": "string", "format": "date-time" }
+      }
+    },
+    "boundary": {
+      "type": "object",
+      "required": ["custody", "nonCustodial", "description"],
+      "properties": {
+        "custody": { "enum": ["non-custodial", "facilitator", "managed", "unknown"] },
+        "nonCustodial": { "type": "boolean" },
+        "description": { "type": "string" }
+      }
+    },
+    "unsupportedLedgerRefusal": { "type": "string" }
+  }
+}

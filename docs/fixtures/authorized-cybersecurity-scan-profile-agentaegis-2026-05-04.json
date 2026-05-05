@@ -1,0 +1,43 @@
+{
+  "schema": "agentpay-authorized-cybersecurity-scan-profile/v1",
+  "generated_at": "2026-05-04T21:25:00.000Z",
+  "scan": {
+    "tool_id": "paid.vulnerability.scan.basic",
+    "category": "vulnerability_scan",
+    "target": "https://example.com",
+    "target_domain": "example.com",
+    "requested_by_agent": "agentpay-demo-security-agent"
+  },
+  "authorization": {
+    "attestation_id": "authz-example-com-2026-05-04",
+    "granted_by": "security-owner@example.com",
+    "granted_at": "2026-05-04T21:00:00.000Z",
+    "expires_at": "2026-05-05T21:00:00.000Z",
+    "allowed_domains": ["example.com"],
+    "allowed_scan_categories": ["vulnerability_scan", "compliance_check"],
+    "proof_uri": "https://example.com/security/scan-authorization/authz-example-com-2026-05-04"
+  },
+  "spend_policy": {
+    "currency": "USD",
+    "per_target_cap_usd": 25,
+    "spent_for_target_usd": 8,
+    "requested_cost_usd": 4,
+    "x402_max_amount_required": "4000000"
+  },
+  "rate_limit": {
+    "window_seconds": 3600,
+    "max_scans_per_window": 3,
+    "scans_used_in_window": 1
+  },
+  "approval_gate": {
+    "fail_closed": true,
+    "requires_human_approval": true,
+    "approved": true,
+    "prompt": "Approve x402 payment for vulnerability scan against authorized target example.com with a 4 USD request and 25 USD per-target cap."
+  },
+  "audit_receipt": {
+    "receipt_id": "x402-scan-example-com-2026-05-04-001",
+    "retention_days": 365,
+    "language": "Paid cybersecurity scan executed for an authorized target with spend cap checks, x402 receipt metadata, rate-limit state, and target authorization retained for audit."
+  }
+}

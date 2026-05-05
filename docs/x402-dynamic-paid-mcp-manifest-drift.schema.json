@@ -1,0 +1,193 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/up2itnow0822/agentpay-mcp/docs/x402-dynamic-paid-mcp-manifest-drift.schema.json",
+  "title": "dynamic paid MCP manifest snapshot",
+  "type": "object",
+  "required": [
+    "snapshotId",
+    "sourceUrl",
+    "capturedAt",
+    "x402Version",
+    "organization",
+    "primaryNetwork",
+    "supportedNetworks",
+    "hasPayTo",
+    "mcp",
+    "trial",
+    "pricing",
+    "directories"
+  ],
+  "properties": {
+    "snapshotId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "sourceUrl": {
+      "type": "string",
+      "format": "uri"
+    },
+    "capturedAt": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "commitSha": {
+      "type": "string"
+    },
+    "x402Version": {
+      "oneOf": [
+        {
+          "type": "number"
+        },
+        {
+          "type": "string"
+        }
+      ]
+    },
+    "organization": {
+      "type": "string",
+      "minLength": 1
+    },
+    "primaryNetwork": {
+      "type": "string",
+      "minLength": 1
+    },
+    "supportedNetworks": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": [
+          "network",
+          "name",
+          "gateway"
+        ],
+        "properties": {
+          "network": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "gateway": {
+            "type": "string",
+            "format": "uri"
+          }
+        }
+      }
+    },
+    "facilitator": {
+      "type": "string"
+    },
+    "hasPayTo": {
+      "type": "boolean"
+    },
+    "capabilities": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "mcp": {
+      "type": "object",
+      "required": [
+        "totalTools"
+      ],
+      "properties": {
+        "totalTools": {
+          "type": "number",
+          "minimum": 0
+        },
+        "totalServices": {
+          "type": "number",
+          "minimum": 0
+        },
+        "protocol": {
+          "type": "string"
+        },
+        "catalog": {
+          "type": "string",
+          "format": "uri"
+        }
+      }
+    },
+    "trial": {
+      "type": "object",
+      "required": [
+        "enabled",
+        "description"
+      ],
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "description": {
+          "type": "string"
+        }
+      }
+    },
+    "pricing": {
+      "type": "object",
+      "required": [
+        "endpointCount",
+        "endpointsWithPrice",
+        "endpointsWithPriceAtomic",
+        "distinctPrices"
+      ],
+      "properties": {
+        "endpointCount": {
+          "type": "number",
+          "minimum": 0
+        },
+        "endpointsWithPrice": {
+          "type": "number",
+          "minimum": 0
+        },
+        "endpointsWithPriceAtomic": {
+          "type": "number",
+          "minimum": 0
+        },
+        "minimumPriceUsd": {
+          "type": "string"
+        },
+        "distinctPrices": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "directories": {
+      "type": "object",
+      "required": [
+        "wellKnownX402",
+        "frameworks"
+      ],
+      "properties": {
+        "wellKnownX402": {
+          "type": "string",
+          "format": "uri"
+        },
+        "openapi": {
+          "type": "string",
+          "format": "uri"
+        },
+        "documentation": {
+          "type": "string",
+          "format": "uri"
+        },
+        "mcpCatalog": {
+          "type": "string",
+          "format": "uri"
+        },
+        "frameworks": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string",
+            "format": "uri"
+          }
+        }
+      }
+    }
+  }
+}

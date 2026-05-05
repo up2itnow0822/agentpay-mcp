@@ -1,0 +1,53 @@
+{
+  "schema": "agentpay-paid-tool-quality-proof/v1",
+  "generated_at": "2026-05-04T21:20:00.000Z",
+  "source": {
+    "name": "Strale-style scored paid MCP tool",
+    "url": "https://github.com/strale-io/strale",
+    "commit": "market-intel-2026-05-04",
+    "raw_score_field": "sqs"
+  },
+  "tool": {
+    "id": "web3.balance.lookup",
+    "name": "Web3 balance lookup",
+    "provider_id": "provider.strale.example",
+    "capability": "web3"
+  },
+  "score": {
+    "current": 92,
+    "maximum": 100,
+    "min_required": 85,
+    "measured_at": "2026-05-04T21:18:00.000Z",
+    "stale_after_seconds": 900,
+    "dimensions": {
+      "reliability": 94,
+      "availability": 91,
+      "receipt_integrity": 93,
+      "policy_fit": 89
+    }
+  },
+  "provider_health": {
+    "status": "ok",
+    "success_rate_24h": 0.98,
+    "last_success_at": "2026-05-04T21:19:00.000Z",
+    "stale_streak": 0,
+    "receipt_state": "verified"
+  },
+  "x402_payment": {
+    "scheme": "exact",
+    "network": "base",
+    "asset": "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
+    "payTo": "0x1111111111111111111111111111111111111111",
+    "maxAmountRequired": "50000"
+  },
+  "approval_gate": {
+    "fail_closed": true,
+    "requires_human_approval": true,
+    "decision": "allow",
+    "reason": [
+      "Quality score is current and above buyer threshold.",
+      "Provider health snapshot is fresh and receipt verified.",
+      "x402 payment metadata matches buyer allowlist."
+    ]
+  }
+}
