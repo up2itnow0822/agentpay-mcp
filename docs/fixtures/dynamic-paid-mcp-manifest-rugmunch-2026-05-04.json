@@ -1,0 +1,67 @@
+{
+  "snapshotId": "rugmunch-x402-2026-05-04T05-18Z",
+  "sourceUrl": "https://x402-sol.cryptorugmuncher.workers.dev/.well-known/x402",
+  "capturedAt": "2026-05-04T05:35:00Z",
+  "commitSha": "ab67483adb2585e475b5e2bcf37389a739e2ad97",
+  "x402Version": 2,
+  "organization": "Rug Munch Intelligence",
+  "primaryNetwork": "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp",
+  "supportedNetworks": [
+    {
+      "network": "eip155:8453",
+      "name": "Base Mainnet",
+      "gateway": "https://x402-base.cryptorugmuncher.workers.dev"
+    },
+    {
+      "network": "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp",
+      "name": "Solana Mainnet",
+      "gateway": "https://x402-sol.cryptorugmuncher.workers.dev"
+    }
+  ],
+  "facilitator": "https://facilitator.payai.network",
+  "hasPayTo": true,
+  "capabilities": [
+    "crypto_data",
+    "mcp_tools",
+    "multi_chain",
+    "free_trial",
+    "no_api_key",
+    "instant_settlement",
+    "auto_refund"
+  ],
+  "mcp": {
+    "totalTools": 184,
+    "totalServices": 28,
+    "protocol": "2025-03-26",
+    "catalog": "https://x402-sol.cryptorugmuncher.workers.dev/mcp"
+  },
+  "trial": {
+    "enabled": false,
+    "description": "No free trials - pay per call from $0.01 USDC"
+  },
+  "pricing": {
+    "endpointCount": 30,
+    "endpointsWithPrice": 30,
+    "endpointsWithPriceAtomic": 30,
+    "minimumPriceUsd": "$0.01",
+    "distinctPrices": [
+      "$0.01",
+      "$0.02",
+      "$0.03",
+      "$0.05"
+    ]
+  },
+  "directories": {
+    "wellKnownX402": "https://x402-sol.cryptorugmuncher.workers.dev/.well-known/x402",
+    "openapi": "https://x402-sol.cryptorugmuncher.workers.dev/openapi.json",
+    "documentation": "https://x402-sol.cryptorugmuncher.workers.dev/docs",
+    "mcpCatalog": "https://x402-sol.cryptorugmuncher.workers.dev/mcp",
+    "frameworks": {
+      "openai": "https://x402-sol.cryptorugmuncher.workers.dev/openai-tools",
+      "anthropic": "https://x402-sol.cryptorugmuncher.workers.dev/anthropic-tools",
+      "gemini": "https://x402-sol.cryptorugmuncher.workers.dev/gemini-tools",
+      "langchain": "https://x402-sol.cryptorugmuncher.workers.dev/langchain-tools",
+      "mcp": "https://x402-sol.cryptorugmuncher.workers.dev/mcp-tools"
+    }
+  }
+}

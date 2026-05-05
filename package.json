@@ -1,6 +1,6 @@
 {
   "name": "agentpay-mcp",
-  "version": "4.1.10",
+  "version": "4.1.15",
   "mcpName": "io.github.up2itnow0822/agentpay",
   "description": "AgentPay MCP Server - Non-custodial x402 payment layer for AI agents. Multi-chain wallets, spending limits, and machine-to-machine payments. Patent Pending.",
   "main": "dist/index.js",
@@ -16,6 +16,7 @@
     "docs/*.md",
     "docs/*.json",
     "docs/fixtures/*.json",
+    "examples/smithery-paid-mcp-installation/*.md",
     "Dockerfile",
     "smithery.yaml",
     "glama.json",
