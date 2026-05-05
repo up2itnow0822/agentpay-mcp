@@ -19,3 +19,7 @@ Important docs:
 - `docs/mcp-registry-listing-proof.md` for registry, Glama, Smithery, and install-readiness proof
 - `docs/directory-introspection-readiness.md` for npx and Docker introspection
 - `docs/dependency-pin-policy.md` for payment-critical dependency pinning
+
+- `docs/agentpay-five-tool-parity-proof.md` and `docs/agentpay-five-tool-parity-proof.json` for search/check/fetch/wallet/pay buyer-flow parity without hosted-session custody
+- `docs/agentpay-escrow-reputation-boundary.md` for separating x402 payment authorization from escrow, identity, reputation, and work proof
+- `docs/paid-mcp-proxy-discovery-readiness.md` and `docs/agentpay-paid-proxy-discovery-listing.json` for paid-proxy and directory listing submissions

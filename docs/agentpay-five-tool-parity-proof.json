@@ -1,0 +1,56 @@
+{
+  "proof": "agentpay-five-tool-x402-parity",
+  "market_signal": "OpenDexter documents x402_search, x402_check, x402_fetch, x402_wallet, and x402_pay across hosted session wallets and a local signer package.",
+  "agentpay_position": "Buyer-flow parity with local signing, explicit policy checks, and fail-closed unsupported-ledger handling.",
+  "grammar": [
+    {
+      "canonical_tool": "x402_search",
+      "agentpay_equivalent": [
+        "docs/agentpay-machine-payment-directory-listing.json",
+        "docs/mcp-registry-listing-proof.md",
+        "docs/directory-introspection-readiness.md"
+      ],
+      "safety_rule": "Search metadata cannot authorize payment."
+    },
+    {
+      "canonical_tool": "x402_check",
+      "agentpay_equivalent": [
+        "check_budget",
+        "check_spend_limit",
+        "docs/x402-dynamic-paid-mcp-manifest-drift.md",
+        "docs/paid-provider-health-proof.md",
+        "docs/paid-tool-quality-thresholds.md"
+      ],
+      "safety_rule": "Fail closed when network, asset, payTo, price, manifest freshness, or quality proof is missing."
+    },
+    {
+      "canonical_tool": "x402_fetch",
+      "agentpay_equivalent": [
+        "x402_pay",
+        "x402_session_start",
+        "x402_session_fetch"
+      ],
+      "safety_rule": "No automatic payment before policy, approval, cap, receipt, and session checks pass."
+    },
+    {
+      "canonical_tool": "x402_wallet",
+      "agentpay_equivalent": [
+        "get_wallet_info",
+        "set_spend_policy",
+        "deploy_wallet",
+        "x402_session_status"
+      ],
+      "safety_rule": "Private keys remain local and are never stored in directory or proxy metadata."
+    },
+    {
+      "canonical_tool": "x402_pay",
+      "agentpay_equivalent": [
+        "x402_pay",
+        "docs/x402-multi-ledger-receipt-normalization.md",
+        "docs/wallet-action-preflight-profile.md"
+      ],
+      "safety_rule": "Sign only after network, asset, amount, recipient, policy, and approval checks."
+    }
+  ],
+  "unsupported_ledger_policy": "Non-EVM rails remain fail-closed extension points until signer, asset, receipt, refund, and settlement semantics are implemented."
+}
