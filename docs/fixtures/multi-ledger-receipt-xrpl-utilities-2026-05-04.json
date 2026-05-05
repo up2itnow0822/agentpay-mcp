@@ -1,0 +1,35 @@
+{
+  "schema": "agentpay-x402-multi-ledger-receipt/v1",
+  "observedAt": "2026-05-05T01:10:00.000Z",
+  "source": {
+    "name": "XRPL-Utilities MCP market signal",
+    "repo": "XRPL-Utilities/xrpl-utilities-mcp",
+    "evidenceUrl": "https://github.com/XRPL-Utilities/xrpl-utilities-mcp",
+    "pushedAt": "2026-05-05T01:02:00.000Z"
+  },
+  "payment": {
+    "x402Version": "2.x",
+    "paymentHeader": "Payment-Signature",
+    "receiptHeader": "payment-response"
+  },
+  "ledger": {
+    "label": "XRPL extension point",
+    "namespace": "xrpl",
+    "chainId": "xrpl-mainnet"
+  },
+  "settlement": {
+    "asset": "RLUSD or XRP, provider-declared",
+    "target": "unsupported-until-allowlisted"
+  },
+  "verification": {
+    "status": "unsupported_refused",
+    "verifier": "AgentPay buyer policy",
+    "checkedAt": "2026-05-05T01:10:00.000Z"
+  },
+  "boundary": {
+    "custody": "unknown",
+    "nonCustodial": false,
+    "description": "AgentPay does not sign XRPL settlement until signer, asset, target, facilitator, and receipt semantics are explicitly implemented."
+  },
+  "unsupportedLedgerRefusal": "Refused before signing: XRPL x402 rail is visible but not allowlisted. Add ledger namespace, asset parser, settlement target allowlist, verifier, receipt mapping, and non-custodial signer support before retrying."
+}

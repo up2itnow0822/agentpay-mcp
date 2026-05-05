@@ -1,0 +1,41 @@
+{
+  "name": "agentpay-mcp",
+  "title": "AgentPay MCP",
+  "description": "Non-custodial x402 payment controls for AI agents using MCP.",
+  "category": [
+    "mcp-server",
+    "x402",
+    "agent-payments",
+    "non-custodial",
+    "buyer-safety"
+  ],
+  "package": {
+    "manager": "npm",
+    "name": "agentpay-mcp",
+    "install": "npm install agentpay-mcp",
+    "url": "https://www.npmjs.com/package/agentpay-mcp"
+  },
+  "repository": "https://github.com/up2itnow0822/agentpay-mcp",
+  "settlement_wording": "Buyer-side x402 payment-control layer. Current production signing is Base/USDC-oriented; non-EVM rails are fail-closed extension points until signer, asset, settlement, receipt, and refund semantics are implemented.",
+  "supported_claims": {
+    "x402": true,
+    "mcp": true,
+    "non_custodial": true,
+    "human_approval": true,
+    "spend_caps": true,
+    "receipt_logging": true,
+    "managed_custody": false
+  },
+  "proofs": [
+    "docs/x402-chain-neutral-gateway-profile.md",
+    "docs/x402-multi-ledger-receipt-normalization.md",
+    "docs/wallet-action-preflight-profile.md",
+    "docs/x402-dynamic-paid-mcp-manifest-drift.md",
+    "docs/smithery-paid-mcp-installation.md"
+  ],
+  "mcp_config": {
+    "command": "npx",
+    "args": ["agentpay-mcp"],
+    "required_env": ["AGENT_PRIVATE_KEY", "AGENT_WALLET_ADDRESS"]
+  }
+}
