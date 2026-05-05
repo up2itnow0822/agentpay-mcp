@@ -1,0 +1,42 @@
+{
+  "name": "agentpay-mcp",
+  "title": "AgentPay MCP",
+  "role": "buyer-side x402 payment-control layer for paid MCP tools",
+  "package": "agentpay-mcp",
+  "mcp_name": "io.github.up2itnow0822/agentpay",
+  "repository": "https://github.com/up2itnow0822/agentpay-mcp",
+  "npm": "https://www.npmjs.com/package/agentpay-mcp",
+  "install": {
+    "command": "npx",
+    "args": ["agentpay-mcp"],
+    "required_env": ["AGENT_PRIVATE_KEY", "AGENT_WALLET_ADDRESS", "CHAIN_ID", "RPC_URL"]
+  },
+  "supports": [
+    "MCP",
+    "x402 payment execution",
+    "human approval",
+    "per-transaction spend caps",
+    "daily spend caps",
+    "receipt logging",
+    "manifest freshness checks",
+    "provider-health checks",
+    "quality-threshold checks"
+  ],
+  "does_not_provide": [
+    "managed custody",
+    "pooled SaaS token custody",
+    "automatic non-EVM signing",
+    "task outcome verification",
+    "reputation scoring as payment approval"
+  ],
+  "proofs": [
+    "docs/agentpay-five-tool-parity-proof.md",
+    "docs/agentpay-escrow-reputation-boundary.md",
+    "docs/paid-mcp-proxy-discovery-readiness.md",
+    "docs/agentpay-machine-payment-directory-listing.json",
+    "docs/x402-dynamic-paid-mcp-manifest-drift.md",
+    "docs/paid-provider-health-proof.md",
+    "docs/paid-tool-quality-thresholds.md"
+  ],
+  "settlement_wording": "Buyer-side x402 payment controls with local non-custodial signing. Base/USDC-oriented production signing; unsupported non-EVM rails fail closed until signer, asset, receipt, refund, and settlement semantics are implemented."
+}
