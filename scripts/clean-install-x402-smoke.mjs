@@ -1,10 +1,11 @@
 #!/usr/bin/env node
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
 
-const repoRoot = resolve(new URL('..', import.meta.url).pathname);
+const repoRoot = dirname(dirname(fileURLToPath(import.meta.url)));
 const packageJson = JSON.parse(readFileSync(join(repoRoot, 'package.json'), 'utf8'));
 const expectedViem = '2.48.7';
 
@@ -15,17 +16,33 @@ function assert(condition, message) {
 }
 
 function run(command, args, options = {}) {
-  const result = spawnSync(command, args, {
+  let executable = command;
+  let spawnArgs = args;
+  let shell = false;
+  if (process.platform === 'win32' && command === 'npm') {
+    if (process.env['npm_execpath']) {
+      executable = process.execPath;
+      spawnArgs = [process.env['npm_execpath'], ...args];
+    } else {
+      executable = 'npm.cmd';
+      shell = true;
+    }
+  }
+
+  const result = spawnSync(executable, spawnArgs, {
     cwd: options.cwd ?? repoRoot,
     encoding: 'utf8',
     stdio: options.stdio ?? 'pipe',
+    maxBuffer: 10 * 1024 * 1024,
+    shell,
     env: { ...process.env, npm_config_audit: 'false', npm_config_fund: 'false' },
   });
 
-  if (result.status !== 0) {
+  if (result.error || result.status !== 0) {
     const stdout = result.stdout ? `\nstdout:\n${result.stdout}` : '';
     const stderr = result.stderr ? `\nstderr:\n${result.stderr}` : '';
-    throw new Error(`${command} ${args.join(' ')} failed with exit ${result.status}.${stdout}${stderr}`);
+    const cause = result.error ? `${result.error.name}: ${result.error.message}` : `exit ${result.status}`;
+    throw new Error(`${executable} ${spawnArgs.join(' ')} failed with ${cause}.${stdout}${stderr}`);
   }
 
   return result;
@@ -40,7 +57,8 @@ const smokePackDir = join(smokeRoot, 'pack');
 const smokeAppDir = join(smokeRoot, 'consumer');
 
 try {
-  run('mkdir', ['-p', smokePackDir, smokeAppDir]);
+  mkdirSync(smokePackDir, { recursive: true });
+  mkdirSync(smokeAppDir, { recursive: true });
   const pack = run('npm', ['pack', '--json', '--pack-destination', smokePackDir], { cwd: repoRoot });
   const packJson = JSON.parse(pack.stdout);
   const tarball = join(smokePackDir, packJson[0].filename);
@@ -53,8 +71,12 @@ try {
   run('npm', ['install', '--ignore-scripts', '--no-audit', '--no-fund'], { cwd: smokeAppDir });
 
   const smoke = `
+    const fs = require('fs');
     const viemPkg = require('viem/package.json');
+    const agentpayPkg = require('agentpay-mcp/package.json');
+    const agentpayDist = fs.readFileSync(require.resolve('agentpay-mcp'), 'utf8');
     if (viemPkg.version !== '${expectedViem}') throw new Error('resolved viem ' + viemPkg.version);
+    if (!agentpayDist.includes('AgentPay MCP v' + agentpayPkg.version + ' started.')) throw new Error('packed dist banner does not match package version ' + agentpayPkg.version);
     const { createWalletClient, http, parseEther, formatUnits } = require('viem');
     const { privateKeyToAccount } = require('viem/accounts');
     const { base, baseSepolia } = require('viem/chains');
