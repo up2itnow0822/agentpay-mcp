@@ -18,6 +18,10 @@ The MCP ecosystem now has 97M+ monthly downloads and 10,000+ active servers — 
 
 ✅ Integrated into **[NVIDIA/NeMo-Agent-Toolkit-Examples](https://github.com/NVIDIA/NeMo-Agent-Toolkit-Examples/pull/17)** (PR #17 merged) — payment infrastructure for NVIDIA's official agent toolkit.
 
+📌 AgentIndex flagship offer and sandbox payment demo:
+[How agents buy API calls safely](https://up2itnow0822.github.io/OpenClaw-Max-2.0/guides/how-agents-buy-api-calls-safely.md)
+and [AgentPay MCP trust result](https://up2itnow0822.github.io/OpenClaw-Max-2.0/mcp/compare_offer_trust.agentpay-mcp.json).
+
 📌 x402 ecosystem listing context is tracked in [`docs/x402-ecosystem-submission.md`](docs/x402-ecosystem-submission.md).
 
 ## Who Uses agentpay-mcp?
