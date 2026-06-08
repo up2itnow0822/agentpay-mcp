@@ -188,10 +188,47 @@ export function findSessionForUrl(url: string): SessionRecord | undefined {
   if (exact) return exact;
 
   // Try prefix match
-  const prefix = active.find((s) => s.scope === 'prefix' && url.startsWith(s.endpoint));
+  const prefix = active.find((s) => s.scope === 'prefix' && isUrlCoveredBySession(url, s));
   if (prefix) return prefix;
 
   return undefined;
+}
+
+/**
+ * Check if a URL is covered by a session's endpoint + scope.
+ *
+ * Prefix sessions cover the endpoint path itself, query strings on that path,
+ * and descendants below that path. They do not cover raw string lookalikes such
+ * as /v10 for /v1, or host/path prefixes on a different origin.
+ */
+export function isUrlCoveredBySession(
+  url: string,
+  session: { endpoint: string; scope: 'prefix' | 'exact' }
+): boolean {
+  try {
+    const requested = new URL(url);
+    const endpoint = new URL(session.endpoint);
+
+    if (session.scope === 'exact') {
+      return requested.href === endpoint.href;
+    }
+
+    if (requested.origin !== endpoint.origin) {
+      return false;
+    }
+
+    if (endpoint.search && requested.search !== endpoint.search) {
+      return false;
+    }
+
+    const endpointPath = endpoint.pathname.endsWith('/')
+      ? endpoint.pathname
+      : `${endpoint.pathname}/`;
+
+    return requested.pathname === endpoint.pathname || requested.pathname.startsWith(endpointPath);
+  } catch {
+    return false;
+  }
 }
 
 /**

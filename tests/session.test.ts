@@ -902,6 +902,39 @@ describe('Session manager (direct unit tests)', () => {
     expect(found!.scope).toBe('prefix');
   });
 
+  it('findSessionForUrl returns prefix match for endpoint query strings', async () => {
+    await createSession({
+      endpoint: 'https://api.example.com/v1',
+      scope: 'prefix',
+      walletAddress: '0xwallet',
+      paymentTxHash: '0xtx',
+      paymentAmount: 100n,
+      paymentToken: '0x0000000000000000000000000000000000000000',
+      paymentRecipient: '0xrecip',
+      signMessage: makeSignFn(),
+    });
+
+    const found = findSessionForUrl('https://api.example.com/v1?cursor=next');
+    expect(found).toBeDefined();
+    expect(found!.scope).toBe('prefix');
+  });
+
+  it('findSessionForUrl rejects raw string prefix lookalikes', async () => {
+    await createSession({
+      endpoint: 'https://api.example.com/v1',
+      scope: 'prefix',
+      walletAddress: '0xwallet',
+      paymentTxHash: '0xtx',
+      paymentAmount: 100n,
+      paymentToken: '0x0000000000000000000000000000000000000000',
+      paymentRecipient: '0xrecip',
+      signMessage: makeSignFn(),
+    });
+
+    expect(findSessionForUrl('https://api.example.com/v10/users')).toBeUndefined();
+    expect(findSessionForUrl('https://api.example.com/v1.evil/steal')).toBeUndefined();
+  });
+
   it('findSessionForUrl returns undefined for non-matching URL', async () => {
     await createSession({
       endpoint: 'https://api.example.com/v1',
