@@ -1,4 +1,5 @@
 import { readFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
 import { describe, expect, it } from 'vitest';
 
 const doc = readFileSync(new URL('../docs/directory-introspection-readiness.md', import.meta.url), 'utf8');
@@ -66,7 +67,24 @@ describe('directory introspection readiness docs', () => {
   });
 
   it('keeps runtime MCP version aligned with package metadata', () => {
-    expect(indexSource).toContain(`version: '${packageJson.version}'`);
-    expect(indexSource).toContain(`AgentPay MCP v${packageJson.version} started.`);
+    expect(indexSource).toContain('const PACKAGE_VERSION = packageJson.version;');
+    expect(indexSource).toContain('version: PACKAGE_VERSION');
+    expect(indexSource).toContain('AgentPay MCP v${PACKAGE_VERSION} started.');
+  });
+
+  it('prints CLI metadata without starting the MCP server', () => {
+    const version = execFileSync('node', ['dist/index.js', '--version'], {
+      cwd: new URL('..', import.meta.url),
+      encoding: 'utf8',
+    });
+    const help = execFileSync('node', ['dist/index.js', '--help'], {
+      cwd: new URL('..', import.meta.url),
+      encoding: 'utf8',
+    });
+
+    expect(version.trim()).toBe(packageJson.version);
+    expect(help).toContain('Usage:');
+    expect(help).toContain('--version');
+    expect(`${version}\n${help}`).not.toContain('started.');
   });
 });

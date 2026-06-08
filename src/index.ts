@@ -21,6 +21,49 @@ import {
   ListToolsRequestSchema,
   type CallToolRequest,
 } from '@modelcontextprotocol/sdk/types.js';
+import packageJson from '../package.json';
+
+const PACKAGE_VERSION = packageJson.version;
+
+function printHelp(): void {
+  process.stdout.write(
+    [
+      'AgentPay MCP Server',
+      '',
+      'Usage:',
+      '  agentpay-mcp [options]',
+      '',
+      'Options:',
+      '  -h, --help       Show this help message',
+      '  -v, --version    Print the package version',
+      '',
+      'Configuration:',
+      '  AGENT_PRIVATE_KEY       Optional private key for signing payments',
+      '  AGENT_WALLET_ADDRESS    Optional wallet address for display and checks',
+      '  CHAIN_ID                Chain id, defaults to 8453 (Base Mainnet)',
+      '  SESSION_TTL_SECONDS     Session TTL, defaults to 3600',
+      '',
+      'When no metadata flag is provided, the server starts on stdio for MCP clients.',
+      '',
+    ].join('\n')
+  );
+}
+
+function handleCliMetadataFlag(argv: string[]): void {
+  const args = argv.slice(2);
+
+  if (args.includes('--version') || args.includes('-v')) {
+    process.stdout.write(`${PACKAGE_VERSION}\n`);
+    process.exit(0);
+  }
+
+  if (args.includes('--help') || args.includes('-h')) {
+    printHelp();
+    process.exit(0);
+  }
+}
+
+handleCliMetadataFlag(process.argv);
 
 // ─── Tool imports (v1.0.0) ─────────────────────────────────────────────────
 
@@ -117,7 +160,7 @@ import {
 
 const SERVER_INFO = {
   name: 'agentpay-mcp',
-  version: '4.1.17',
+  version: PACKAGE_VERSION,
 };
 
 const SERVER_CAPABILITIES = {
@@ -390,7 +433,7 @@ async function main(): Promise<void> {
 
   // Log to stderr (not stdout — stdout is reserved for MCP protocol)
   process.stderr.write(
-    `AgentPay MCP v4.1.17 started. ` +
+    `AgentPay MCP v${PACKAGE_VERSION} started. ` +
     `Wallet: ${process.env['AGENT_WALLET_ADDRESS'] ?? '(not configured)'} | ` +
     `Chain: ${process.env['CHAIN_ID'] ?? '8453 (Base Mainnet)'} | ` +
     `Session TTL: ${process.env['SESSION_TTL_SECONDS'] ?? '3600'}s\n`
