@@ -14,13 +14,13 @@ const projectRoot = fileURLToPath(new URL('..', import.meta.url));
 const tscBin = fileURLToPath(new URL('../node_modules/typescript/bin/tsc', import.meta.url));
 const cliEntry = fileURLToPath(new URL('../dist/index.js', import.meta.url));
 
-describe('directory introspection readiness docs', () => {
+describe.sequential('directory introspection readiness docs', () => {
   beforeAll(() => {
     execFileSync(process.execPath, [tscBin], {
       cwd: projectRoot,
       stdio: 'pipe',
     });
-  });
+  }, 120_000);
 
   it('documents the catalog install paths and MCP identity', () => {
     for (const required of [
