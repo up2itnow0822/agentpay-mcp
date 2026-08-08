@@ -17,8 +17,10 @@ import {
   isTvmOrTonNetwork,
   supportedX402NetworksForChainId,
 } from '../utils/x402-networks.js';
+import { maxPaymentBaseUnits } from '../utils/payment-cap.js';
 import { findSessionForUrl, buildSessionHeaders } from './session.js';
 import { recordSessionCall } from '../session/manager.js';
+import { enforceSpendPolicy } from './budget.js';
 
 type X402PaymentAccept = {
   scheme?: string;
@@ -272,14 +274,11 @@ export async function handleX402Pay(
 
     // ── Standard x402 payment flow ────────────────────────────────────────
 
-    // Parse optional max payment cap
-    let maxPaymentWei: bigint | undefined;
     if (input.max_payment_eth) {
       const cap = parseFloat(input.max_payment_eth);
       if (isNaN(cap) || cap <= 0) {
         throw new Error(`Invalid max_payment_eth: "${input.max_payment_eth}"`);
       }
-      maxPaymentWei = BigInt(Math.round(cap * 1e18));
     }
 
     // Track payment result
@@ -288,20 +287,38 @@ export async function handleX402Pay(
     let paymentTxHash = '';
     let paymentRecipient = '';
 
-    // Create x402 client with budget controls
+    // Create x402 client with budget controls.
+    // Cap enforcement happens in onBeforePayment using the selected asset's
+    // decimals — never compare USDC base units against ETH-wei.
     const x402Client = createX402Client(wallet, {
       autoPay: true,
       maxRetries: 1,
       supportedNetworks: supportedX402NetworksForChainId(config.chainId),
-      // If cap is set, use it as globalPerRequestMax
-      globalPerRequestMax: maxPaymentWei,
-      onBeforePayment: (req, _url) => {
+      onBeforePayment: async (req, _url) => {
         const amount = BigInt(req.amount);
-        if (maxPaymentWei && amount > maxPaymentWei) {
+        if (input.max_payment_eth) {
+          const maxRaw = maxPaymentBaseUnits(
+            input.max_payment_eth,
+            req.asset,
+            config.chainId
+          );
+          if (amount > maxRaw) {
+            throw new Error(
+              `Payment required (${amount} base units) exceeds max_payment_eth cap ` +
+              `(${maxRaw} base units for asset ${req.asset} = ${input.max_payment_eth}). ` +
+              `Increase max_payment_eth or the payment will not proceed.`
+            );
+          }
+        }
+
+        const policyDecision = await enforceSpendPolicy({
+          merchant: req.payTo,
+          amount,
+        });
+        if (policyDecision.status !== 'approved') {
           throw new Error(
-            `Payment required (${amount} wei) exceeds max_payment_eth cap ` +
-            `(${maxPaymentWei} wei = ${input.max_payment_eth} ETH). ` +
-            `Increase max_payment_eth or the payment will not proceed.`
+            policyDecision.reason ??
+              `x402 payment blocked by spend policy (${policyDecision.status}).`
           );
         }
         return true;

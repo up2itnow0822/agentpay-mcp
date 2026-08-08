@@ -22,7 +22,12 @@ vi.mock('../src/utils/client.js', () => ({
   })),
 }))
 
-import { handleSetSpendPolicy, handleCheckBudget, _resetPolicyStore } from '../src/tools/budget.js'
+import {
+  handleSetSpendPolicy,
+  handleCheckBudget,
+  enforceSpendPolicy,
+  _resetPolicyStore,
+} from '../src/tools/budget.js'
 import { SpendingPolicy, checkBudget } from 'agentwallet-sdk'
 
 const MockSpendingPolicy = vi.mocked(SpendingPolicy)
@@ -100,6 +105,42 @@ describe('set_spend_policy', () => {
 
     expect(result.isError).toBe(true)
     expect(result.content[0].text).toContain('set_spend_policy failed')
+  })
+})
+
+describe('enforceSpendPolicy', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    _resetPolicyStore()
+  })
+
+  it('allows payments when no policy is configured', async () => {
+    await expect(
+      enforceSpendPolicy({
+        merchant: '0xabc',
+        amount: 1,
+      })
+    ).resolves.toEqual({ status: 'approved' })
+  })
+
+  it('invokes the configured SpendingPolicy.check for the scope', async () => {
+    const check = vi.fn().mockResolvedValue({ status: 'rejected', reason: 'blocked' })
+    MockSpendingPolicy.mockImplementation(function() { return { check } } as any)
+
+    await handleSetSpendPolicy({
+      allowedRecipients: ['0xsafe'],
+    })
+
+    const decision = await enforceSpendPolicy({
+      merchant: '0xattacker',
+      amount: 1000,
+    })
+
+    expect(check).toHaveBeenCalledWith({
+      merchant: '0xattacker',
+      amount: 1000,
+    })
+    expect(decision).toEqual({ status: 'rejected', reason: 'blocked', draftId: undefined })
   })
 })
 

@@ -27,6 +27,49 @@ export function _resetPolicyStore(): void {
   _spendingPolicyByScope.clear()
 }
 
+export type SpendPolicyDecision =
+  | { status: 'approved' }
+  | { status: 'rejected' | 'draft'; reason?: string; draftId?: string }
+
+/**
+ * Enforce the in-process spend policy for a payment attempt.
+ * If no policy is configured for the scope, the payment is allowed.
+ */
+export async function enforceSpendPolicy(input: {
+  scopeKey?: string
+  merchant: string
+  /** Base units as bigint or number. BigInt is preferred for large ETH amounts. */
+  amount: number | bigint
+}): Promise<SpendPolicyDecision> {
+  const scopeKey = input.scopeKey?.trim() || DEFAULT_POLICY_SCOPE
+  const policy = _spendingPolicyByScope.get(scopeKey)
+  if (!policy) return { status: 'approved' }
+
+  // SpendingPolicy stores caps as JS numbers; only enforce when amount fits safely.
+  const amountNumber =
+    typeof input.amount === 'bigint' ? Number(input.amount) : input.amount
+  if (!Number.isSafeInteger(amountNumber)) {
+    return {
+      status: 'rejected',
+      reason:
+        'Payment amount exceeds safe numeric range for in-process spend policy checks. ' +
+        'Reduce the amount or clear the spend policy.',
+    }
+  }
+
+  const result = await policy.check({
+    merchant: input.merchant,
+    amount: amountNumber,
+  })
+
+  if (result.status === 'approved') return { status: 'approved' }
+  return {
+    status: result.status,
+    reason: result.reason,
+    draftId: result.draftId,
+  }
+}
+
 // ─── set_spend_policy ──────────────────────────────────────────────────────
 
 export const SetSpendPolicySchema = z.object({
