@@ -1,0 +1,36 @@
+# =============================================================================
+# review-config.yml — per-repo knobs for the Daily Review workflow
+# (.github/workflows/daily-review.yml, contract in .github/CODE_REVIEW.md).
+#
+# SEEDED ONCE, THEN REPO-OWNED: the installer writes this file only if it is
+# absent. After that, this repo's copy is the source of truth — the installer
+# never overwrites it, and edits here affect this repo only. Tune it as false
+# positives appear; this file (plus CODE_REVIEW.md S5) is where a noisy
+# review contract gets quiet.
+# =============================================================================
+
+checks:
+  # Enable CODE_REVIEW.md S6.6 (prompt-injection paths, tool over-permissioning,
+  # unbounded spend loops, value-transfer validation, key handling, idempotency)
+  # — turn on for MCP servers, agent runtimes, and anything on-chain.
+  # This is the ONLY conditional check: every other S6 check (CI status, PR
+  # hygiene, dependency alerts, secret scan, docs drift) runs unconditionally
+  # per CODE_REVIEW.md S6 and has no toggle here.
+  agent_safety: false
+
+# A PR open with no activity for this many days counts toward
+# health.stale_pr_count in the daily report.
+stale_pr_days: 14
+
+# Glob paths (repo-root relative) the reviewer skips entirely — use for
+# generated code, fixtures, or anything not worth scan time.
+ignore_paths: []
+
+# Freeform strings the reviewer MUST respect as do-not-report context, e.g.
+# "the retry loop in sync.js is intentionally unbounded; watchdog kills it".
+# Anything you dismiss twice belongs here or in CODE_REVIEW.md S5.
+notes: []
+
+# Maximum findings listed in one daily report; anything past the cap is
+# summarized in the report body, never silently dropped.
+max_findings: 20
