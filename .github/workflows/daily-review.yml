@@ -1,0 +1,200 @@
+# =============================================================================
+# Daily Review — Layer 1 of the Daily Review + Repair kit (read-only).
+#
+# Runs every day at 07:00 UTC. Reads the repository — code, PRs, full repo
+# health — and writes exactly ONE report issue titled "Daily Review — YYYY-MM-DD"
+# (UTC date), labelled "daily-review", whose body is a short human summary
+# followed by one fenced json block conforming to .github/review-schema.json.
+# A downstream roll-up (Layer 2) and the repair workflow (Layer 3) both parse
+# that issue, so the output contract is binding.
+#
+# Companion files in this repo:
+#   .github/CODE_REVIEW.md              — the review contract this workflow runs
+#   .github/review-schema.json          — the JSON output contract
+#   .github/review-config.yml           — per-repo knobs (checks, ignore_paths, notes)
+#   .github/workflows/daily-repair.yml  — Layer 3; acts on what this layer finds
+#
+# Auth: Claude subscription OAuth via the per-repo secret CLAUDE_CODE_OAUTH_TOKEN.
+# Generate it locally with `claude setup-token`, then:
+#   gh secret set CLAUDE_CODE_OAUTH_TOKEN --repo <owner>/<repo>
+# Tokens last about a year and do NOT auto-renew. ANTHROPIC_API_KEY is not used
+# anywhere in this kit.
+#
+# The github_token input on the claude-code-action step is REQUIRED: scheduled
+# runs fail the OIDC token exchange without it (claude-code-action issues #814
+# and #1017). Do not remove that line.
+#
+# Fail-loud: if the secret is missing or the run errors, this workflow creates
+# or updates an issue labelled "daily-review-failed" — never a silent no-op.
+# A missing "Daily Review — <date>" issue means a failed review, not a clean one.
+# =============================================================================
+
+name: Daily Review
+
+on:
+  schedule:
+    - cron: "0 7 * * *" # 07:00 UTC daily (02:00 CDT / 01:00 CST; cron does not observe DST)
+  workflow_dispatch:
+
+concurrency:
+  group: daily-review
+  cancel-in-progress: false # never cancel a running review; let runs queue
+
+permissions:
+  contents: read # read the code under review
+  issues: write # the one write: the report issue (or the failure issue)
+  pull-requests: read # PR health checks
+  actions: read # workflow-run health checks
+  checks: read # CI check-run status
+  security-events: read # Dependabot/security alerts (S6.3) — without this every run skips the check and is forced PARTIAL, and repair (COMPLETE-only) never acts
+
+jobs:
+  review:
+    name: Daily review
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out repository (full history)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # -----------------------------------------------------------------
+      # Preflight: if the OAuth secret is absent, say so in an issue that
+      # names the exact missing secret, then fail the run. Loud by design.
+      # -----------------------------------------------------------------
+      - name: Preflight — verify CLAUDE_CODE_OAUTH_TOKEN secret
+        id: preflight
+        env:
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          if [ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]; then
+            echo "Preflight OK: CLAUDE_CODE_OAUTH_TOKEN is present."
+            exit 0
+          fi
+          echo "::error::Repository secret CLAUDE_CODE_OAUTH_TOKEN is missing or empty; the daily review cannot run."
+          gh label create daily-review-failed --color B60205 --description "A daily review run failed" --force >/dev/null 2>&1 || true
+          body="Daily Review could not start: the repository secret CLAUDE_CODE_OAUTH_TOKEN is missing or empty.
+
+          To fix:
+          1. On your machine, run: claude setup-token   (needs an active Claude subscription; tokens last about a year and do not auto-renew)
+          2. Set the secret: gh secret set CLAUDE_CODE_OAUTH_TOKEN --repo ${GH_REPO}
+          3. Re-run the review: gh workflow run daily-review.yml --repo ${GH_REPO}
+
+          Failed run: ${RUN_URL}
+
+          This workflow fails loud by design and will report here every morning until the secret is set."
+          existing="$(gh issue list --label daily-review-failed --state open --limit 1 --json number --jq '.[0].number // empty')"
+          if [ -n "${existing}" ]; then
+            gh issue comment "${existing}" --body "${body}"
+            echo "Commented on existing open daily-review-failed issue #${existing}."
+          else
+            gh issue create --title "Daily Review FAILED — missing CLAUDE_CODE_OAUTH_TOKEN secret" --label daily-review-failed --body "${body}"
+            echo "Opened a new daily-review-failed issue."
+          fi
+          exit 1
+
+      # -----------------------------------------------------------------
+      # The review itself. github_token must stay: scheduled runs fail the
+      # OIDC exchange without it (claude-code-action issues #814, #1017).
+      # GH_TOKEN in env lets the allowed gh commands authenticate.
+      # -----------------------------------------------------------------
+      - name: Run daily review
+        id: claude_review
+        uses: anthropics/claude-code-action@v1
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          prompt: |
+            Perform today's scheduled daily review of this repository. You are
+            the Layer 1 reviewer in a three-layer review/repair system; a
+            cross-repo roll-up and a repair workflow both parse your output,
+            so the output contract below is binding.
+
+            CONTRACT
+            - Follow the review contract in .github/CODE_REVIEW.md exactly:
+              severity rubric, evidence standard, refute pass, do-not-report
+              list, and the repo health checklist. Honor the per-repo knobs in
+              .github/review-config.yml if that file exists (enabled checks,
+              ignore_paths, notes). If either file is missing, proceed with
+              sound defaults and record the gap in the "skipped" array of
+              your report.
+            - You are READ-ONLY. Your single permitted write is the report
+              issue described below (plus creating its label if absent).
+              Never commit, push, close, edit, or delete any other issue or
+              PR, and never change repository content.
+
+            OUTPUT (the S7 contract)
+            - Compute today's UTC date with: date -u +%Y-%m-%d
+            - Create exactly ONE issue titled "Daily Review — YYYY-MM-DD"
+              using that UTC date, labelled "daily-review". Create the
+              "daily-review" label first if it does not exist. If an OPEN
+              issue with today's exact title already exists (a re-run), edit
+              that issue's body in place instead of opening a duplicate.
+            - Issue body = a short human summary (overall status, worst
+              finding, one-line repo health) followed by exactly ONE fenced
+              json code block that validates against
+              .github/review-schema.json: schema_version is the constant 1;
+              status is COMPLETE, PARTIAL, or INCOMPLETE; finding severities
+              are P0 | P1 | P2 | P3; suggested_tier is GREEN | YELLOW | RED;
+              required keys are schema_version, repo, date, status, summary,
+              health, findings, skipped.
+
+            STATUS SEMANTICS
+            - COMPLETE: every applicable check ran and its result is recorded.
+            - PARTIAL: the review finished, but one or more checks could not
+              run. List every such check in "skipped" with a concrete reason.
+              Never report health you did not verify.
+            - INCOMPLETE: you could not finish the review. Failing to finish
+              still means emitting the issue: file it with status INCOMPLETE,
+              a summary saying exactly what blocked you, and whatever findings
+              you did verify. An INCOMPLETE report must be louder than a
+              passing one — never go silent.
+
+            SECRETS
+            - If you find a credential, key, or token: report its file
+              location and type only — never the value — always severity P0
+              with suggested_tier RED. Secrets are escalated for rotation,
+              never "fixed".
+          claude_args: |
+            --allowedTools "Read,Grep,Glob,LS,Bash(date:*),Bash(git status:*),Bash(git log:*),Bash(git diff:*),Bash(git show:*),Bash(git branch:*),Bash(git shortlog:*),Bash(gh api:*),Bash(gh issue list:*),Bash(gh issue view:*),Bash(gh issue create:*),Bash(gh issue edit:*),Bash(gh issue comment:*),Bash(gh label list:*),Bash(gh label create:*),Bash(gh pr list:*),Bash(gh pr view:*),Bash(gh pr diff:*),Bash(gh pr checks:*),Bash(gh run list:*),Bash(gh run view:*)"
+
+      # -----------------------------------------------------------------
+      # Failure handler. Skipped when preflight already reported (it files
+      # its own issue before exiting 1), so one failure = one report.
+      # -----------------------------------------------------------------
+      - name: Failure handler — create or update daily-review-failed issue
+        if: ${{ failure() && steps.preflight.outcome == 'success' }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          today="$(date -u +%Y-%m-%d)"
+          gh label create daily-review-failed --color B60205 --description "A daily review run failed" --force >/dev/null 2>&1 || true
+          body="Daily Review FAILED for ${today} (UTC): the workflow errored before producing its report issue.
+
+          Failed run: ${RUN_URL}
+
+          Likely causes (see RUNBOOK.md troubleshooting):
+          - CLAUDE_CODE_OAUTH_TOKEN expired or the subscription is inactive. Tokens last about a year and do not auto-renew: re-run 'claude setup-token' locally and reset the secret.
+          - The github_token: line was removed from the claude-code-action step. Scheduled runs fail the OIDC token exchange without it (claude-code-action issues #814, #1017).
+          - The run hit the 30-minute timeout: raise timeout-minutes, or narrow ignore_paths in .github/review-config.yml.
+          - A command the review needed is not in --allowedTools in this workflow's claude_args.
+
+          No news is NOT good news: treat a missing 'Daily Review — ${today}' issue as a failed review, not a clean one."
+          existing="$(gh issue list --label daily-review-failed --state open --limit 1 --json number --jq '.[0].number // empty')"
+          if [ -n "${existing}" ]; then
+            gh issue comment "${existing}" --body "${body}"
+            echo "Commented on existing open daily-review-failed issue #${existing}."
+          else
+            gh issue create --title "Daily Review FAILED — ${today}" --label daily-review-failed --body "${body}"
+            echo "Opened a new daily-review-failed issue."
+          fi

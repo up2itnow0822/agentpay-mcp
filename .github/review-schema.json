@@ -1,0 +1,175 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://raw.githubusercontent.com/up2itnow0822/daily-review-kit/main/.github/review-schema.json",
+  "title": "Daily Review Report",
+  "description": "Contract for the single fenced json code block in every 'Daily Review — YYYY-MM-DD' issue. The Layer 2 roll-up brief parses this block; a report that does not validate against this schema is treated as a failed review. Emit exactly one such block per issue.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "repo",
+    "date",
+    "status",
+    "summary",
+    "health",
+    "findings",
+    "skipped"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 1,
+      "description": "Schema version of this report. Always the literal integer 1 until this schema file changes it."
+    },
+    "repo": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Repository in owner/name form, e.g. 'up2itnow0822/agentpay-mcp'."
+    },
+    "date": {
+      "type": "string",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$",
+      "description": "UTC date of the review run, YYYY-MM-DD. Matches the date in the issue title 'Daily Review — YYYY-MM-DD'."
+    },
+    "status": {
+      "type": "string",
+      "enum": ["COMPLETE", "PARTIAL", "INCOMPLETE"],
+      "description": "COMPLETE: every enabled check ran. PARTIAL: some checks ran, some were skipped (each skip listed in 'skipped'). INCOMPLETE: the review could not meaningfully run; treat as a failure, never as a clean bill of health."
+    },
+    "summary": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Short human-readable summary of the repo's state today, mirroring the prose above the JSON block."
+    },
+    "health": {
+      "type": "object",
+      "description": "Repo health snapshot. Only report values actually verified this run; put caveats in 'notes'.",
+      "required": [
+        "ci_status",
+        "open_pr_count",
+        "stale_pr_count",
+        "dependency_alerts",
+        "secrets_found",
+        "notes"
+      ],
+      "properties": {
+        "ci_status": {
+          "type": "string",
+          "description": "State of the default branch's most recent CI, e.g. 'passing', 'failing', 'none', 'unknown'."
+        },
+        "open_pr_count": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Number of currently open pull requests."
+        },
+        "stale_pr_count": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Open PRs with no activity for longer than review-config.yml stale_pr_days."
+        },
+        "dependency_alerts": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Count of open dependency/security alerts visible to the reviewer."
+        },
+        "secrets_found": {
+          "type": "boolean",
+          "description": "True if the secret scan found committed secrets. Details go in findings as P0, location and type only — never the value."
+        },
+        "notes": {
+          "type": "string",
+          "description": "Freeform caveats about this snapshot (empty string if none), e.g. 'dependency alerts not visible to this token'."
+        }
+      }
+    },
+    "findings": {
+      "type": "array",
+      "description": "Individual defects, capped at review-config.yml max_findings (overflow is summarized, never silently dropped). Empty array means no findings.",
+      "items": {
+        "type": "object",
+        "required": ["id", "severity", "title", "file", "evidence", "category", "confidence", "suggested_tier"],
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Stable slug of file + problem per CODE_REVIEW.md S7 (e.g. 'src-billing-total-py-float-rounding'). The same defect must get the same id tomorrow — never embed the date, the line number, or the run. The repair layer's 2-attempt lifetime retry budget and the human's dismissals are tracked per finding id across days."
+          },
+          "severity": {
+            "type": "string",
+            "enum": ["P0", "P1", "P2", "P3"],
+            "description": "P0 critical (secrets, data loss, security) through P3 minor."
+          },
+          "title": {
+            "type": "string",
+            "minLength": 1,
+            "description": "One-line description of the defect."
+          },
+          "file": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Repo-root-relative path of the primary affected file."
+          },
+          "line": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "1-based line number in 'file', when a single line is identifiable. Omit otherwise."
+          },
+          "evidence": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Concrete evidence per the CODE_REVIEW.md evidence standard: what was observed and why it is a defect. For secrets: location and type only, never the value."
+          },
+          "category": {
+            "type": "string",
+            "description": "Defect class, e.g. 'security', 'correctness', 'docs-drift', 'dependency'. Freeform."
+          },
+          "confidence": {
+            "type": "string",
+            "enum": ["high", "medium", "low"],
+            "description": "Reviewer's confidence after the refute pass."
+          },
+          "suggested_tier": {
+            "type": "string",
+            "enum": ["GREEN", "YELLOW", "RED"],
+            "description": "Suggested repair tier per REPAIR.md: GREEN may auto-merge, YELLOW waits for a human, RED never merges. Anything touching auth, wallets, signers, or settlement must be RED."
+          }
+        }
+      }
+    },
+    "skipped": {
+      "type": "array",
+      "description": "Every enabled check that did not run this pass, with the reason. Required so PARTIAL/INCOMPLETE runs are loud, never silent. Empty array when nothing was skipped.",
+      "items": {
+        "type": "object",
+        "required": ["check", "reason"],
+        "properties": {
+          "check": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Name of the check that was skipped, e.g. 'secret_scan', 'docs_drift', 'S6.6'."
+          },
+          "reason": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Why it was skipped, e.g. 'timeout budget exhausted', 'tool not in allowedTools'."
+          }
+        }
+      }
+    },
+    "metrics": {
+      "type": "object",
+      "description": "Optional run metrics.",
+      "properties": {
+        "files_scanned": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Number of files the reviewer actually examined."
+        },
+        "duration_minutes": {
+          "type": "number",
+          "minimum": 0,
+          "description": "Wall-clock duration of the review run in minutes."
+        }
+      }
+    }
+  }
+}
