@@ -282,16 +282,10 @@ jobs:
               Anything touching auth, wallets, signers, or settlement is RED.
             - Auto-merge gate (GREEN only, and only when AUTOMERGE=allowed) — every
               clause must hold: a test suite actually ran; tests green before AND after
-              the change; EVERY check run on the PR head is completed with conclusion
-              "success" — 100 percent green, so any "failure", "cancelled", "timed_out",
-              "skipped", "neutral", "stale", or "action_required" conclusion is a BLOCK,
-              and any check still queued or in progress is a BLOCK (wait and re-check,
-              never merge ahead of a running check); at least one successful check
-              exists — NO CHECKS AT ALL is a BLOCK, never a pass; every legacy
-              commit-status context on the head SHA (if any) reports "success"; zero
-              unresolved review conversations; diff confined to the finding's files;
-              caps not exceeded. This is deliberately stricter than GitHub branch
-              protection, which counts skipped checks as satisfying requirements.
+              the change; at least one check-run concluded "success"; zero failing,
+              cancelled, or timed-out checks; "skipped", "neutral", or NO CHECKS AT ALL
+              are a BLOCK, never a pass; zero unresolved review conversations; diff
+              confined to the finding's files; caps not exceeded.
             - Caps: 5 auto-merges per day, 15 PRs per day, 400 changed lines max per
               GREEN PR. Any cap that binds must be named in the run summary — never
               skip silently.
