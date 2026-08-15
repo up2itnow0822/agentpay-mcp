@@ -16,7 +16,7 @@ checks:
   # This is the ONLY conditional check: every other S6 check (CI status, PR
   # hygiene, dependency alerts, secret scan, docs drift) runs unconditionally
   # per CODE_REVIEW.md S6 and has no toggle here.
-  agent_safety: false
+  agent_safety: true
 
 # A PR open with no activity for this many days counts toward
 # health.stale_pr_count in the daily report.
