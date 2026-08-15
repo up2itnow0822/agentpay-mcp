@@ -29,7 +29,13 @@
 
 # Master switch for the repair layer. Must be exactly `true` to allow any
 # repair activity in this repo. Anything else (false, missing, typo) = off.
-repair_enabled: true
+# SHIPS FALSE on purpose: reviews start immediately, but repair stays dark
+# until you deliberately enable it (RUNBOOK step 6: set REPAIR_TOKEN, run the
+# merge-gates script, read a dry run, THEN flip this to true). Without this
+# default, every freshly installed repo would file a "Daily Repair FAILED —
+# missing REPAIR_TOKEN" issue at 09:00 UTC every morning before you ever
+# reached the enable-repair step.
+repair_enabled: false
 
 # Auto-merge switch (GREEN-tier PRs only; YELLOW and RED never self-merge).
 # Must be exactly `true` for the auto-merge gate to even be evaluated.
