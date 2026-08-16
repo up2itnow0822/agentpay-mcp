@@ -74,6 +74,39 @@ export interface OTelSpanCostAttributes {
   spanId?: string
 }
 
+// ─── Kill-callback constraints ─────────────────────────────────────────────
+
+/** Timeout for the circuit-breaker kill callback POST. */
+export const KILL_CALLBACK_TIMEOUT_MS = 10_000
+
+const KILL_CALLBACK_ALLOWED_PROTOCOLS = new Set(['http:', 'https:'])
+
+/**
+ * Validate a kill-callback URL against the rules for outbound webhooks:
+ * must parse as an absolute URL, must use the http: or https: scheme, and
+ * must not embed credentials (userinfo). Returns a human-readable error
+ * message naming the violated rule, or null if the URL is acceptable.
+ *
+ * Applied fail-closed at configuration time (registerPolicy / the
+ * otel_register_budget_policy schema) and again at fire time
+ * (invokeKillCallback) as defense in depth.
+ */
+export function validateKillCallbackUrl(raw: string): string | null {
+  let parsed: URL
+  try {
+    parsed = new URL(raw)
+  } catch {
+    return `killCallbackUrl must be an absolute http(s) URL — "${raw}" is not a valid URL`
+  }
+  if (!KILL_CALLBACK_ALLOWED_PROTOCOLS.has(parsed.protocol)) {
+    return `killCallbackUrl must use the http: or https: scheme — got "${parsed.protocol}"`
+  }
+  if (parsed.username !== '' || parsed.password !== '') {
+    return 'killCallbackUrl must not embed credentials (user:pass@host) — remove the userinfo component'
+  }
+  return null
+}
+
 // ─── In-memory stores ──────────────────────────────────────────────────────
 
 const _policies: Map<string, AgentBudgetPolicy> = new Map()
@@ -96,8 +129,18 @@ export function _resetOTelBudgetState(): void {
 
 /**
  * Register a budget policy for an agent or agent+task combination.
+ *
+ * Fails closed: a policy carrying an invalid killCallbackUrl (non-http(s)
+ * scheme, embedded credentials, or unparseable) is rejected outright rather
+ * than stored with a callback that would be refused at fire time.
  */
 export function registerPolicy(policy: AgentBudgetPolicy): void {
+  if (policy.killCallbackUrl !== undefined) {
+    const urlError = validateKillCallbackUrl(policy.killCallbackUrl)
+    if (urlError) {
+      throw new Error(`Refusing to register budget policy: ${urlError}`)
+    }
+  }
   const key = policyKey(policy.agentId, policy.taskId)
   _policies.set(key, policy)
 }
@@ -202,6 +245,20 @@ export function evaluateSpan(attrs: OTelSpanCostAttributes): BudgetDecision | nu
   return decision
 }
 
+/**
+ * POST the kill decision to the policy's circuit-breaker webhook.
+ *
+ * Failure handling is loud but non-fatal: an invalid URL, timeout
+ * (KILL_CALLBACK_TIMEOUT_MS), or network/HTTP failure is reported in the
+ * returned object (surfaced verbatim in the otel_evaluate_spend result) and
+ * never throws, so a broken webhook cannot crash budget evaluation.
+ *
+ * Retry policy: no in-process retry. Spend evaluation must not block on
+ * webhook health, and every subsequent over-budget span evaluation fires the
+ * callback again, which gives natural at-least-once redelivery while the
+ * breach persists. Callers that need stronger guarantees should act on the
+ * returned ok/error fields.
+ */
 export async function invokeKillCallback(
   policy: AgentBudgetPolicy,
   decision: BudgetDecision
@@ -218,12 +275,24 @@ export async function invokeKillCallback(
     return null
   }
 
+  // Fire-time re-validation (defense in depth — registerPolicy already
+  // rejects these). Refuse to POST rather than let an invalid URL through.
+  const urlError = validateKillCallbackUrl(policy.killCallbackUrl)
+  if (urlError) {
+    return {
+      attempted: false,
+      ok: false,
+      error: `Kill callback not invoked: ${urlError}`,
+    }
+  }
+
   try {
     const response = await fetch(policy.killCallbackUrl, {
       method: 'POST',
       headers: {
         'content-type': 'application/json',
       },
+      signal: AbortSignal.timeout(KILL_CALLBACK_TIMEOUT_MS),
       body: JSON.stringify({
         event: 'agentpay.budget.kill',
         decision,
@@ -307,8 +376,17 @@ export const OTelRegisterPolicySchema = z.object({
     .describe('Action on budget breach: warn, block, or kill (circuit-breaker)'),
   killCallbackUrl: z
     .string()
+    .superRefine((value, ctx) => {
+      const urlError = validateKillCallbackUrl(value)
+      if (urlError) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, message: urlError })
+      }
+    })
     .optional()
-    .describe('Webhook URL to invoke when circuit-breaker trips (kill action)'),
+    .describe(
+      'Webhook URL to invoke when circuit-breaker trips (kill action). ' +
+        'Must be http(s) and must not embed credentials.'
+    ),
 })
 
 export type OTelRegisterPolicyInput = z.infer<typeof OTelRegisterPolicySchema>
@@ -333,7 +411,10 @@ export const otelRegisterPolicyTool = {
         enum: ['warn', 'block', 'kill'],
         description: 'Action on breach',
       },
-      killCallbackUrl: { type: 'string', description: 'Circuit-breaker webhook URL' },
+      killCallbackUrl: {
+        type: 'string',
+        description: 'Circuit-breaker webhook URL (http(s) only, no embedded credentials)',
+      },
     },
     required: ['agentId', 'maxSpendUsd'],
   },

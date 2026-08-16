@@ -8,7 +8,10 @@ import {
   decisionToOTelEvent,
   getDecisionHistory,
   handleOTelEvaluateSpend,
+  handleOTelRegisterPolicy,
+  invokeKillCallback,
   listPolicies,
+  OTelRegisterPolicySchema,
   _resetOTelBudgetState,
 } from '../src/tools/otel-budget.js'
 
@@ -337,6 +340,161 @@ describe('OTel Budget Circuit-Breaker', () => {
         attempted: true,
         ok: true,
         status: 204,
+      })
+    })
+  })
+
+  describe('kill callback URL validation', () => {
+    const killDecision = {
+      agentId: 'agent-001',
+      action: 'kill' as const,
+      accumulatedSpendUsd: 2,
+      budgetLimitUsd: 1,
+      remainingUsd: 0,
+      utilizationPct: 200,
+      reason: 'Budget exceeded',
+      timestamp: Date.now(),
+    }
+
+    it('rejects non-http(s) schemes at registration time', () => {
+      expect(() =>
+        registerPolicy({
+          agentId: 'agent-001',
+          maxSpendUsd: 5.0,
+          windowMs: 0,
+          breachAction: 'kill',
+          killCallbackUrl: 'ftp://198.51.100.7/kill',
+        })
+      ).toThrow(/http: or https:/)
+      expect(listPolicies()).toHaveLength(0)
+    })
+
+    it('rejects embedded credentials at registration time', () => {
+      expect(() =>
+        registerPolicy({
+          agentId: 'agent-001',
+          maxSpendUsd: 5.0,
+          windowMs: 0,
+          breachAction: 'kill',
+          killCallbackUrl: 'https://user:secret@example.com/kill',
+        })
+      ).toThrow(/credentials/)
+      expect(listPolicies()).toHaveLength(0)
+    })
+
+    it('rejects unparseable URLs at registration time', () => {
+      expect(() =>
+        registerPolicy({
+          agentId: 'agent-001',
+          maxSpendUsd: 5.0,
+          windowMs: 0,
+          breachAction: 'kill',
+          killCallbackUrl: 'not a url',
+        })
+      ).toThrow(/not a valid URL/)
+    })
+
+    it('rejects an invalid killCallbackUrl in the tool input schema', () => {
+      const parsed = OTelRegisterPolicySchema.safeParse({
+        agentId: 'agent-001',
+        maxSpendUsd: 5.0,
+        breachAction: 'kill',
+        killCallbackUrl: 'file:///etc/passwd',
+      })
+      expect(parsed.success).toBe(false)
+      if (!parsed.success) {
+        expect(parsed.error.issues[0].message).toMatch(/http: or https:/)
+      }
+    })
+
+    it('returns a tool error instead of registering a policy with a bad callback URL', async () => {
+      const result = await handleOTelRegisterPolicy({
+        agentId: 'agent-001',
+        maxSpendUsd: 5.0,
+        windowMs: 0,
+        breachAction: 'kill',
+        killCallbackUrl: 'ftp://198.51.100.7/kill',
+      })
+      expect(result.isError).toBe(true)
+      expect(result.content[0].text).toMatch(/http: or https:/)
+      expect(listPolicies()).toHaveLength(0)
+    })
+
+    it('refuses to fire the callback for an invalid URL and never fetches', async () => {
+      const fetchMock = vi.fn()
+      global.fetch = fetchMock as typeof global.fetch
+
+      const result = await invokeKillCallback(
+        {
+          agentId: 'agent-001',
+          maxSpendUsd: 1.0,
+          windowMs: 0,
+          breachAction: 'kill',
+          killCallbackUrl: 'http://user:pw@169.254.169.254/latest/meta-data',
+        },
+        killDecision
+      )
+
+      expect(fetchMock).not.toHaveBeenCalled()
+      expect(result).toEqual({
+        attempted: false,
+        ok: false,
+        error: expect.stringMatching(/credentials/),
+      })
+    })
+  })
+
+  describe('kill callback timeout and failure isolation', () => {
+    it('sends the kill callback with an abort timeout signal', async () => {
+      const fetchMock = vi.fn().mockResolvedValue({ ok: true, status: 204 })
+      global.fetch = fetchMock as typeof global.fetch
+
+      registerPolicy({
+        agentId: 'agent-001',
+        maxSpendUsd: 1.0,
+        windowMs: 0,
+        breachAction: 'kill',
+        killCallbackUrl: 'https://example.com/kill',
+      })
+
+      await handleOTelEvaluateSpend({
+        agentId: 'agent-001',
+        costUsd: 1.5,
+        spanId: 'span-1',
+      })
+
+      expect(fetchMock).toHaveBeenCalledTimes(1)
+      const init = fetchMock.mock.calls[0][1] as RequestInit
+      expect(init.signal).toBeInstanceOf(AbortSignal)
+    })
+
+    it('reports a failed kill callback without failing budget evaluation', async () => {
+      const fetchMock = vi
+        .fn()
+        .mockRejectedValue(new Error('The operation was aborted due to timeout'))
+      global.fetch = fetchMock as typeof global.fetch
+
+      registerPolicy({
+        agentId: 'agent-001',
+        maxSpendUsd: 1.0,
+        windowMs: 0,
+        breachAction: 'kill',
+        killCallbackUrl: 'https://example.com/kill',
+      })
+
+      const result = await handleOTelEvaluateSpend({
+        agentId: 'agent-001',
+        costUsd: 1.5,
+        spanId: 'span-1',
+      })
+
+      expect(result.isError).toBeUndefined()
+      const data = JSON.parse(result.content[0].text)
+      expect(data.decision.action).toBe('kill')
+      expect(data.killCallback).toEqual({
+        attempted: true,
+        ok: false,
+        error: expect.stringContaining('timeout'),
       })
     })
   })
