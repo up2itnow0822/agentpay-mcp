@@ -17,7 +17,7 @@
 import { z } from 'zod';
 import { createX402Client } from 'agentwallet-sdk';
 import { getWallet, getConfig } from '../utils/client.js';
-import { textContent, formatError, chainName } from '../utils/format.js';
+import { textContent, formatError, formatUntrustedBody, chainName } from '../utils/format.js';
 import { supportedX402NetworksForChainId } from '../utils/x402-networks.js';
 import { maxPaymentBaseUnits, resolveX402AssetDecimals } from '../utils/payment-cap.js';
 import { enforceSpendPolicy } from './budget.js';
@@ -269,7 +269,7 @@ export async function handleX402SessionStart(
             `No x402 payment was needed. The endpoint responded without requiring payment.\n` +
             `You do not need a session token — use x402_pay directly for free endpoints.\n\n` +
             `📄 **Response Body**\n` +
-            '```\n' + responseText.slice(0, 4000) + (responseText.length > 4000 ? '\n... [truncated]' : '') + '\n```'
+            formatUntrustedBody(responseText, 4000)
           ),
         ],
       };
@@ -315,8 +315,7 @@ export async function handleX402SessionStart(
     out += `  requests to ${input.endpoint} — no further payments will be made during this session.\n`;
     out += `  Check session status with \`x402_session_status\`.\n\n`;
     out += `📄 **Initial Response** (${response.status})\n`;
-    const truncated = responseText.length > 4000;
-    out += '```\n' + responseText.slice(0, 4000) + (truncated ? '\n... [truncated]' : '') + '\n```';
+    out += formatUntrustedBody(responseText, 4000);
 
     return { content: [textContent(out)] };
   } catch (error: unknown) {
@@ -519,19 +518,12 @@ export async function handleX402SessionFetch(
             `  • Use x402_pay for a one-time payment to this URL\n` +
             `  • Contact the API provider about x402 V2 session support\n\n` +
             `📄 **Response Body**\n` +
-            '```\n' + responseText.slice(0, 2000) + '\n```'
+            formatUntrustedBody(responseText, 2000)
           ),
         ],
         isError: true,
       };
     }
-
-    // Truncate very large responses
-    const MAX_LEN = 8000;
-    const truncated = responseText.length > MAX_LEN;
-    const displayText = truncated
-      ? responseText.slice(0, MAX_LEN) + '\n\n... [response truncated]'
-      : responseText;
 
     const ttlRemaining = session.expiresAt - Math.floor(Date.now() / 1000);
     const callNumber = session.callCount; // after recordSessionCall incremented it
@@ -545,7 +537,7 @@ export async function handleX402SessionFetch(
     out += `  Session TTL: ${Math.ceil(ttlRemaining / 60)}m remaining\n`;
     out += `  💰 No payment — session token used\n\n`;
     out += `📄 **Response Body**\n`;
-    out += '```\n' + displayText + '\n```';
+    out += formatUntrustedBody(responseText, 8000);
 
     return { content: [textContent(out)] };
   } catch (error: unknown) {

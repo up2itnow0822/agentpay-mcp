@@ -11,7 +11,7 @@
 import { z } from 'zod';
 import { createX402Client } from 'agentwallet-sdk';
 import { getWallet, getConfig } from '../utils/client.js';
-import { textContent, formatError, chainName } from '../utils/format.js';
+import { textContent, formatError, formatUntrustedBody, chainName } from '../utils/format.js';
 import {
   describeSupportedX402Networks,
   isTvmOrTonNetwork,
@@ -95,7 +95,7 @@ function describeUnsupported402(
   out += `\nGuidance: fund and publish a Base-compatible x402 exact option, or keep this ` +
     `endpoint disabled for AgentPay MCP until TVM support ships deliberately.\n`;
   out += `\n📄 **402 Response Body**\n`;
-  out += '```\n' + responseText.slice(0, 4000) + (responseText.length > 4000 ? '\n... [truncated]' : '') + '\n```';
+  out += formatUntrustedBody(responseText, 4000);
 
   return out;
 }
@@ -243,12 +243,6 @@ export async function handleX402Pay(
           const responseText = await response.text();
           recordSessionCall(activeSession.sessionId);
 
-          const MAX_LEN = 8000;
-          const truncated = responseText.length > MAX_LEN;
-          const displayText = truncated
-            ? responseText.slice(0, MAX_LEN) + '\n\n... [response truncated]'
-            : responseText;
-
           const ttlRemaining = activeSession.expiresAt - Math.floor(Date.now() / 1000);
 
           let out = `🌐 **x402 Fetch Result** (session)\n\n`;
@@ -262,7 +256,7 @@ export async function handleX402Pay(
           out += `  TTL:        ${Math.ceil(ttlRemaining / 60)}m remaining\n`;
           out += `  Calls:      ${activeSession.callCount}\n`;
           out += `\n📄 **Response Body**\n`;
-          out += '```\n' + displayText + '\n```';
+          out += formatUntrustedBody(responseText, 8000);
 
           return { content: [textContent(out)] };
         }
@@ -363,13 +357,6 @@ export async function handleX402Pay(
     const response = await x402Client.fetch(input.url, requestInit);
     const responseText = await response.text();
 
-    // Truncate very large responses for readability
-    const MAX_RESPONSE_LEN = 8000;
-    const truncated = responseText.length > MAX_RESPONSE_LEN;
-    const displayText = truncated
-      ? responseText.slice(0, MAX_RESPONSE_LEN) + '\n\n... [response truncated]'
-      : responseText;
-
     if (response.status === 402 && !paymentMade) {
       return {
         content: [textContent(describeUnsupported402(input, response, responseText, config.chainId))],
@@ -394,7 +381,7 @@ export async function handleX402Pay(
     }
 
     out += `\n📄 **Response Body**\n`;
-    out += '```\n' + displayText + '\n```';
+    out += formatUntrustedBody(responseText, 8000);
 
     return { content: [textContent(out)] };
   } catch (error: unknown) {
