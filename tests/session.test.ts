@@ -1126,17 +1126,25 @@ describe('isUrlCoveredBySession (prefix scope)', () => {
     });
   });
 
-  describe('trailing-slash normalisation', () => {
-    it('treats sessions for /v1/ and /v1 identically', () => {
+  describe('trailing-slash boundary semantics (no normalization)', () => {
+    it('an endpoint of /v1/ covers itself and descendants but NOT the parent /v1', () => {
       const slashed = prefixSession('https://api.example.com/v1/');
-      expect(isUrlCoveredBySession('https://api.example.com/v1', slashed)).toBe(true);
+      expect(isUrlCoveredBySession('https://api.example.com/v1', slashed)).toBe(false);
       expect(isUrlCoveredBySession('https://api.example.com/v1/', slashed)).toBe(true);
       expect(isUrlCoveredBySession('https://api.example.com/v1/users', slashed)).toBe(true);
     });
 
-    it('matches a requested /v1/ against an endpoint of /v1', () => {
+    it('an endpoint of /v1 covers /v1/ and descendants via the explicit boundary', () => {
       const bare = prefixSession('https://api.example.com/v1');
       expect(isUrlCoveredBySession('https://api.example.com/v1/', bare)).toBe(true);
+      expect(isUrlCoveredBySession('https://api.example.com/v1/users', bare)).toBe(true);
+    });
+
+    it('does not collapse repeated slashes: /v1// is its own scope', () => {
+      const doubled = prefixSession('https://api.example.com/v1//');
+      expect(isUrlCoveredBySession('https://api.example.com/v1', doubled)).toBe(false);
+      expect(isUrlCoveredBySession('https://api.example.com/v1/', doubled)).toBe(false);
+      expect(isUrlCoveredBySession('https://api.example.com/v1//x', doubled)).toBe(true);
     });
 
     it('still rejects lookalike paths on slashed endpoints', () => {

@@ -238,12 +238,18 @@ export function isUrlCoveredBySession(
       return false;
     }
 
-    const endpointPath = normalisePathname(endpoint.pathname);
-    const requestedPath = normalisePathname(requested.pathname);
+    // No path normalization: servers may distinguish /v1 from /v1/, and a
+    // payment-scoped session must never cover a route it was not created
+    // for. Coverage is exactly: the endpoint path itself, or a descendant
+    // under an explicit '/' boundary. An endpoint of /v1 covers /v1, /v1/
+    // and /v1/users (boundary '/v1/'); an endpoint of /v1/ covers /v1/ and
+    // /v1/users but NOT the parent /v1.
+    const endpointPath = endpoint.pathname;
+    const requestedPath = requested.pathname;
 
     if (requestedPath === endpointPath) return true;
 
-    const boundaryPrefix = endpointPath === '/' ? '/' : `${endpointPath}/`;
+    const boundaryPrefix = endpointPath.endsWith('/') ? endpointPath : `${endpointPath}/`;
     return requestedPath.startsWith(boundaryPrefix);
   } catch {
     return false;
@@ -314,18 +320,6 @@ function canonicalise(obj: Record<string, unknown>): string {
       return acc;
     }, {});
   return JSON.stringify(sorted);
-}
-
-/**
- * Strip trailing slashes from a pathname so /v1/ and /v1 compare equal.
- * The root path is preserved as '/'.
- */
-function normalisePathname(pathname: string): string {
-  let normalised = pathname || '/';
-  while (normalised.length > 1 && normalised.endsWith('/')) {
-    normalised = normalised.slice(0, -1);
-  }
-  return normalised;
 }
 
 /**
