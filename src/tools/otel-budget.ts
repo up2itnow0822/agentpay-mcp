@@ -54,6 +54,12 @@ export interface BudgetDecision {
   utilizationPct: number
   reason: string
   timestamp: number
+  /**
+   * True when this span had already been counted against the ledger (an OTel
+   * re-delivery or a client retry) and therefore added no new spend. The
+   * decision itself still reflects current accumulated spend.
+   */
+  duplicateSpan?: boolean
 }
 
 export interface OTelSpanCostAttributes {
@@ -109,13 +115,54 @@ export function validateKillCallbackUrl(raw: string): string | null {
 
 // ─── In-memory stores ──────────────────────────────────────────────────────
 
+/** Maximum number of span identities retained for duplicate detection. */
+export const MAX_SEEN_SPANS = 10_000
+
 const _policies: Map<string, AgentBudgetPolicy> = new Map()
 const _spendLedger: SpendRecord[] = []
 const _decisions: BudgetDecision[] = []
 
+/**
+ * Span identities already counted against the spend ledger, in insertion
+ * order. Bounded FIFO: past MAX_SEEN_SPANS the oldest identity is evicted,
+ * so dedupe covers the most recent MAX_SEEN_SPANS distinct spans.
+ *
+ * Tradeoff, deliberately taken: a re-delivery that arrives after its identity
+ * has been evicted is counted a second time. That is the fail-safe direction
+ * (spend is over-counted, so the breaker trips early rather than letting a
+ * budget over-run), re-deliveries in practice arrive close behind the
+ * original, and an unbounded seen-set would simply recreate the unbounded
+ * growth this module is otherwise trying to avoid.
+ */
+const _seenSpans: Set<string> = new Set()
+
 /** Build a policy key from agentId + optional taskId */
 function policyKey(agentId: string, taskId?: string): string {
   return taskId ? `${agentId}::${taskId}` : agentId
+}
+
+/**
+ * Identity of a span for dedupe purposes: the owning agent plus the OTel
+ * (traceId, spanId) pair carried by the span attributes.
+ *
+ * Spans without a spanId have no usable identity and are never deduplicated
+ * (they are counted every time, again the fail-safe direction). Callers that
+ * supply a spanId but omit traceId are asserting that the spanId alone
+ * identifies the span within that agent — reusing one across spans then reads
+ * as a re-delivery.
+ */
+function spanDedupeKey(agentId: string, attrs: OTelSpanCostAttributes): string | null {
+  if (!attrs.spanId) return null
+  return `${agentId}::${attrs.traceId ?? ''}::${attrs.spanId}`
+}
+
+function markSpanSeen(key: string): void {
+  _seenSpans.add(key)
+  if (_seenSpans.size > MAX_SEEN_SPANS) {
+    // Sets iterate in insertion order — evict the oldest identity.
+    const oldest = _seenSpans.values().next().value
+    if (oldest !== undefined) _seenSpans.delete(oldest)
+  }
 }
 
 /** Reset all state — useful for testing */
@@ -123,6 +170,7 @@ export function _resetOTelBudgetState(): void {
   _policies.clear()
   _spendLedger.length = 0
   _decisions.length = 0
+  _seenSpans.clear()
 }
 
 // ─── Core Logic ────────────────────────────────────────────────────────────
@@ -173,6 +221,13 @@ function getAccumulatedSpend(agentId: string, taskId?: string, windowMs?: number
  *
  * This is the main entry point: feed it span attributes from an
  * AgentCore-instrumented agent, and it returns an enforcement decision.
+ *
+ * Spend accounting is at-most-once per span identity: OTel pipelines and
+ * MCP clients both re-deliver by design, so a span that has already been
+ * counted is still evaluated against current accumulated spend — the caller
+ * gets the enforcement decision it asked for — but adds nothing to the
+ * ledger. Without this, one retried span at $4 against a $10 budget trips
+ * the breaker at $8 of apparent spend for $4 of real cost.
  */
 export function evaluateSpan(attrs: OTelSpanCostAttributes): BudgetDecision | null {
   const agentId = attrs['agentcore.agent.id']
@@ -184,16 +239,22 @@ export function evaluateSpan(attrs: OTelSpanCostAttributes): BudgetDecision | nu
 
   if (costUsd <= 0) return null
 
-  // Record spend
-  const record: SpendRecord = {
-    agentId,
-    taskId,
-    amountUsd: costUsd,
-    timestamp: Date.now(),
-    spanId: attrs.spanId ?? 'unknown',
-    traceId: attrs.traceId ?? 'unknown',
+  // Record spend — once per span identity
+  const dedupeKey = spanDedupeKey(agentId, attrs)
+  const duplicateSpan = dedupeKey !== null && _seenSpans.has(dedupeKey)
+
+  if (!duplicateSpan) {
+    const record: SpendRecord = {
+      agentId,
+      taskId,
+      amountUsd: costUsd,
+      timestamp: Date.now(),
+      spanId: attrs.spanId ?? 'unknown',
+      traceId: attrs.traceId ?? 'unknown',
+    }
+    _spendLedger.push(record)
+    if (dedupeKey !== null) markSpanSeen(dedupeKey)
   }
-  _spendLedger.push(record)
 
   // Find applicable policy (task-specific first, then agent-level)
   const policy = getApplicablePolicy(agentId, taskId)
@@ -210,6 +271,7 @@ export function evaluateSpan(attrs: OTelSpanCostAttributes): BudgetDecision | nu
       utilizationPct: 0,
       reason: 'No budget policy registered for this agent',
       timestamp: Date.now(),
+      duplicateSpan,
     }
   }
 
@@ -239,6 +301,7 @@ export function evaluateSpan(attrs: OTelSpanCostAttributes): BudgetDecision | nu
     utilizationPct: utilization,
     reason,
     timestamp: Date.now(),
+    duplicateSpan,
   }
 
   _decisions.push(decision)
@@ -337,6 +400,7 @@ export function decisionToOTelEvent(decision: BudgetDecision): Record<string, st
     'agentpay.utilization_pct': decision.utilizationPct,
     'agentpay.reason': decision.reason,
     'agentpay.circuit_breaker_tripped': decision.action === 'kill',
+    'agentpay.duplicate_span': decision.duplicateSpan === true,
   }
 }
 
@@ -474,7 +538,9 @@ export const otelEvaluateSpendTool = {
     'Evaluate a spend event from an OTel span against registered budget policies. ' +
     'Returns a budget decision (allow/warn/block/kill) with utilization details. ' +
     'The decision is also formatted as OTel event attributes for re-emission ' +
-    'into the AgentCore telemetry pipeline.',
+    'into the AgentCore telemetry pipeline. Safe to retry: a span already ' +
+    'counted (same agent, traceId and spanId) is re-evaluated but not ' +
+    'charged twice, and the decision is flagged duplicateSpan.',
   inputSchema: {
     type: 'object' as const,
     properties: {

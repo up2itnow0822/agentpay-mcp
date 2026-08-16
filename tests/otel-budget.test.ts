@@ -11,6 +11,7 @@ import {
   handleOTelRegisterPolicy,
   invokeKillCallback,
   listPolicies,
+  MAX_SEEN_SPANS,
   OTelRegisterPolicySchema,
   _resetOTelBudgetState,
 } from '../src/tools/otel-budget.js'
@@ -235,6 +236,172 @@ describe('OTel Budget Circuit-Breaker', () => {
 
       expect(decision!.action).toBe('allow')
       expect(decision!.accumulatedSpendUsd).toBe(3.0)
+    })
+  })
+
+  describe('span deduplication', () => {
+    const bigBudget = {
+      agentId: 'agent-001',
+      maxSpendUsd: 1_000_000,
+      windowMs: 0,
+      breachAction: 'block' as const,
+    }
+
+    it('counts a re-delivered span only once', () => {
+      registerPolicy({
+        agentId: 'agent-001',
+        maxSpendUsd: 10.0,
+        windowMs: 0,
+        breachAction: 'block',
+      })
+
+      const span = {
+        'agentcore.agent.id': 'agent-001',
+        'agentcore.cost.usd': 4.0,
+        spanId: 'span-1',
+        traceId: 'trace-1',
+      }
+
+      const first = evaluateSpan(span)!
+      const redelivered = evaluateSpan(span)!
+
+      expect(first.accumulatedSpendUsd).toBe(4.0)
+      expect(first.duplicateSpan).toBe(false)
+      expect(redelivered.accumulatedSpendUsd).toBe(4.0)
+      expect(redelivered.duplicateSpan).toBe(true)
+      expect(redelivered.remainingUsd).toBe(6.0)
+      expect(redelivered.action).toBe('allow')
+    })
+
+    it('counts distinct spans in the same trace separately', () => {
+      registerPolicy({
+        agentId: 'agent-001',
+        maxSpendUsd: 10.0,
+        windowMs: 0,
+        breachAction: 'block',
+      })
+
+      evaluateSpan({
+        'agentcore.agent.id': 'agent-001',
+        'agentcore.cost.usd': 4.0,
+        spanId: 'span-1',
+        traceId: 'trace-1',
+      })
+      const second = evaluateSpan({
+        'agentcore.agent.id': 'agent-001',
+        'agentcore.cost.usd': 4.0,
+        spanId: 'span-2',
+        traceId: 'trace-1',
+      })!
+
+      expect(second.duplicateSpan).toBe(false)
+      expect(second.accumulatedSpendUsd).toBe(8.0)
+    })
+
+    it('does not collapse the same spanId reported by different agents', () => {
+      registerPolicy(bigBudget)
+      registerPolicy({ ...bigBudget, agentId: 'agent-002' })
+
+      const a = evaluateSpan({
+        'agentcore.agent.id': 'agent-001',
+        'agentcore.cost.usd': 2.0,
+        spanId: 'span-1',
+      })!
+      const b = evaluateSpan({
+        'agentcore.agent.id': 'agent-002',
+        'agentcore.cost.usd': 3.0,
+        spanId: 'span-1',
+      })!
+
+      expect(a.accumulatedSpendUsd).toBe(2.0)
+      expect(b.duplicateSpan).toBe(false)
+      expect(b.accumulatedSpendUsd).toBe(3.0)
+    })
+
+    it('counts spans with no spanId every time — an unidentified span is never deduped', () => {
+      registerPolicy(bigBudget)
+
+      evaluateSpan({ 'agentcore.agent.id': 'agent-001', 'agentcore.cost.usd': 1.0 })
+      const second = evaluateSpan({
+        'agentcore.agent.id': 'agent-001',
+        'agentcore.cost.usd': 1.0,
+      })!
+
+      expect(second.duplicateSpan).toBe(false)
+      expect(second.accumulatedSpendUsd).toBe(2.0)
+    })
+
+    it('does not trip the circuit breaker when a client retries the same span', async () => {
+      const fetchMock = vi.fn().mockResolvedValue({ ok: true, status: 204 })
+      global.fetch = fetchMock as typeof global.fetch
+
+      registerPolicy({
+        agentId: 'agent-001',
+        maxSpendUsd: 10.0,
+        windowMs: 0,
+        breachAction: 'kill',
+        killCallbackUrl: 'https://example.com/kill',
+      })
+
+      const call = { agentId: 'agent-001', costUsd: 6.0, spanId: 'span-1', traceId: 'trace-1' }
+      await handleOTelEvaluateSpend(call)
+      const retry = await handleOTelEvaluateSpend(call)
+
+      const data = JSON.parse(retry.content[0].text)
+      expect(data.decision.accumulatedSpendUsd).toBe(6.0)
+      expect(data.decision.action).toBe('allow')
+      expect(data.decision.duplicateSpan).toBe(true)
+      expect(data.otelEvent['agentpay.duplicate_span']).toBe(true)
+      expect(fetchMock).not.toHaveBeenCalled()
+    })
+
+    it('re-counts a re-delivery that arrives after its identity is evicted', () => {
+      registerPolicy(bigBudget)
+
+      for (let i = 0; i < MAX_SEEN_SPANS; i++) {
+        evaluateSpan({
+          'agentcore.agent.id': 'agent-001',
+          'agentcore.cost.usd': 1.0,
+          spanId: `span-${i}`,
+        })
+      }
+
+      // Exactly at the horizon: nothing has been evicted yet.
+      const atHorizon = evaluateSpan({
+        'agentcore.agent.id': 'agent-001',
+        'agentcore.cost.usd': 1.0,
+        spanId: 'span-0',
+      })!
+      expect(atHorizon.duplicateSpan).toBe(true)
+      expect(atHorizon.accumulatedSpendUsd).toBe(MAX_SEEN_SPANS)
+
+      // One span past the horizon evicts the oldest identity (span-0)...
+      const overflow = evaluateSpan({
+        'agentcore.agent.id': 'agent-001',
+        'agentcore.cost.usd': 1.0,
+        spanId: 'span-overflow',
+      })!
+      expect(overflow.duplicateSpan).toBe(false)
+      expect(overflow.accumulatedSpendUsd).toBe(MAX_SEEN_SPANS + 1)
+
+      // ...so its re-delivery is counted again: over-counting is the
+      // fail-safe direction for a spend breaker.
+      const lateRedelivery = evaluateSpan({
+        'agentcore.agent.id': 'agent-001',
+        'agentcore.cost.usd': 1.0,
+        spanId: 'span-0',
+      })!
+      expect(lateRedelivery.duplicateSpan).toBe(false)
+      expect(lateRedelivery.accumulatedSpendUsd).toBe(MAX_SEEN_SPANS + 2)
+
+      // Identities still inside the horizon keep deduping.
+      const stillDeduped = evaluateSpan({
+        'agentcore.agent.id': 'agent-001',
+        'agentcore.cost.usd': 1.0,
+        spanId: 'span-overflow',
+      })!
+      expect(stillDeduped.duplicateSpan).toBe(true)
+      expect(stillDeduped.accumulatedSpendUsd).toBe(MAX_SEEN_SPANS + 2)
     })
   })
 
