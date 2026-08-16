@@ -28,6 +28,7 @@ import {
   endSession,
   listActiveSessions,
   findSessionForUrl,
+  isUrlCoveredBySession,
   buildSessionHeaders,
   decodeSessionToken,
 } from '../session/manager.js';
@@ -762,22 +763,6 @@ export async function handleX402SessionEnd(
 }
 
 // ─── Internal helpers ──────────────────────────────────────────────────────
-
-/**
- * Check if a URL is covered by a session's endpoint + scope.
- */
-function isUrlCoveredBySession(
-  url: string,
-  session: { endpoint: string; scope: 'prefix' | 'exact' }
-): boolean {
-  if (session.scope === 'exact') {
-    return url === session.endpoint;
-  }
-  // Prefix: URL must start with endpoint
-  // Normalise: ensure endpoint doesn't end in slash for prefix matching
-  const base = session.endpoint.endsWith('/') ? session.endpoint : session.endpoint + '/';
-  return url === session.endpoint || url.startsWith(base) || url.startsWith(session.endpoint + '?');
-}
 
 /**
  * Format TTL seconds as a human-readable string.

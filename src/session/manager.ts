@@ -188,10 +188,72 @@ export function findSessionForUrl(url: string): SessionRecord | undefined {
   if (exact) return exact;
 
   // Try prefix match
-  const prefix = active.find((s) => s.scope === 'prefix' && url.startsWith(s.endpoint));
+  const prefix = active.find((s) => s.scope === 'prefix' && isUrlCoveredBySession(url, s));
   if (prefix) return prefix;
 
   return undefined;
+}
+
+/**
+ * Check if a URL is covered by a session's endpoint + scope.
+ *
+ * Prefix sessions cover the endpoint path itself, query strings on that path,
+ * and descendants below that path. They do not cover raw string lookalikes such
+ * as /v10 for /v1, or host/path prefixes on a different origin. Trailing
+ * slashes are normalised, so a session for /v1/ behaves identically to one
+ * for /v1 (and a request to /v1/ matches an endpoint of /v1).
+ *
+ * Query parameters on the session endpoint are treated as REQUIRED
+ * parameters: the requested URL must carry every endpoint parameter with an
+ * equal value. Parameter order never matters (comparison goes through
+ * URLSearchParams, with duplicate keys compared as value multisets). For a
+ * key the endpoint pins, the request's values for that key must equal the
+ * endpoint's exactly — a contradictory duplicate such as ?user=alice&user=bob
+ * against a pin of user=alice is rejected (HTTP parameter pollution).
+ * Extra request parameters under OTHER keys are allowed. The requirement
+ * applies to the
+ * endpoint path itself and to sub-paths alike — e.g. /v1/users?version=2 is
+ * covered by a session for /v1?version=2, but /v1/users without it is not.
+ * That last case fails CLOSED deliberately: dropping a required parameter
+ * changes what the server serves, so requiring it everywhere is the safe
+ * reading.
+ */
+export function isUrlCoveredBySession(
+  url: string,
+  session: { endpoint: string; scope: 'prefix' | 'exact' }
+): boolean {
+  try {
+    const requested = new URL(url);
+    const endpoint = new URL(session.endpoint);
+
+    if (session.scope === 'exact') {
+      return requested.href === endpoint.href;
+    }
+
+    if (requested.origin !== endpoint.origin) {
+      return false;
+    }
+
+    if (!containsRequiredSearchParams(requested.searchParams, endpoint.searchParams)) {
+      return false;
+    }
+
+    // No path normalization: servers may distinguish /v1 from /v1/, and a
+    // payment-scoped session must never cover a route it was not created
+    // for. Coverage is exactly: the endpoint path itself, or a descendant
+    // under an explicit '/' boundary. An endpoint of /v1 covers /v1, /v1/
+    // and /v1/users (boundary '/v1/'); an endpoint of /v1/ covers /v1/ and
+    // /v1/users but NOT the parent /v1.
+    const endpointPath = endpoint.pathname;
+    const requestedPath = requested.pathname;
+
+    if (requestedPath === endpointPath) return true;
+
+    const boundaryPrefix = endpointPath.endsWith('/') ? endpointPath : `${endpointPath}/`;
+    return requestedPath.startsWith(boundaryPrefix);
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -258,6 +320,30 @@ function canonicalise(obj: Record<string, unknown>): string {
       return acc;
     }, {});
   return JSON.stringify(sorted);
+}
+
+/**
+ * Check that every required (key, value) pair is present in the requested
+ * search params. Order-insensitive. For each key the endpoint pins, the
+ * requested values must EQUAL the required values as a multiset — extra or
+ * duplicate values under a pinned key are rejected, which blocks HTTP
+ * parameter pollution (?user=alice&user=bob smuggling past a pin of
+ * user=alice). Request parameters under keys the endpoint does not pin are
+ * allowed.
+ */
+function containsRequiredSearchParams(
+  requested: URLSearchParams,
+  required: URLSearchParams
+): boolean {
+  for (const key of new Set(required.keys())) {
+    const requiredValues = [...required.getAll(key)].sort();
+    const requestedValues = [...requested.getAll(key)].sort();
+    if (requestedValues.length !== requiredValues.length) return false;
+    for (let i = 0; i < requiredValues.length; i++) {
+      if (requestedValues[i] !== requiredValues[i]) return false;
+    }
+  }
+  return true;
 }
 
 /**

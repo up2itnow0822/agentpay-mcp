@@ -73,6 +73,7 @@ import {
   _clearAllSessions,
   createSession,
   findSessionForUrl,
+  isUrlCoveredBySession,
   buildSessionHeaders,
   decodeSessionToken,
   listActiveSessions,
@@ -938,6 +939,57 @@ describe('Session manager (direct unit tests)', () => {
     expect(found!.scope).toBe('prefix');
   });
 
+  it('findSessionForUrl returns prefix match for endpoint query strings', async () => {
+    await createSession({
+      endpoint: 'https://api.example.com/v1',
+      scope: 'prefix',
+      walletAddress: '0xwallet',
+      paymentTxHash: '0xtx',
+      paymentAmount: 100n,
+      paymentToken: '0x0000000000000000000000000000000000000000',
+      paymentRecipient: '0xrecip',
+      signMessage: makeSignFn(),
+    });
+
+    const found = findSessionForUrl('https://api.example.com/v1?cursor=next');
+    expect(found).toBeDefined();
+    expect(found!.scope).toBe('prefix');
+  });
+
+  it('findSessionForUrl matches endpoint query params regardless of order', async () => {
+    await createSession({
+      endpoint: 'https://api.example.com/v1?a=1&b=2',
+      scope: 'prefix',
+      walletAddress: '0xwallet',
+      paymentTxHash: '0xtx',
+      paymentAmount: 100n,
+      paymentToken: '0x0000000000000000000000000000000000000000',
+      paymentRecipient: '0xrecip',
+      signMessage: makeSignFn(),
+    });
+
+    // Same params, different order — must match
+    expect(findSessionForUrl('https://api.example.com/v1?b=2&a=1')).toBeDefined();
+    // Missing a required param — must not match
+    expect(findSessionForUrl('https://api.example.com/v1?a=1')).toBeUndefined();
+  });
+
+  it('findSessionForUrl rejects raw string prefix lookalikes', async () => {
+    await createSession({
+      endpoint: 'https://api.example.com/v1',
+      scope: 'prefix',
+      walletAddress: '0xwallet',
+      paymentTxHash: '0xtx',
+      paymentAmount: 100n,
+      paymentToken: '0x0000000000000000000000000000000000000000',
+      paymentRecipient: '0xrecip',
+      signMessage: makeSignFn(),
+    });
+
+    expect(findSessionForUrl('https://api.example.com/v10/users')).toBeUndefined();
+    expect(findSessionForUrl('https://api.example.com/v1.evil/steal')).toBeUndefined();
+  });
+
   it('findSessionForUrl returns undefined for non-matching URL', async () => {
     await createSession({
       endpoint: 'https://api.example.com/v1',
@@ -1007,5 +1059,103 @@ describe('Session manager (direct unit tests)', () => {
     // First part should be valid base64url-decodable JSON
     const payload = JSON.parse(Buffer.from(parts[0]!, 'base64url').toString());
     expect(payload.version).toBe('clawpay/1.1');
+  });
+});
+
+// ─── isUrlCoveredBySession query & trailing-slash semantics ────────────────
+
+describe('isUrlCoveredBySession (prefix scope)', () => {
+  const prefixSession = (endpoint: string) => ({ endpoint, scope: 'prefix' as const });
+
+  describe('endpoint query params are required params', () => {
+    const session = prefixSession('https://api.example.com/v1?version=2');
+
+    it('matches endpoint query params regardless of parameter order', () => {
+      const multi = prefixSession('https://api.example.com/v1?a=1&b=2');
+      expect(isUrlCoveredBySession('https://api.example.com/v1?b=2&a=1', multi)).toBe(true);
+      expect(isUrlCoveredBySession('https://api.example.com/v1?a=1&b=2', multi)).toBe(true);
+    });
+
+    it('allows extra request parameters beyond the required ones', () => {
+      expect(
+        isUrlCoveredBySession('https://api.example.com/v1?version=2&page=3', session)
+      ).toBe(true);
+      expect(
+        isUrlCoveredBySession('https://api.example.com/v1/users?page=3&version=2', session)
+      ).toBe(true);
+    });
+
+    it('covers sub-paths that carry the required params', () => {
+      expect(
+        isUrlCoveredBySession('https://api.example.com/v1/users?version=2', session)
+      ).toBe(true);
+    });
+
+    it('fails closed when a sub-path drops a required param', () => {
+      expect(isUrlCoveredBySession('https://api.example.com/v1/users', session)).toBe(false);
+      expect(isUrlCoveredBySession('https://api.example.com/v1', session)).toBe(false);
+    });
+
+    it('rejects a required param carrying a different value', () => {
+      expect(
+        isUrlCoveredBySession('https://api.example.com/v1/users?version=3', session)
+      ).toBe(false);
+    });
+
+    it('rejects parameter pollution: a conflicting duplicate of a pinned key', () => {
+      const pinned = prefixSession('https://a.com/v1?user=alice');
+      expect(isUrlCoveredBySession('https://a.com/v1?user=alice&user=bob', pinned)).toBe(false);
+      expect(isUrlCoveredBySession('https://a.com/v1?user=bob&user=alice', pinned)).toBe(false);
+      // Even duplicating the same pinned value is rejected: the multiset must match exactly
+      expect(isUrlCoveredBySession('https://a.com/v1?user=alice&user=alice', pinned)).toBe(false);
+      // The exact pinned value still matches, with extra params under other keys
+      expect(isUrlCoveredBySession('https://a.com/v1?user=alice&page=2', pinned)).toBe(true);
+    });
+
+    it('compares duplicate keys deterministically as value multisets', () => {
+      const dupes = prefixSession('https://api.example.com/v1?tag=a&tag=b');
+      expect(isUrlCoveredBySession('https://api.example.com/v1?tag=b&tag=a', dupes)).toBe(true);
+      expect(isUrlCoveredBySession('https://api.example.com/v1?tag=a', dupes)).toBe(false);
+      expect(isUrlCoveredBySession('https://api.example.com/v1?tag=a&tag=a', dupes)).toBe(false);
+    });
+
+    it('places no query requirement when the endpoint has none', () => {
+      const bare = prefixSession('https://api.example.com/v1');
+      expect(isUrlCoveredBySession('https://api.example.com/v1?cursor=next', bare)).toBe(true);
+      expect(isUrlCoveredBySession('https://api.example.com/v1/users', bare)).toBe(true);
+    });
+  });
+
+  describe('trailing-slash boundary semantics (no normalization)', () => {
+    it('an endpoint of /v1/ covers itself and descendants but NOT the parent /v1', () => {
+      const slashed = prefixSession('https://api.example.com/v1/');
+      expect(isUrlCoveredBySession('https://api.example.com/v1', slashed)).toBe(false);
+      expect(isUrlCoveredBySession('https://api.example.com/v1/', slashed)).toBe(true);
+      expect(isUrlCoveredBySession('https://api.example.com/v1/users', slashed)).toBe(true);
+    });
+
+    it('an endpoint of /v1 covers /v1/ and descendants via the explicit boundary', () => {
+      const bare = prefixSession('https://api.example.com/v1');
+      expect(isUrlCoveredBySession('https://api.example.com/v1/', bare)).toBe(true);
+      expect(isUrlCoveredBySession('https://api.example.com/v1/users', bare)).toBe(true);
+    });
+
+    it('does not collapse repeated slashes: /v1// is its own scope', () => {
+      const doubled = prefixSession('https://api.example.com/v1//');
+      expect(isUrlCoveredBySession('https://api.example.com/v1', doubled)).toBe(false);
+      expect(isUrlCoveredBySession('https://api.example.com/v1/', doubled)).toBe(false);
+      expect(isUrlCoveredBySession('https://api.example.com/v1//x', doubled)).toBe(true);
+    });
+
+    it('still rejects lookalike paths on slashed endpoints', () => {
+      const slashed = prefixSession('https://api.example.com/v1/');
+      expect(isUrlCoveredBySession('https://api.example.com/v10', slashed)).toBe(false);
+      expect(isUrlCoveredBySession('https://api.example.com/v1.evil/steal', slashed)).toBe(false);
+    });
+  });
+
+  it('still rejects other origins even when query params match', () => {
+    const session = prefixSession('https://api.example.com/v1?version=2');
+    expect(isUrlCoveredBySession('https://evil.example.com/v1?version=2', session)).toBe(false);
   });
 });
