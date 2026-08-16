@@ -6,6 +6,8 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 // ─── Mock agentwallet-sdk ──────────────────────────────────────────────────
 
+const USDC_BASE = '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913';
+
 vi.mock('agentwallet-sdk', () => ({
   agentExecute: vi.fn(),
   agentTransferToken: vi.fn(),
@@ -16,6 +18,19 @@ vi.mock('agentwallet-sdk', () => ({
   cancelTransaction: vi.fn(),
   getWalletHealth: vi.fn(),
   createWallet: vi.fn(),
+  SpendingPolicy: vi.fn(),
+  getGlobalRegistry: vi.fn(() => ({
+    getTokenByAddress: (address: string, chainId: number) => {
+      if (
+        chainId === 8453 &&
+        address.toLowerCase() === '0x833589fcd6edb6e08f4c7c32d4f71b54bda02913'
+      ) {
+        return { symbol: 'USDC', decimals: 6, address, chainId };
+      }
+      return undefined;
+    },
+    getToken: () => undefined,
+  })),
 }));
 
 // ─── Mock client utils ─────────────────────────────────────────────────────
@@ -42,11 +57,16 @@ vi.mock('../src/utils/client.js', () => ({
 import {
   handleSendPayment,
   parseTokenAmount,
+  resolveTokenDecimals,
 } from '../src/tools/payments.js';
 import {
   handleCheckSpendLimit,
   handleQueueApproval,
 } from '../src/tools/wallet.js';
+import {
+  handleSetSpendPolicy,
+  _resetPolicyStore,
+} from '../src/tools/budget.js';
 import {
   agentExecute,
   agentTransferToken,
@@ -55,6 +75,7 @@ import {
   getPendingApprovals,
   approveTransaction,
   cancelTransaction,
+  SpendingPolicy,
 } from 'agentwallet-sdk';
 
 const mockAgentExecute = vi.mocked(agentExecute);
@@ -104,11 +125,31 @@ describe('parseTokenAmount', () => {
 
 // ─── send_payment tests ────────────────────────────────────────────────────
 
+describe('resolveTokenDecimals', () => {
+  it('defaults native ETH to 18 decimals', () => {
+    expect(
+      resolveTokenDecimals(
+        '0x0000000000000000000000000000000000000000',
+        undefined,
+        8453
+      )
+    ).toBe(18);
+  });
+
+  it('uses the registry for known USDC addresses', () => {
+    expect(resolveTokenDecimals(USDC_BASE as `0x${string}`, undefined, 8453)).toBe(6);
+  });
+});
+
 describe('send_payment tool', () => {
   const VALID_TO = '0xabcdefabcdefabcdefabcdefabcdefabcdefabcd';
 
   beforeEach(() => {
     vi.clearAllMocks();
+    _resetPolicyStore();
+    vi.mocked(SpendingPolicy).mockImplementation(function () {
+      return { check: vi.fn().mockResolvedValue({ status: 'approved' }) };
+    } as any);
     mockAgentExecute.mockResolvedValue({
       executed: true,
       txHash: MOCK_TX_HASH,
@@ -154,12 +195,10 @@ describe('send_payment tool', () => {
   // ─── Happy path: ERC20 ──────────────────────────────────────────────────
 
   it('sends ERC20 tokens using agentTransferToken', async () => {
-    const USDC = '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913';
-
     const result = await handleSendPayment({
       to: VALID_TO,
       amount_eth: '10',
-      token: USDC,
+      token: USDC_BASE,
       token_decimals: 6,
     });
 
@@ -170,6 +209,54 @@ describe('send_payment tool', () => {
     // 10 USDC = 10_000_000 base units
     const callArgs = mockAgentTransferToken.mock.calls[0]![1];
     expect(callArgs.amount).toBe(10_000_000n);
+  });
+
+  it('resolves USDC decimals from the registry when token_decimals is omitted', async () => {
+    const result = await handleSendPayment({
+      to: VALID_TO,
+      amount_eth: '1',
+      token: USDC_BASE,
+    });
+
+    expect(result.isError).toBeFalsy();
+    const callArgs = mockAgentTransferToken.mock.calls[0]![1];
+    // 1 USDC with 6 decimals — NOT 1e18 (the old catastrophic default)
+    expect(callArgs.amount).toBe(1_000_000n);
+  });
+
+  it('rejects unknown ERC-20 tokens when token_decimals is omitted', async () => {
+    const result = await handleSendPayment({
+      to: VALID_TO,
+      amount_eth: '1',
+      token: '0x1111111111111111111111111111111111111111',
+    });
+
+    expect(result.isError).toBe(true);
+    expect(result.content[0]!.text).toContain('Unknown decimals');
+    expect(mockAgentTransferToken).not.toHaveBeenCalled();
+  });
+
+  it('blocks payments that violate set_spend_policy allowlists', async () => {
+    const check = vi.fn().mockResolvedValue({
+      status: 'rejected',
+      reason: 'Merchant "0xabcdefabcdefabcdefabcdefabcdefabcdefabcd" is not on the allowlist.',
+    });
+    vi.mocked(SpendingPolicy).mockImplementation(function () {
+      return { check };
+    } as any);
+
+    await handleSetSpendPolicy({
+      allowedRecipients: ['0x0000000000000000000000000000000000000001'],
+    });
+
+    const result = await handleSendPayment({
+      to: VALID_TO,
+      amount_eth: '0.001',
+    });
+
+    expect(result.isError).toBe(true);
+    expect(result.content[0]!.text).toContain('allowlist');
+    expect(mockAgentExecute).not.toHaveBeenCalled();
   });
 
   it('includes memo in response when provided', async () => {

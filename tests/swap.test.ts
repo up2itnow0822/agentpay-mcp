@@ -11,6 +11,8 @@ vi.mock('agentwallet-sdk', () => ({
   parseAmount: vi.fn((amount: string, decimals: number) =>
     BigInt(Math.round(parseFloat(amount) * 10 ** decimals))
   ),
+  SpendingPolicy: vi.fn(),
+  checkBudget: vi.fn(),
 }))
 
 // ─── Mock client utils ─────────────────────────────────────────────────────
@@ -25,10 +27,12 @@ vi.mock('../src/utils/client.js', () => ({
 }))
 
 import { handleSwapTokens } from '../src/tools/swap.js'
-import { getGlobalRegistry, attachSwap } from 'agentwallet-sdk'
+import { handleSetSpendPolicy, _resetPolicyStore } from '../src/tools/budget.js'
+import { getGlobalRegistry, attachSwap, SpendingPolicy } from 'agentwallet-sdk'
 
 const mockGetGlobalRegistry = vi.mocked(getGlobalRegistry)
 const mockAttachSwap = vi.mocked(attachSwap)
+const MockSpendingPolicy = vi.mocked(SpendingPolicy)
 
 const USDC = {
   symbol: 'USDC',
@@ -47,6 +51,7 @@ const WETH = {
 describe('swap_tokens', () => {
   beforeEach(() => {
     vi.clearAllMocks()
+    _resetPolicyStore()
   })
 
   it('swaps USDC to WETH successfully', async () => {
@@ -170,5 +175,98 @@ describe('swap_tokens', () => {
     expect(result.isError).toBe(true)
     expect(result.content[0].text).toContain('swap_tokens failed')
     expect(result.content[0].text).toContain('Insufficient liquidity')
+  })
+
+  // ─── Spend policy enforcement ────────────────────────────────────────────
+
+  it('blocks swaps when the spend policy allowlist rejects the wallet', async () => {
+    const check = vi.fn().mockResolvedValue({
+      status: 'rejected',
+      reason:
+        'Merchant "0x1234567890123456789012345678901234567890" is not on the allowlist.',
+    })
+    MockSpendingPolicy.mockImplementation(function () { return { check } } as any)
+
+    const mockSwap = vi.fn()
+    mockGetGlobalRegistry.mockReturnValue({
+      getToken: vi.fn().mockReturnValueOnce(USDC).mockReturnValueOnce(WETH),
+    } as any)
+    mockAttachSwap.mockReturnValue({ swap: mockSwap } as any)
+
+    await handleSetSpendPolicy({
+      allowedRecipients: ['0x0000000000000000000000000000000000000001'],
+    })
+
+    const result = await handleSwapTokens({
+      fromSymbol: 'USDC',
+      toSymbol: 'WETH',
+      amount: '100',
+      chainId: 8453,
+    })
+
+    expect(result.isError).toBe(true)
+    expect(result.content[0].text).toContain('allowlist')
+    expect(mockSwap).not.toHaveBeenCalled()
+    // Merchant is the agent smart-account address (wallet.address — the SDK
+    // SwapModule custodies tokens and receives swap proceeds there), and
+    // 100 USDC sold (6 decimals) is normalised to 1e20 ETH-equivalent wei.
+    expect(check).toHaveBeenCalledWith({
+      merchant: '0x1234567890123456789012345678901234567890',
+      amount: 1e20,
+    })
+  })
+
+  it('blocks swaps when the spend policy cap is exceeded', async () => {
+    const check = vi.fn().mockResolvedValue({
+      status: 'rejected',
+      reason: 'Rolling spend cap exceeded: spent 0, cap 5e19, attempted 1e20.',
+    })
+    MockSpendingPolicy.mockImplementation(function () { return { check } } as any)
+
+    const mockSwap = vi.fn()
+    mockGetGlobalRegistry.mockReturnValue({
+      getToken: vi.fn().mockReturnValueOnce(USDC).mockReturnValueOnce(WETH),
+    } as any)
+    mockAttachSwap.mockReturnValue({ swap: mockSwap } as any)
+
+    await handleSetSpendPolicy({ dailyLimitEth: '50' })
+
+    const result = await handleSwapTokens({
+      fromSymbol: 'USDC',
+      toSymbol: 'WETH',
+      amount: '100',
+      chainId: 8453,
+    })
+
+    expect(result.isError).toBe(true)
+    expect(result.content[0].text).toContain('Rolling spend cap exceeded')
+    expect(mockSwap).not.toHaveBeenCalled()
+  })
+
+  it('swaps normally when the spend policy approves', async () => {
+    const check = vi.fn().mockResolvedValue({ status: 'approved' })
+    MockSpendingPolicy.mockImplementation(function () { return { check } } as any)
+
+    const mockSwap = vi.fn().mockResolvedValue({
+      txHash: '0xswaptx999',
+      quote: { amountInNet: 1n, amountOutMinimum: 1n, poolFeeTier: 500, feeAmount: 0n, gasEstimate: 100000n },
+    })
+    mockGetGlobalRegistry.mockReturnValue({
+      getToken: vi.fn().mockReturnValueOnce(USDC).mockReturnValueOnce(WETH),
+    } as any)
+    mockAttachSwap.mockReturnValue({ swap: mockSwap } as any)
+
+    await handleSetSpendPolicy({ dailyLimitEth: '1000' })
+
+    const result = await handleSwapTokens({
+      fromSymbol: 'USDC',
+      toSymbol: 'WETH',
+      amount: '100',
+      chainId: 8453,
+    })
+
+    expect(result.isError).toBeUndefined()
+    expect(check).toHaveBeenCalledOnce()
+    expect(mockSwap).toHaveBeenCalledOnce()
   })
 })

@@ -11,6 +11,7 @@ import type { Address } from 'viem'
 type AnyWallet = any
 import { getWallet } from '../utils/client.js'
 import { textContent, formatError } from '../utils/format.js'
+import { enforceSpendPolicy } from './budget.js'
 
 // ─── Schema ────────────────────────────────────────────────────────────────
 
@@ -80,6 +81,38 @@ export async function handleSwapTokens(
     }
 
     const rawAmountIn = parseAmount(input.amount, fromToken.decimals)
+
+    // Enforce the in-process spend policy on the amount sold before swapping.
+    // rawAmountIn is in fromToken base units (e.g. 6 decimals for USDC);
+    // enforceSpendPolicy normalises it to the policy's 18-decimal
+    // ETH-equivalent caps (1 whole token counts as 1 ETH-equivalent). The SDK
+    // SwapModule custodies tokens at — and sends swap proceeds to — the agent
+    // smart-account address (attachSwap passes wallet.address as
+    // accountAddress and uses it as the swap recipient), so that address is
+    // the policy merchant: allowlist-only policies must include the agent
+    // wallet (smart-account) address to permit swaps.
+    const swapRecipient = wallet.address
+    if (!swapRecipient) {
+      throw new Error('Wallet has no address; cannot verify spend policy for swap_tokens.')
+    }
+    const policyDecision = await enforceSpendPolicy({
+      merchant: swapRecipient,
+      amount: rawAmountIn,
+      decimals: fromToken.decimals,
+    })
+    if (policyDecision.status === 'rejected') {
+      throw new Error(
+        policyDecision.reason ??
+          `Swap blocked by spend policy for wallet ${swapRecipient}.`
+      )
+    }
+    if (policyDecision.status === 'draft') {
+      throw new Error(
+        `Swap exceeds per-tx spend policy and was queued as draft` +
+          `${policyDecision.draftId ? ` (${policyDecision.draftId})` : ''}. ` +
+          (policyDecision.reason ?? 'Approve the draft before executing.')
+      )
+    }
 
     const swapWallet = attachSwap(wallet as AnyWallet)
 

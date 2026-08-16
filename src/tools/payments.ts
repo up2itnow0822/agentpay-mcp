@@ -4,7 +4,7 @@
  */
 import { z } from 'zod';
 import { zeroAddress, type Address } from 'viem';
-import { agentExecute, agentTransferToken } from 'agentwallet-sdk';
+import { agentExecute, agentTransferToken, getGlobalRegistry } from 'agentwallet-sdk';
 import { getWallet, getConfig } from '../utils/client.js';
 import {
   textContent,
@@ -12,6 +12,7 @@ import {
   chainName,
   formatError,
 } from '../utils/format.js';
+import { enforceSpendPolicy } from './budget.js';
 
 const NATIVE_TOKEN = zeroAddress;
 
@@ -41,8 +42,10 @@ export const SendPaymentSchema = z.object({
     .min(0)
     .max(18)
     .optional()
-    .default(18)
-    .describe('Token decimal places (default: 18 for ETH; use 6 for USDC).'),
+    .describe(
+      'Token decimal places. Optional for native ETH (18) and registry-known tokens ' +
+      '(e.g. USDC=6). Required for unknown ERC-20 addresses.'
+    ),
   memo: z
     .string()
     .max(200)
@@ -78,8 +81,9 @@ export const sendPaymentTool = {
       },
       token_decimals: {
         type: 'number',
-        description: 'Token decimals (default 18 for ETH, 6 for USDC)',
-        default: 18,
+        description:
+          'Token decimals. Omit for ETH (18) or registry-known tokens like USDC (6). ' +
+          'Required for unknown ERC-20 addresses.',
       },
       memo: {
         type: 'string',
@@ -114,12 +118,33 @@ export async function handleSendPayment(
       throw new Error(`Invalid amount: "${input.amount_eth}". Must be a positive number.`);
     }
 
-    const decimals = input.token_decimals ?? 18;
-    const amountWei = parseTokenAmount(input.amount_eth, decimals);
-
     const isNativeEth = !input.token || input.token === NATIVE_TOKEN || input.token === '0x0000000000000000000000000000000000000000';
     const tokenAddress = isNativeEth ? NATIVE_TOKEN : (input.token as Address);
     const tokenLabel = isNativeEth ? 'ETH' : input.token ?? 'ETH';
+    const decimals = resolveTokenDecimals(tokenAddress, input.token_decimals, config.chainId);
+    const amountWei = parseTokenAmount(input.amount_eth, decimals);
+
+    // Enforce in-process spend policy (set_spend_policy) before any transfer.
+    // amountWei is in the token's own base units; decimals lets the policy
+    // normalise to its 18-decimal ETH-equivalent caps.
+    const policyDecision = await enforceSpendPolicy({
+      merchant: toAddress,
+      amount: amountWei,
+      decimals,
+    });
+    if (policyDecision.status === 'rejected') {
+      throw new Error(
+        policyDecision.reason ??
+          `Payment blocked by spend policy for recipient ${toAddress}.`
+      );
+    }
+    if (policyDecision.status === 'draft') {
+      throw new Error(
+        `Payment exceeds per-tx spend policy and was queued as draft` +
+          `${policyDecision.draftId ? ` (${policyDecision.draftId})` : ''}. ` +
+          (policyDecision.reason ?? 'Approve the draft before executing.')
+      );
+    }
 
     let txHash: string;
 
@@ -167,6 +192,28 @@ export async function handleSendPayment(
 }
 
 // ─── Token amount parser ───────────────────────────────────────────────────
+
+/**
+ * Resolve ERC-20 decimals from an explicit override or the TokenRegistry.
+ * Never assume 18 decimals for an arbitrary token address — that silently
+ * overpays by 10^12 for USDC (6 decimals) when callers omit token_decimals.
+ */
+export function resolveTokenDecimals(
+  token: Address,
+  explicitDecimals: number | undefined,
+  chainId: number
+): number {
+  if (explicitDecimals !== undefined) return explicitDecimals;
+  if (token === NATIVE_TOKEN) return 18;
+
+  const entry = getGlobalRegistry().getTokenByAddress(token, chainId);
+  if (entry) return entry.decimals;
+
+  throw new Error(
+    `Unknown decimals for token ${token} on chain ${chainId}. ` +
+      'Pass token_decimals explicitly (use 6 for USDC).'
+  );
+}
 
 /**
  * Parse a human-readable token amount string into base units (bigint).
