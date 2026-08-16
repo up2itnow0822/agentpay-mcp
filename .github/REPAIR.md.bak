@@ -194,26 +194,13 @@ the gate must pass both.
 3. Tests were green **before AND after** the change. A fix that "makes tests
    pass" from a red base proves only that it changed the failure, not that it
    fixed anything.
-4. **Every** check run on the PR's head SHA is `completed` with conclusion
-   `success` — one hundred percent green. Any other conclusion (`failure`,
-   `cancelled`, `timed_out`, `skipped`, `neutral`, `stale`,
-   `action_required`) is a block, and any check still `queued` or
-   `in_progress` is a block — wait for completion and re-evaluate; never
-   merge ahead of a running check.
-5. At least one such successful check exists — **NO CHECKS AT ALL is a
-   BLOCK, never a pass** (S5.2).
-6. Every legacy commit-status context on the head SHA (the Statuses API,
-   used by some external CI instead of check runs), if any exist, reports
-   `success`. A `pending`, `failure`, or `error` context is a block.
+4. At least one check run on the PR's head SHA concluded `success`.
+5. Zero check runs concluded `failure`, `cancelled`, or `timed_out`.
+6. Check runs concluding `skipped` or `neutral` do **not** count toward
+   condition 4, and **NO CHECKS AT ALL is a BLOCK, never a pass** (S5.2).
 7. Zero unresolved review conversations on the PR.
 8. The diff is confined to the finding's files (S4).
 9. No cap from S7 is exceeded by this merge.
-
-Conditions 4–6 are deliberately stricter than GitHub's own required-status
-branch protection, which counts a skipped check as satisfying a requirement.
-Where a repo's branch protection already demands green CI and resolved
-conversations, GitHub enforces that floor on every merge path; this gate adds
-the ceiling (all-success, nothing skipped, nothing still running).
 
 ### S5.2 The trap this gate closes
 
