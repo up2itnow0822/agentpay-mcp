@@ -40,6 +40,17 @@ export interface SessionRecord {
   /** Unix timestamp (seconds) when the session expires */
   readonly expiresAt: number;
 
+  /**
+   * Expiry (Unix seconds) baked into the ISSUED token, preserved when the
+   * session is ended locally. endSession() forces `expiresAt` to 0 so the
+   * record can never be used again, which would otherwise destroy the only
+   * local record of when the bearer token actually stops being valid at the
+   * remote endpoint (it cannot be revoked, so that moment is unchanged by
+   * ending the session). Display code must report THIS value, not the
+   * force-expired `expiresAt`. Undefined for sessions never ended.
+   */
+  readonly tokenExpiresAt?: number;
+
   /** On-chain transaction hash of the initial session payment */
   readonly paymentTxHash: string;
 

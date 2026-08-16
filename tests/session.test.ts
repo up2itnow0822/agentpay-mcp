@@ -924,9 +924,84 @@ describe('x402_session_end tool', () => {
     const status = await handleX402SessionStatus({ session_id: sessionId });
 
     const text = status.content[0]!.text;
-    expect(text).toContain('Expired');
+    expect(text).toContain('Ended locally');
     expect(text).not.toContain('Token Info');
     expect(text).not.toContain(MOCK_SIGN_RESULT.slice(0, 20));
+  });
+
+  // ── The end-response warns that the token stays live until its real expiry.
+  //    Status must corroborate that, not contradict it with the 1970 sentinel
+  //    left behind by force-expiring the record. ──
+
+  it('x402_session_status reports the real token expiry after the session is ended', async () => {
+    const sessionId = await createSessionViaStart({ ttl_seconds: 3600 });
+
+    const before = lookupSession(sessionId);
+    if (!before.found) throw new Error('session should exist before end');
+    const expiresIso = new Date(before.session.expiresAt * 1000).toISOString();
+
+    const endResult = await handleX402SessionEnd({ session_id: sessionId });
+    expect(endResult.content[0]!.text).toContain(expiresIso);
+
+    const status = await handleX402SessionStatus({ session_id: sessionId });
+
+    const text = status.content[0]!.text;
+    // The expiry the end-response promised, not the force-expire sentinel
+    expect(text).toContain(expiresIso);
+    expect(text).not.toContain('1970-01-01T00:00:00.000Z');
+  });
+
+  it('x402_session_fetch reports the real token expiry for an ended session', async () => {
+    const sessionId = await createSessionViaStart({ ttl_seconds: 3600 });
+
+    const before = lookupSession(sessionId);
+    if (!before.found) throw new Error('session should exist before end');
+    const expiresIso = new Date(before.session.expiresAt * 1000).toISOString();
+
+    await handleX402SessionEnd({ session_id: sessionId });
+
+    const result = await handleX402SessionFetch({
+      session_id: sessionId,
+      url: `${TEST_ENDPOINT}/data`,
+    });
+
+    expect(result.isError).toBe(true);
+    const text = result.content[0]!.text;
+    expect(text).toContain(expiresIso);
+    expect(text).not.toContain('1970-01-01T00:00:00.000Z');
+  });
+
+  // ── An expired record lingers in the store until pruneExpired() runs, so
+  //    ending it must scrub the token material too — otherwise the credential
+  //    stays readable via x402_session_status Token Info. ──
+
+  it('scrubs the stored token material when ending an already-expired session', async () => {
+    const sessionId = await createSessionViaStart({ ttl_seconds: 1 });
+
+    const before = lookupSession(sessionId);
+    if (!before.found) throw new Error('session should exist before end');
+    expect(before.session.sessionToken).toContain(MOCK_SIGN_RESULT);
+    const expiresIso = new Date(before.session.expiresAt * 1000).toISOString();
+
+    await new Promise((r) => setTimeout(r, 1200));
+
+    const result = await handleX402SessionEnd({ session_id: sessionId });
+    expect(result.isError).toBeFalsy();
+    expect(result.content[0]!.text).toContain('already expired');
+
+    const after = lookupSession(sessionId);
+    if (!after.found) throw new Error('ended session should still resolve as expired');
+    expect(after.session.sessionToken).toBe('');
+    expect(after.session.signature).toBe('');
+
+    // …and it must not be readable back out through the status renderer,
+    // which still reports the true (past) expiry rather than the sentinel.
+    const status = await handleX402SessionStatus({ session_id: sessionId });
+    const text = status.content[0]!.text;
+    expect(text).not.toContain('Token Info');
+    expect(text).not.toContain(MOCK_SIGN_RESULT.slice(0, 20));
+    expect(text).toContain(expiresIso);
+    expect(text).not.toContain('1970-01-01T00:00:00.000Z');
   });
 
   it('agent-facing tool descriptions state that issued tokens cannot be revoked', () => {
@@ -1111,6 +1186,36 @@ describe('Session manager (direct unit tests)', () => {
     expect(lookup.session.sessionToken).toBe('');
     expect(lookup.session.signature).toBe('');
     expect(listActiveSessions()).toHaveLength(0);
+  });
+
+  it('endSession preserves the issued token expiry it force-expires the record past', async () => {
+    const session = await createSession({
+      endpoint: 'https://a.example.com',
+      ttlSeconds: 3600,
+      walletAddress: '0xwallet',
+      paymentTxHash: '0xtx',
+      paymentAmount: 100n,
+      paymentToken: '0x0000000000000000000000000000000000000000',
+      paymentRecipient: '0xrecip',
+      signMessage: makeSignFn(),
+    });
+    const issuedExpiry = session.expiresAt;
+    expect(issuedExpiry).toBeGreaterThan(0);
+
+    endSession(session.sessionId);
+
+    const lookup = lookupSession(session.sessionId);
+    if (!lookup.found) throw new Error('ended session should still resolve as expired');
+    // Unusable locally…
+    expect(lookup.session.expiresAt).toBe(0);
+    // …but the moment the still-unrevocable token lapses is not lost
+    expect(lookup.session.tokenExpiresAt).toBe(issuedExpiry);
+
+    // Ending an already-ended session must not overwrite that truth with 0
+    endSession(session.sessionId);
+    const again = lookupSession(session.sessionId);
+    if (!again.found) throw new Error('session should still resolve');
+    expect(again.session.tokenExpiresAt).toBe(issuedExpiry);
   });
 
   it('buildSessionHeaders includes all required x402 V2 headers', async () => {
