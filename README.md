@@ -793,10 +793,10 @@ AgentPay MCP aligns with the emerging MCP security standards for 2026, including
 
 **Security posture documentation:** See [`docs/security-posture.md`](docs/security-posture.md) for the full compliance matrix covering:
 
-- **CoSAI T9 (Financial Fraud)** — On-chain spend caps, merchant allowlists, and human-approval gates mitigate unauthorized agent spending
+- **CoSAI T9 (Financial Fraud)** — Layered spend controls: an in-process spend policy (`set_spend_policy`, enforced in the MCP server process — not on-chain) plus on-chain AgentAccountV2 limits and approval queueing configured by the wallet owner
 - **CoSAI T10 (Identity Spoofing)** — ERC-8004 agent identity verification + non-custodial key management prevent identity-based attacks
 - **OAuth 2.1 + PKCE** — MCP server authentication supports OAuth 2.1 with PKCE for enterprise SSO integration (Azure AD, Okta)
-- **MCP Audit Logging** — Every tool invocation logged with timestamp, parameters, outcome, and transaction hash (where applicable)
+- **Audit Logging** — On-chain AgentAccountV2 event history via `get_transaction_history` (executions, queued transactions, approvals, policy updates); there is no per-tool-invocation log — see the security posture doc for exactly what is and is not recorded
 
 For enterprise security teams evaluating MCP servers: the security posture document provides the artifact your audit process needs.
 
