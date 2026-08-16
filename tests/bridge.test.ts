@@ -92,6 +92,78 @@ describe('bridge_usdc', () => {
     expect(result.content[0].text).toContain('bridge_usdc failed')
   })
 
+  it('rejects comma-formatted amount ("1,000") instead of parsing it as 1 USDC', async () => {
+    const mockBridge = vi.fn()
+    mockCreateBridge.mockReturnValue({ bridge: mockBridge } as any)
+
+    const result = await handleBridgeUsdc({
+      fromChain: 'base',
+      toChain: 'polygon',
+      amount: '1,000',
+    })
+
+    expect(result.isError).toBe(true)
+    expect(result.content[0].text).toContain('Invalid amount: "1,000"')
+    expect(mockBridge).not.toHaveBeenCalled()
+  })
+
+  it('rejects exponent, hex, multi-dot, empty, and negative amounts', async () => {
+    const mockBridge = vi.fn()
+    mockCreateBridge.mockReturnValue({ bridge: mockBridge } as any)
+
+    for (const bad of ['1e3', '0x10', '1.2.3', '', '-5']) {
+      const result = await handleBridgeUsdc({
+        fromChain: 'base',
+        toChain: 'polygon',
+        amount: bad,
+      })
+
+      expect(result.isError, `amount "${bad}" should be rejected`).toBe(true)
+      expect(result.content[0].text).toContain('Invalid amount')
+    }
+    expect(mockBridge).not.toHaveBeenCalled()
+  })
+
+  it('rejects amounts with more than 6 decimal places', async () => {
+    const mockBridge = vi.fn()
+    mockCreateBridge.mockReturnValue({ bridge: mockBridge } as any)
+
+    const result = await handleBridgeUsdc({
+      fromChain: 'base',
+      toChain: 'polygon',
+      amount: '0.0000001',
+    })
+
+    expect(result.isError).toBe(true)
+    expect(result.content[0].text).toContain('Too many decimal places (max 6)')
+    expect(mockBridge).not.toHaveBeenCalled()
+  })
+
+  it('converts large amounts exactly, beyond float precision', async () => {
+    const mockBridge = vi.fn().mockResolvedValue({
+      burnTxHash: '0xburntx789',
+      mintTxHash: '0xminttxabc',
+      fromChain: 'base',
+      toChain: 'polygon',
+      recipient: '0xagent',
+      amount: 10000000000000000001n,
+      elapsedMs: 9000,
+    })
+    mockCreateBridge.mockReturnValue({ bridge: mockBridge } as any)
+
+    const result = await handleBridgeUsdc({
+      fromChain: 'base',
+      toChain: 'polygon',
+      amount: '10000000000000.000001',
+    })
+
+    expect(result.isError).toBeUndefined()
+    // parseFloat would lose the final base unit (…000n); strict parsing keeps it.
+    expect(mockBridge).toHaveBeenCalledWith(10000000000000000001n, 'polygon')
+    const data = JSON.parse(result.content[0].text)
+    expect(data.rawAmount).toBe('10000000000000000001')
+  })
+
   it('returns error when bridge call fails', async () => {
     const mockBridge = vi.fn().mockRejectedValue(new Error('Circle attestation timeout'))
     mockCreateBridge.mockReturnValue({ bridge: mockBridge } as any)

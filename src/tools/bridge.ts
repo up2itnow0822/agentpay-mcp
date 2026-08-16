@@ -10,6 +10,7 @@ type AnyWalletClient = any
 import { getWallet } from '../utils/client.js'
 import { textContent, formatError } from '../utils/format.js'
 import { enforceSpendPolicy } from './budget.js'
+import { parseAmountStrict } from '../utils/amount.js'
 
 // Supported CCTP V2 chain names
 const SUPPORTED_CHAINS = [
@@ -77,13 +78,9 @@ export async function handleBridgeUsdc(
       throw new Error('fromChain and toChain must be different')
     }
 
-    // Parse USDC amount (6 decimals)
+    // Parse USDC amount (6 decimals) — strict string parsing, no float rounding
     const USDC_DECIMALS = 6
-    const amountFloat = parseFloat(input.amount)
-    if (isNaN(amountFloat) || amountFloat <= 0) {
-      throw new Error(`Invalid amount: "${input.amount}". Must be a positive number.`)
-    }
-    const rawAmount = BigInt(Math.round(amountFloat * 10 ** USDC_DECIMALS))
+    const rawAmount = parseAmountStrict(input.amount, USDC_DECIMALS)
 
     // Enforce the in-process spend policy before burning USDC on the source
     // chain. rawAmount is USDC 6-decimal base units; enforceSpendPolicy

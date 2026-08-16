@@ -113,6 +113,95 @@ describe('create_escrow', () => {
     expect(result.content[0].text).toContain('create_escrow failed')
   })
 
+  it('rejects comma-formatted stakeAmount ("1,000") instead of parsing it as 1 USDC', async () => {
+    const mockCreate = vi.fn()
+    MockMutualStakeEscrow.mockImplementation(function() { return { create: mockCreate } } as any)
+
+    const result = await handleCreateEscrow({
+      counterpartyAddress: '0xseller00000000000000000000000000000000001',
+      stakeAmount: '1,000',
+      terms: 'Escrow for 1,000 USDC',
+    })
+
+    expect(result.isError).toBe(true)
+    expect(result.content[0].text).toContain('Invalid stakeAmount: "1,000"')
+    expect(mockCreate).not.toHaveBeenCalled()
+  })
+
+  it('rejects exponent, hex, multi-dot, empty, and negative stakeAmounts', async () => {
+    const mockCreate = vi.fn()
+    MockMutualStakeEscrow.mockImplementation(function() { return { create: mockCreate } } as any)
+
+    for (const bad of ['1e3', '0x10', '1.2.3', '', '-5']) {
+      const result = await handleCreateEscrow({
+        counterpartyAddress: '0xseller00000000000000000000000000000000001',
+        stakeAmount: bad,
+        terms: 'Bad amount test',
+      })
+
+      expect(result.isError, `stakeAmount "${bad}" should be rejected`).toBe(true)
+      expect(result.content[0].text).toContain('Invalid stakeAmount')
+    }
+    expect(mockCreate).not.toHaveBeenCalled()
+  })
+
+  it('rejects stakeAmount with more than 6 decimal places', async () => {
+    const mockCreate = vi.fn()
+    MockMutualStakeEscrow.mockImplementation(function() { return { create: mockCreate } } as any)
+
+    const result = await handleCreateEscrow({
+      counterpartyAddress: '0xseller00000000000000000000000000000000001',
+      stakeAmount: '0.0000001',
+      terms: 'Sub-unit amount test',
+    })
+
+    expect(result.isError).toBe(true)
+    expect(result.content[0].text).toContain('Too many decimal places (max 6)')
+    expect(mockCreate).not.toHaveBeenCalled()
+  })
+
+  it('converts the minimum USDC unit exactly (0.000001 → 1 base unit)', async () => {
+    const mockCreate = vi.fn().mockResolvedValue({
+      address: '0xvault000000000000000000000000000000000003',
+      txHash: '0xescrowtx789',
+    })
+    MockMutualStakeEscrow.mockImplementation(function() { return { create: mockCreate } } as any)
+
+    const result = await handleCreateEscrow({
+      counterpartyAddress: '0xseller00000000000000000000000000000000001',
+      stakeAmount: '0.000001',
+      terms: 'Minimum unit test',
+    })
+
+    expect(result.isError).toBeUndefined()
+    expect(mockCreate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        paymentAmount: 1n,
+        buyerStake: 1n,
+        sellerStake: 1n,
+      })
+    )
+  })
+
+  it('accepts whitespace-padded stakeAmount (" 5 " → 5 USDC)', async () => {
+    const mockCreate = vi.fn().mockResolvedValue({
+      address: '0xvault000000000000000000000000000000000004',
+      txHash: '0xescrowtxabc',
+    })
+    MockMutualStakeEscrow.mockImplementation(function() { return { create: mockCreate } } as any)
+
+    const result = await handleCreateEscrow({
+      counterpartyAddress: '0xseller00000000000000000000000000000000001',
+      stakeAmount: ' 5 ',
+      terms: 'Trim test',
+    })
+
+    expect(result.isError).toBeUndefined()
+    expect(mockCreate).toHaveBeenCalledWith(
+      expect.objectContaining({ paymentAmount: 5000000n })
+    )
+  })
+
   it('returns error when escrow creation fails', async () => {
     const mockCreate = vi.fn().mockRejectedValue(new Error('Factory not deployed'))
     MockMutualStakeEscrow.mockImplementation(function() { return { create: mockCreate } } as any)

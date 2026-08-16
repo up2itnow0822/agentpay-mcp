@@ -12,6 +12,7 @@ import {
   cancelTransaction,
 } from 'agentwallet-sdk';
 import { getWallet, getConfig } from '../utils/client.js';
+import { parseAmountStrict } from '../utils/amount.js';
 import {
   textContent,
   formatEth,
@@ -168,12 +169,9 @@ export async function handleCheckSpendLimit(
     const token = (input.token as Address | undefined) ?? NATIVE_TOKEN;
     const tokenLabel = token === NATIVE_TOKEN ? 'ETH' : token;
 
-    // Parse amount (ETH string → wei bigint)
-    const amountEth = parseFloat(input.amount_eth);
-    if (isNaN(amountEth) || amountEth <= 0) {
-      throw new Error(`Invalid amount: "${input.amount_eth}". Must be a positive number.`);
-    }
-    const amountWei = BigInt(Math.round(amountEth * 1e18));
+    // Parse amount (ETH string → wei bigint) — strict string parsing, no float rounding
+    const ETH_DECIMALS = 18;
+    const amountWei = parseAmountStrict(input.amount_eth, ETH_DECIMALS);
 
     const budget = await checkBudget(wallet, token);
     const forecast = await getBudgetForecast(wallet, token);

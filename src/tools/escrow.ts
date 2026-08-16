@@ -11,6 +11,7 @@ type AnyClient = any
 import { getWallet, getConfig } from '../utils/client.js'
 import { textContent, formatError } from '../utils/format.js'
 import { enforceSpendPolicy } from './budget.js'
+import { parseAmountStrict } from '../utils/amount.js'
 
 // ─── Schema ────────────────────────────────────────────────────────────────
 
@@ -110,13 +111,9 @@ export async function handleCreateEscrow(
       )
     }
 
-    // Parse USDC amount (6 decimals)
+    // Parse USDC amount (6 decimals) — strict string parsing, no float rounding
     const USDC_DECIMALS = 6
-    const amountFloat = parseFloat(input.stakeAmount)
-    if (isNaN(amountFloat) || amountFloat <= 0) {
-      throw new Error(`Invalid stakeAmount: "${input.stakeAmount}". Must be a positive number.`)
-    }
-    const paymentAmount = BigInt(Math.round(amountFloat * 10 ** USDC_DECIMALS))
+    const paymentAmount = parseAmountStrict(input.stakeAmount, USDC_DECIMALS, 'stakeAmount')
 
     // Enforce the in-process spend policy before creating the escrow. The
     // buyer commits paymentAmount plus an equal buyerStake, so the policy is
