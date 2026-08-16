@@ -199,7 +199,20 @@ export function findSessionForUrl(url: string): SessionRecord | undefined {
  *
  * Prefix sessions cover the endpoint path itself, query strings on that path,
  * and descendants below that path. They do not cover raw string lookalikes such
- * as /v10 for /v1, or host/path prefixes on a different origin.
+ * as /v10 for /v1, or host/path prefixes on a different origin. Trailing
+ * slashes are normalised, so a session for /v1/ behaves identically to one
+ * for /v1 (and a request to /v1/ matches an endpoint of /v1).
+ *
+ * Query parameters on the session endpoint are treated as REQUIRED
+ * parameters: the requested URL must carry every endpoint parameter with an
+ * equal value. Parameter order never matters (comparison goes through
+ * URLSearchParams, with duplicate keys compared as value multisets), and
+ * extra request parameters are allowed. The requirement applies to the
+ * endpoint path itself and to sub-paths alike — e.g. /v1/users?version=2 is
+ * covered by a session for /v1?version=2, but /v1/users without it is not.
+ * That last case fails CLOSED deliberately: dropping a required parameter
+ * changes what the server serves, so requiring it everywhere is the safe
+ * reading.
  */
 export function isUrlCoveredBySession(
   url: string,
@@ -217,15 +230,17 @@ export function isUrlCoveredBySession(
       return false;
     }
 
-    if (endpoint.search && requested.search !== endpoint.search) {
+    if (!containsRequiredSearchParams(requested.searchParams, endpoint.searchParams)) {
       return false;
     }
 
-    const endpointPath = endpoint.pathname.endsWith('/')
-      ? endpoint.pathname
-      : `${endpoint.pathname}/`;
+    const endpointPath = normalisePathname(endpoint.pathname);
+    const requestedPath = normalisePathname(requested.pathname);
 
-    return requested.pathname === endpoint.pathname || requested.pathname.startsWith(endpointPath);
+    if (requestedPath === endpointPath) return true;
+
+    const boundaryPrefix = endpointPath === '/' ? '/' : `${endpointPath}/`;
+    return requestedPath.startsWith(boundaryPrefix);
   } catch {
     return false;
   }
@@ -295,6 +310,40 @@ function canonicalise(obj: Record<string, unknown>): string {
       return acc;
     }, {});
   return JSON.stringify(sorted);
+}
+
+/**
+ * Strip trailing slashes from a pathname so /v1/ and /v1 compare equal.
+ * The root path is preserved as '/'.
+ */
+function normalisePathname(pathname: string): string {
+  let normalised = pathname || '/';
+  while (normalised.length > 1 && normalised.endsWith('/')) {
+    normalised = normalised.slice(0, -1);
+  }
+  return normalised;
+}
+
+/**
+ * Check that every required (key, value) pair is present in the requested
+ * search params. Order-insensitive; duplicate keys are compared as value
+ * multisets (each required value must appear at least as many times in the
+ * request); extra request parameters are allowed.
+ */
+function containsRequiredSearchParams(
+  requested: URLSearchParams,
+  required: URLSearchParams
+): boolean {
+  for (const key of new Set(required.keys())) {
+    const requiredValues = required.getAll(key);
+    const requestedValues = requested.getAll(key);
+    for (const value of new Set(requiredValues)) {
+      const requiredCount = requiredValues.filter((v) => v === value).length;
+      const requestedCount = requestedValues.filter((v) => v === value).length;
+      if (requestedCount < requiredCount) return false;
+    }
+  }
+  return true;
 }
 
 /**
