@@ -417,6 +417,56 @@ describe('check_spend_limit tool', () => {
     expect(result.isError).toBe(true);
   });
 
+  it('rejects comma-formatted amount ("1,000") instead of checking limits for 1 ETH', async () => {
+    const result = await handleCheckSpendLimit({
+      amount_eth: '1,000',
+    });
+
+    expect(result.isError).toBe(true);
+    expect(result.content[0]!.text).toContain('Invalid amount: "1,000"');
+    expect(mockCheckBudget).not.toHaveBeenCalled();
+  });
+
+  it('rejects exponent, hex, multi-dot, and empty amounts', async () => {
+    for (const bad of ['1e3', '0x10', '1.2.3', '']) {
+      const result = await handleCheckSpendLimit({
+        amount_eth: bad,
+      });
+
+      expect(result.isError, `amount_eth "${bad}" should be rejected`).toBe(true);
+      expect(result.content[0]!.text).toContain('Invalid amount');
+    }
+    expect(mockCheckBudget).not.toHaveBeenCalled();
+  });
+
+  it('rejects amounts with more than 18 decimal places', async () => {
+    const result = await handleCheckSpendLimit({
+      amount_eth: '0.0000000000000000001', // 19 decimal places
+    });
+
+    expect(result.isError).toBe(true);
+    expect(result.content[0]!.text).toContain('Too many decimal places (max 18)');
+  });
+
+  it('checks the exact wei amount for high-precision values (no float rounding)', async () => {
+    // parseFloat collapses this 17-decimal value to exactly 1 ETH.
+    const result = await handleCheckSpendLimit({
+      amount_eth: '1.00000000000000001',
+    });
+
+    expect(result.isError).toBeFalsy();
+    expect(result.content[0]!.text).toContain('1.00000000000000001 ETH');
+  });
+
+  it('accepts whitespace-padded amounts (" 0.0001 ")', async () => {
+    const result = await handleCheckSpendLimit({
+      amount_eth: ' 0.0001 ',
+    });
+
+    expect(result.isError).toBeFalsy();
+    expect(result.content[0]!.text).toContain('APPROVED');
+  });
+
   it('handles SDK error gracefully', async () => {
     mockCheckBudget.mockRejectedValueOnce(new Error('RPC timeout'));
 
