@@ -9,6 +9,7 @@ import { createBridge } from 'agentwallet-sdk'
 type AnyWalletClient = any
 import { getWallet } from '../utils/client.js'
 import { textContent, formatError } from '../utils/format.js'
+import { enforceSpendPolicy } from './budget.js'
 
 // Supported CCTP V2 chain names
 const SUPPORTED_CHAINS = [
@@ -83,6 +84,36 @@ export async function handleBridgeUsdc(
       throw new Error(`Invalid amount: "${input.amount}". Must be a positive number.`)
     }
     const rawAmount = BigInt(Math.round(amountFloat * 10 ** USDC_DECIMALS))
+
+    // Enforce the in-process spend policy before burning USDC on the source
+    // chain. rawAmount is USDC 6-decimal base units; enforceSpendPolicy
+    // normalises it to the policy's 18-decimal ETH-equivalent caps (1 USDC
+    // counts as 1 ETH-equivalent) — never compare 6-decimal base units
+    // against wei-scale caps directly. CCTP mints to the burning wallet's own
+    // address, so the policy merchant is the agent wallet itself: allowlist-only
+    // policies must include the agent wallet address to permit bridging.
+    const bridgeRecipient = wallet.walletClient?.account?.address
+    if (!bridgeRecipient) {
+      throw new Error('Wallet client has no account; cannot verify spend policy for bridge_usdc.')
+    }
+    const policyDecision = await enforceSpendPolicy({
+      merchant: bridgeRecipient,
+      amount: rawAmount,
+      decimals: USDC_DECIMALS,
+    })
+    if (policyDecision.status === 'rejected') {
+      throw new Error(
+        policyDecision.reason ??
+          `Bridge blocked by spend policy for recipient ${bridgeRecipient}.`
+      )
+    }
+    if (policyDecision.status === 'draft') {
+      throw new Error(
+        `Bridge exceeds per-tx spend policy and was queued as draft` +
+          `${policyDecision.draftId ? ` (${policyDecision.draftId})` : ''}. ` +
+          (policyDecision.reason ?? 'Approve the draft before executing.')
+      )
+    }
 
     const bridge = createBridge(wallet.walletClient as AnyWalletClient, input.fromChain as SupportedChain)
 

@@ -10,6 +10,7 @@ import type { Address } from 'viem'
 type AnyClient = any
 import { getWallet, getConfig } from '../utils/client.js'
 import { textContent, formatError } from '../utils/format.js'
+import { enforceSpendPolicy } from './budget.js'
 
 // ─── Schema ────────────────────────────────────────────────────────────────
 
@@ -116,6 +117,33 @@ export async function handleCreateEscrow(
       throw new Error(`Invalid stakeAmount: "${input.stakeAmount}". Must be a positive number.`)
     }
     const paymentAmount = BigInt(Math.round(amountFloat * 10 ** USDC_DECIMALS))
+
+    // Enforce the in-process spend policy before creating the escrow. The
+    // buyer commits paymentAmount plus an equal buyerStake, so the policy is
+    // checked against the total buyer commitment (2× paymentAmount) in USDC
+    // 6-decimal base units; enforceSpendPolicy normalises that to the
+    // policy's 18-decimal ETH-equivalent caps (1 USDC counts as
+    // 1 ETH-equivalent) — never compare 6-decimal base units against
+    // wei-scale caps directly. The merchant is the escrow counterparty.
+    const buyerCommitment = paymentAmount * 2n // paymentAmount + buyerStake
+    const policyDecision = await enforceSpendPolicy({
+      merchant: input.counterpartyAddress,
+      amount: buyerCommitment,
+      decimals: USDC_DECIMALS,
+    })
+    if (policyDecision.status === 'rejected') {
+      throw new Error(
+        policyDecision.reason ??
+          `Escrow creation blocked by spend policy for counterparty ${input.counterpartyAddress}.`
+      )
+    }
+    if (policyDecision.status === 'draft') {
+      throw new Error(
+        `Escrow commitment exceeds per-tx spend policy and was queued as draft` +
+          `${policyDecision.draftId ? ` (${policyDecision.draftId})` : ''}. ` +
+          (policyDecision.reason ?? 'Approve the draft before executing.')
+      )
+    }
 
     // Deadline: N days from now
     const deadlineSecs = input.deadlineDays ?? 7

@@ -29,6 +29,19 @@ vi.mock('agentwallet-sdk', () => ({
   approveTransaction: vi.fn(),
   cancelTransaction: vi.fn(),
   getWalletHealth: vi.fn(),
+  SpendingPolicy: vi.fn(),
+  getGlobalRegistry: vi.fn(() => ({
+    getTokenByAddress: (address: string, chainId: number) => {
+      if (
+        chainId === 8453 &&
+        address.toLowerCase() === '0x833589fcd6edb6e08f4c7c32d4f71b54bda02913'
+      ) {
+        return { symbol: 'USDC', decimals: 6, address, chainId };
+      }
+      return undefined;
+    },
+    getToken: () => undefined,
+  })),
 }));
 
 // ─── Mock client utils ─────────────────────────────────────────────────────
@@ -57,16 +70,19 @@ vi.mock('../src/utils/client.js', () => ({
 
 import { handleX402Pay } from '../src/tools/x402.js';
 import { handleGetTransactionHistory } from '../src/tools/history.js';
-import { createX402Client, getActivityHistory } from 'agentwallet-sdk';
+import { handleSetSpendPolicy, _resetPolicyStore } from '../src/tools/budget.js';
+import { createX402Client, getActivityHistory, SpendingPolicy } from 'agentwallet-sdk';
 
 const mockGetActivityHistory = vi.mocked(getActivityHistory);
 const mockCreateX402Client = vi.mocked(createX402Client);
+const MockSpendingPolicy = vi.mocked(SpendingPolicy);
 
 // ─── x402_pay tests ────────────────────────────────────────────────────────
 
 describe('x402_pay tool', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    _resetPolicyStore();
   });
 
   afterEach(() => {
@@ -254,6 +270,86 @@ describe('x402_pay tool', () => {
 
     // The error should be caught and returned
     expect(result).toBeDefined();
+  });
+
+  it('fails closed when max_payment_eth rounds to zero base units (sub-wei cap)', async () => {
+    // A cap like 1e-19 ETH truncates to 0n base units. The guard must still
+    // run and reject every positive payment demand — not silently skip
+    // because 0n is falsy.
+    mockCreateX402Client.mockImplementationOnce(((_wallet: unknown, config: any) => ({
+      fetch: async (url: string, _init?: RequestInit) => {
+        await config.onBeforePayment(
+          {
+            scheme: 'exact',
+            network: 'base:8453',
+            asset: '0x0000000000000000000000000000000000000000',
+            amount: '1', // 1 wei demanded
+            payTo: '0xpayee0000000000000000000000000000000000',
+            maxTimeoutSeconds: 60,
+            extra: {},
+          },
+          url
+        );
+        return new Response('should not be reachable', { status: 200 });
+      },
+      getTransactionLog: vi.fn(() => []),
+      getDailySpendSummary: vi.fn(() => ({ global: 0n, byService: {}, resetsAt: 0 })),
+      budgetTracker: {},
+    })) as any);
+
+    const result = await handleX402Pay({
+      url: 'https://api.example.com/data',
+      max_payment_eth: '0.0000000000000000001', // 1e-19 ETH → 0n wei
+    });
+
+    expect(result.isError).toBe(true);
+    expect(result.content[0]!.text).toContain('exceeds max_payment_eth cap');
+  });
+
+  it('blocks payment via spend policy using honest USDC units', async () => {
+    const check = vi.fn().mockResolvedValue({
+      status: 'rejected',
+      reason: 'Rolling spend cap exceeded: spent 0, cap 1e20, attempted 5e20.',
+    });
+    MockSpendingPolicy.mockImplementation(function () {
+      return { check };
+    } as any);
+
+    await handleSetSpendPolicy({ dailyLimitEth: '100' });
+
+    mockCreateX402Client.mockImplementationOnce(((_wallet: unknown, config: any) => ({
+      fetch: async (url: string, _init?: RequestInit) => {
+        await config.onBeforePayment(
+          {
+            scheme: 'exact',
+            network: 'base:8453',
+            asset: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913', // USDC (6 dp)
+            amount: '500000000', // 500 USDC in base units
+            payTo: '0xpayee0000000000000000000000000000000000',
+            maxTimeoutSeconds: 60,
+            extra: {},
+          },
+          url
+        );
+        return new Response('should not be reachable', { status: 200 });
+      },
+      getTransactionLog: vi.fn(() => []),
+      getDailySpendSummary: vi.fn(() => ({ global: 0n, byService: {}, resetsAt: 0 })),
+      budgetTracker: {},
+    })) as any);
+
+    const result = await handleX402Pay({
+      url: 'https://api.example.com/data',
+    });
+
+    expect(result.isError).toBe(true);
+    expect(result.content[0]!.text).toContain('Rolling spend cap exceeded');
+    // 500 USDC (6 decimals) must reach the policy as 5e20 ETH-equivalent
+    // wei — not 500_000_000, which slips 1e12 under every cap.
+    expect(check).toHaveBeenCalledWith({
+      merchant: '0xpayee0000000000000000000000000000000000',
+      amount: 5e20,
+    });
   });
 
   it('handles network errors gracefully', async () => {

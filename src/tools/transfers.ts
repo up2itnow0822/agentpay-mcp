@@ -10,6 +10,7 @@ import type { Address } from 'viem'
 type AnyCtx = any
 import { getWallet, getConfig } from '../utils/client.js'
 import { textContent, formatError } from '../utils/format.js'
+import { enforceSpendPolicy } from './budget.js'
 
 // ─── send_token ────────────────────────────────────────────────────────────
 
@@ -59,6 +60,27 @@ export async function handleSendToken(
     }
 
     const rawAmount = parseAmount(input.amount, token.decimals)
+
+    // rawAmount is in the token's base units; decimals lets the policy
+    // normalise to its 18-decimal ETH-equivalent caps.
+    const policyDecision = await enforceSpendPolicy({
+      merchant: input.recipientAddress,
+      amount: rawAmount,
+      decimals: token.decimals,
+    })
+    if (policyDecision.status === 'rejected') {
+      throw new Error(
+        policyDecision.reason ??
+          `Transfer blocked by spend policy for recipient ${input.recipientAddress}.`
+      )
+    }
+    if (policyDecision.status === 'draft') {
+      throw new Error(
+        `Transfer exceeds per-tx spend policy and was queued as draft` +
+          `${policyDecision.draftId ? ` (${policyDecision.draftId})` : ''}. ` +
+          (policyDecision.reason ?? 'Approve the draft before executing.')
+      )
+    }
 
     const txHash = await agentTransferToken(wallet, {
       token: token.address as Address,

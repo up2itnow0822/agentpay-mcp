@@ -19,6 +19,8 @@ import { createX402Client } from 'agentwallet-sdk';
 import { getWallet, getConfig } from '../utils/client.js';
 import { textContent, formatError, chainName } from '../utils/format.js';
 import { supportedX402NetworksForChainId } from '../utils/x402-networks.js';
+import { maxPaymentBaseUnits, resolveX402AssetDecimals } from '../utils/payment-cap.js';
+import { enforceSpendPolicy } from './budget.js';
 import {
   createSession,
   lookupSession,
@@ -156,14 +158,11 @@ export async function handleX402SessionStart(
     const config = getConfig();
     const timeoutMs = input.timeout_ms ?? 30000;
 
-    // Parse optional payment cap
-    let maxPaymentWei: bigint | undefined;
     if (input.max_payment_eth) {
       const cap = parseFloat(input.max_payment_eth);
       if (isNaN(cap) || cap <= 0) {
         throw new Error(`Invalid max_payment_eth: "${input.max_payment_eth}"`);
       }
-      maxPaymentWei = BigInt(Math.round(cap * 1e18));
     }
 
     // Track payment
@@ -173,19 +172,45 @@ export async function handleX402SessionStart(
     let paymentRecipient = '';
     let paymentToken = '0x0000000000000000000000000000000000000000';
 
-    // x402 client to handle the one-time session payment
+    // x402 client to handle the one-time session payment.
+    // Cap uses the selected asset's decimals (not ETH-wei).
     const x402Client = createX402Client(wallet, {
       autoPay: true,
       maxRetries: 1,
       supportedNetworks: supportedX402NetworksForChainId(config.chainId),
-      globalPerRequestMax: maxPaymentWei,
-      onBeforePayment: (req) => {
+      onBeforePayment: async (req) => {
         const amount = BigInt(req.amount);
-        if (maxPaymentWei && amount > maxPaymentWei) {
+        if (input.max_payment_eth) {
+          const maxRaw = maxPaymentBaseUnits(
+            input.max_payment_eth,
+            req.asset,
+            config.chainId
+          );
+          if (amount > maxRaw) {
+            throw new Error(
+              `Session payment (${amount} base units) exceeds max_payment_eth cap ` +
+              `(${maxRaw} base units for asset ${req.asset} = ${input.max_payment_eth}). ` +
+              `Set a higher max_payment_eth to proceed.`
+            );
+          }
+        }
+
+        // amount is in the offered asset's base units; the decimals thunk
+        // only runs when a policy is configured, and resolution failures
+        // reject (fail closed) inside enforceSpendPolicy.
+        const policyDecision = await enforceSpendPolicy({
+          merchant: req.payTo,
+          amount,
+          decimals: () =>
+            resolveX402AssetDecimals(
+              req.asset ?? '0x0000000000000000000000000000000000000000',
+              config.chainId
+            ),
+        });
+        if (policyDecision.status !== 'approved') {
           throw new Error(
-            `Session payment (${amount} wei) exceeds max_payment_eth cap ` +
-            `(${maxPaymentWei} wei = ${input.max_payment_eth} ETH). ` +
-            `Set a higher max_payment_eth to proceed.`
+            policyDecision.reason ??
+              `Session payment blocked by spend policy (${policyDecision.status}).`
           );
         }
         return true;

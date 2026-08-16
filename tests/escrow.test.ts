@@ -7,6 +7,8 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 
 vi.mock('agentwallet-sdk', () => ({
   MutualStakeEscrow: vi.fn(),
+  SpendingPolicy: vi.fn(),
+  checkBudget: vi.fn(),
 }))
 
 // ─── Mock client utils ─────────────────────────────────────────────────────
@@ -26,13 +28,16 @@ vi.mock('../src/utils/client.js', () => ({
 }))
 
 import { handleCreateEscrow } from '../src/tools/escrow.js'
-import { MutualStakeEscrow } from 'agentwallet-sdk'
+import { handleSetSpendPolicy, _resetPolicyStore } from '../src/tools/budget.js'
+import { MutualStakeEscrow, SpendingPolicy } from 'agentwallet-sdk'
 
 const MockMutualStakeEscrow = vi.mocked(MutualStakeEscrow)
+const MockSpendingPolicy = vi.mocked(SpendingPolicy)
 
 describe('create_escrow', () => {
   beforeEach(() => {
     vi.clearAllMocks()
+    _resetPolicyStore()
   })
 
   it('creates an escrow successfully with factory from config', async () => {
@@ -121,5 +126,85 @@ describe('create_escrow', () => {
     expect(result.isError).toBe(true)
     expect(result.content[0].text).toContain('create_escrow failed')
     expect(result.content[0].text).toContain('Factory not deployed')
+  })
+
+  // ─── Spend policy enforcement ────────────────────────────────────────────
+
+  it('blocks escrow creation when the counterparty is not allowlisted', async () => {
+    const check = vi.fn().mockResolvedValue({
+      status: 'rejected',
+      reason:
+        'Merchant "0xseller00000000000000000000000000000000001" is not on the allowlist.',
+    })
+    MockSpendingPolicy.mockImplementation(function () { return { check } } as any)
+
+    const mockCreate = vi.fn()
+    MockMutualStakeEscrow.mockImplementation(function() { return { create: mockCreate } } as any)
+
+    await handleSetSpendPolicy({
+      allowedRecipients: ['0x0000000000000000000000000000000000000001'],
+    })
+
+    const result = await handleCreateEscrow({
+      counterpartyAddress: '0xseller00000000000000000000000000000000001',
+      stakeAmount: '100',
+      terms: 'Blocked escrow',
+    })
+
+    expect(result.isError).toBe(true)
+    expect(result.content[0].text).toContain('allowlist')
+    expect(mockCreate).not.toHaveBeenCalled()
+    // Total buyer commitment = payment + equal buyer stake = 200 USDC
+    // (6 decimals), normalised to 2e20 ETH-equivalent wei.
+    expect(check).toHaveBeenCalledWith({
+      merchant: '0xseller00000000000000000000000000000000001',
+      amount: 2e20,
+    })
+  })
+
+  it('blocks escrow creation when the spend cap is exceeded', async () => {
+    const check = vi.fn().mockResolvedValue({
+      status: 'rejected',
+      reason: 'Rolling spend cap exceeded: spent 0, cap 1e20, attempted 2e20.',
+    })
+    MockSpendingPolicy.mockImplementation(function () { return { check } } as any)
+
+    const mockCreate = vi.fn()
+    MockMutualStakeEscrow.mockImplementation(function() { return { create: mockCreate } } as any)
+
+    await handleSetSpendPolicy({ dailyLimitEth: '100' })
+
+    const result = await handleCreateEscrow({
+      counterpartyAddress: '0xseller00000000000000000000000000000000001',
+      stakeAmount: '100',
+      terms: 'Over-cap escrow',
+    })
+
+    expect(result.isError).toBe(true)
+    expect(result.content[0].text).toContain('Rolling spend cap exceeded')
+    expect(mockCreate).not.toHaveBeenCalled()
+  })
+
+  it('creates the escrow when the spend policy approves', async () => {
+    const check = vi.fn().mockResolvedValue({ status: 'approved' })
+    MockSpendingPolicy.mockImplementation(function () { return { check } } as any)
+
+    const mockCreate = vi.fn().mockResolvedValue({
+      address: '0xvault000000000000000000000000000000000003',
+      txHash: '0xescrowtx789',
+    })
+    MockMutualStakeEscrow.mockImplementation(function() { return { create: mockCreate } } as any)
+
+    await handleSetSpendPolicy({ dailyLimitEth: '1000' })
+
+    const result = await handleCreateEscrow({
+      counterpartyAddress: '0xseller00000000000000000000000000000000001',
+      stakeAmount: '100',
+      terms: 'Approved escrow',
+    })
+
+    expect(result.isError).toBeUndefined()
+    expect(check).toHaveBeenCalledOnce()
+    expect(mockCreate).toHaveBeenCalledOnce()
   })
 })

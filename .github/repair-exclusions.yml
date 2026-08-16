@@ -1,0 +1,103 @@
+# =============================================================================
+# repair-exclusions.yml — kill switches, excluded repos, and excluded paths
+# for the Daily Repair workflow (.github/workflows/daily-repair.yml).
+#
+# FAIL-CLOSED SEMANTICS — read this before editing:
+#   The repair preflight treats ANY of the following as "disabled":
+#     - this file is missing from the repo
+#     - this file does not parse as YAML
+#     - a kill-switch key is absent from this file
+#   In other words: missing / unparsable / absent key == FALSE. Repair and
+#   auto-merge only proceed when the corresponding key below is present,
+#   parseable, and explicitly `true`. Deleting this file does not enable
+#   anything — it disables everything.
+#
+# SCOPE — each repo edits its OWN copy:
+#   This file is installed into every repo (including the excluded ones —
+#   a repo's own copy is what makes its repair preflight refuse). Editing
+#   the copy in one repo changes behavior for that repo only. There is no
+#   central override.
+#
+# KILL SWITCHES:
+#   repair_enabled: false    -> stop ALL repair activity in this repo,
+#                               immediately. No PRs, no pushes, nothing.
+#   automerge_enabled: false -> repair keeps running and PRs keep opening,
+#                               but NOTHING merges itself. This is the switch
+#                               to reach for after a bad merge: you re-take
+#                               the merge decision while trust rebuilds.
+# =============================================================================
+
+# Master switch for the repair layer. Must be exactly `true` to allow any
+# repair activity in this repo. Anything else (false, missing, typo) = off.
+# SHIPS FALSE on purpose: reviews start immediately, but repair stays dark
+# until you deliberately enable it (RUNBOOK step 6: set REPAIR_TOKEN, run the
+# merge-gates script, read a dry run, THEN flip this to true). Without this
+# default, every freshly installed repo would file a "Daily Repair FAILED —
+# missing REPAIR_TOKEN" issue at 09:00 UTC every morning before you ever
+# reached the enable-repair step.
+repair_enabled: false
+
+# Auto-merge switch (GREEN-tier PRs only; YELLOW and RED never self-merge).
+# Must be exactly `true` for the auto-merge gate to even be evaluated.
+automerge_enabled: true
+
+# DO-NOT-TOUCH repos, currently in active development. The KIT-ROOT copy of
+# this list is the master exclusion consumed by install-daily-review.sh,
+# set-oauth-secret.sh, and the long-tail sweep: these repos get NO kit, NO
+# reviews, NO sweep, NO secrets — the maintainer leaves them entirely alone.
+# Belt-and-braces: if the kit ever lands in one of them anyway, the repo's own
+# copy of this list still makes its repair preflight refuse to open PRs.
+# Edit the kit-root copy to change coverage; remove a repo from the list when
+# it is ready for the maintainer.
+excluded_repos:
+  - Eddy-s_Sandbox_Agent_Operating_System
+  - MapMe
+  - Agent-OS
+  - agent-os-eddy-sandbox
+  - HybridFaceFusion_and_DeepFaceLab
+
+# Paths the repair agent must never modify, as glob patterns relative to the
+# repo root. Defaults cover: the kit's own contract/workflow files (the agent
+# is prohibited from editing its own rules), lockfiles (regenerate, don't
+# hand-edit), build output, vendored code, and database migrations (append
+# new ones; never rewrite history that has already run against a database).
+excluded_paths:
+  # Kit contract + workflow files — the repair agent may never edit its own
+  # contract, exclusion list, schema, or the workflows that run it.
+  - ".github/workflows/**"
+  - ".github/CODE_REVIEW.md"
+  - ".github/REPAIR.md"
+  - ".github/repair-exclusions.yml"
+  - ".github/review-schema.json"
+  # Lockfiles — machine-generated; a hand edit desynchronizes them from their
+  # manifest. If a dependency change is the fix, it is not GREEN anyway.
+  - "**/package-lock.json"
+  - "**/yarn.lock"
+  - "**/pnpm-lock.yaml"
+  - "**/Cargo.lock"
+  - "**/poetry.lock"
+  - "**/Pipfile.lock"
+  - "**/Gemfile.lock"
+  - "**/composer.lock"
+  - "**/go.sum"
+  # Build / distribution output — fix the source, not the artifact.
+  - "dist/**"
+  - "build/**"
+  - "out/**"
+  - "**/*.min.js"
+  - "**/*.min.css"
+  # Vendored / third-party code — upstream owns it; patches belong upstream.
+  - "vendor/**"
+  - "third_party/**"
+  - "node_modules/**"
+  # Database migrations — already-applied migrations are immutable history.
+  - "**/migrations/**"
+
+# Change classes permanently demoted out of GREEN for this repo, per
+# REPAIR.md S9.1: when a GREEN fix breaks something, its change class is
+# added here and can never auto-merge again in this repo. The agent never
+# edits this file — it posts a demotion request and a HUMAN appends the
+# entry (class name per REPAIR.md's tiering rubric, one-line reason, date).
+# Starts empty; grows only from real incidents; entries are removed only by
+# a deliberate human edit.
+demoted_classes: []

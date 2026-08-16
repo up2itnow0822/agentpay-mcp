@@ -27,13 +27,129 @@ export function _resetPolicyStore(): void {
   _spendingPolicyByScope.clear()
 }
 
+export type SpendPolicyDecision =
+  | { status: 'approved' }
+  | { status: 'rejected' | 'draft'; reason?: string; draftId?: string }
+
+/**
+ * Enforce the in-process spend policy for a payment attempt.
+ * If no policy is configured at all, the payment is allowed.
+ *
+ * Scopes: every configured policy — the "global" scope and any policy set
+ * under a custom scopeKey — is enforced together (union). All of them must
+ * approve; the first rejection or draft decision wins. This keeps scoped
+ * policies fail-closed: a policy stored under any scopeKey is consulted on
+ * every value-moving path, never silently ignored.
+ *
+ * Units: `amount` is in the asset's own base units (wei for ETH, 1e-6 for
+ * USDC), with `decimals` naming that asset's decimals. Policy caps from
+ * set_spend_policy are stored in 18-decimal "ETH-equivalent" units
+ * (parseEther of the human string), so the amount is normalised here by
+ * scaling base units × 10^(18 - decimals) before comparison. One whole token
+ * therefore counts as 1 ETH-equivalent: with perTxCapEth "5", a 10 USDC
+ * payment (10_000_000 base units → 1e19) is over the 5e18 cap and blocked.
+ * Never compare 6-decimal USDC base units against wei-scale caps directly —
+ * that silently loosens every cap by a factor of 1e12.
+ *
+ * `decimals` may be a thunk so that asset-decimal resolution (which can throw
+ * for unregistered assets) only runs when a policy is actually configured.
+ *
+ * Fail closed: ANY error while evaluating the policy — decimals resolution,
+ * numeric conversion, or the policy engine itself — rejects the payment, and
+ * unrecognised policy statuses are treated as rejections.
+ */
+export async function enforceSpendPolicy(input: {
+  merchant: string
+  /** Amount in the asset's base units. BigInt is preferred for exactness. */
+  amount: number | bigint
+  /** Decimals of the asset `amount` is denominated in (0–18), or a thunk. */
+  decimals: number | (() => number)
+}): Promise<SpendPolicyDecision> {
+  const policies = Array.from(_spendingPolicyByScope.entries())
+  if (policies.length === 0) return { status: 'approved' }
+
+  try {
+    const decimals =
+      typeof input.decimals === 'function' ? input.decimals() : input.decimals
+    if (!Number.isInteger(decimals) || decimals < 0 || decimals > 18) {
+      return {
+        status: 'rejected',
+        reason:
+          `Spend policy check failed (fail-closed): unsupported asset decimals ` +
+          `${String(decimals)}. Expected an integer between 0 and 18.`,
+      }
+    }
+
+    const baseUnits =
+      typeof input.amount === 'bigint' ? input.amount : BigInt(input.amount)
+    if (baseUnits < 0n) {
+      return {
+        status: 'rejected',
+        reason: 'Spend policy check failed (fail-closed): negative amount.',
+      }
+    }
+
+    // Normalise to the policy's canonical 18-decimal ETH-equivalent scale.
+    const scaled = baseUnits * 10n ** BigInt(18 - decimals)
+
+    // SpendingPolicy tracks amounts as JS numbers. Convert exactly where
+    // possible; when the bigint exceeds float precision and rounds down,
+    // bias one ULP upward so boundary comparisons fail closed (the policy
+    // must never see less than the true amount).
+    let amountNumber = Number(scaled)
+    if (!Number.isFinite(amountNumber)) {
+      return {
+        status: 'rejected',
+        reason:
+          'Spend policy check failed (fail-closed): amount too large to evaluate. ' +
+          'Reduce the amount or clear the spend policy.',
+      }
+    }
+    if (BigInt(amountNumber) < scaled) {
+      amountNumber *= 1 + Number.EPSILON
+    }
+
+    for (const [scope, policy] of policies) {
+      const result = await policy.check({
+        merchant: input.merchant,
+        amount: amountNumber,
+      })
+
+      if (result.status === 'approved') continue
+      if (result.status === 'draft') {
+        return { status: 'draft', reason: result.reason, draftId: result.draftId }
+      }
+      // 'rejected' and anything unrecognised both deny.
+      return {
+        status: 'rejected',
+        reason:
+          result.reason ??
+          `Spend policy (scope "${scope}") returned unexpected status ` +
+            `"${String(result.status)}" (fail-closed).`,
+      }
+    }
+    return { status: 'approved' }
+  } catch (error: unknown) {
+    return {
+      status: 'rejected',
+      reason: `Spend policy check failed (fail-closed): ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    }
+  }
+}
+
 // ─── set_spend_policy ──────────────────────────────────────────────────────
 
 export const SetSpendPolicySchema = z.object({
   scopeKey: z
     .string()
     .optional()
-    .describe('Optional session/scope key. Defaults to "global".'),
+    .describe(
+      'Optional session/scope key. Defaults to "global". Policies from ALL ' +
+      'scopes are enforced together on every value-moving path (union); a ' +
+      'scoped policy is never bypassed.'
+    ),
   dailyLimitEth: z
     .string()
     .optional()
@@ -55,13 +171,16 @@ export const setSpendPolicyTool = {
   description:
     'Configure the Agent Wallet spend policy. ' +
     'Sets a daily limit, per-transaction cap, and optional recipient allowlist. ' +
-    'The policy is enforced in-process for the lifetime of the MCP server.',
+    'The policy is enforced in-process for the lifetime of the MCP server; ' +
+    'policies from all scopes are enforced together (union).',
   inputSchema: {
     type: 'object' as const,
     properties: {
       scopeKey: {
         type: 'string',
-        description: 'Optional session/scope key (default: "global")',
+        description:
+          'Optional session/scope key (default: "global"). All scopes are ' +
+          'enforced together on every value-moving path.',
       },
       dailyLimitEth: {
         type: 'string',
