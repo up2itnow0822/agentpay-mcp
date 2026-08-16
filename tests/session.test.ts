@@ -297,6 +297,42 @@ describe('x402_session_start tool', () => {
     expect(result.content[0]!.text).toContain('max_payment_eth');
   });
 
+  it('fails closed when max_payment_eth rounds to zero base units (sub-wei cap)', async () => {
+    // A cap like 1e-19 ETH truncates to 0n base units. The guard must still
+    // run and reject every positive payment demand — not silently skip
+    // because 0n is falsy.
+    mockCreateX402Client.mockImplementationOnce(((_wallet: unknown, config: X402ClientConfig) => ({
+      fetch: async (url: string, _init?: RequestInit): Promise<Response> => {
+        await config.onBeforePayment!(
+          {
+            scheme: 'exact',
+            network: 'base:8453',
+            asset: '0x0000000000000000000000000000000000000000',
+            amount: '1', // 1 wei demanded
+            payTo: MOCK_RECIPIENT,
+            maxTimeoutSeconds: 60,
+            extra: {},
+          },
+          url
+        );
+        return new Response('should not be reachable', { status: 200 });
+      },
+      getTransactionLog: vi.fn(() => []),
+      getDailySpendSummary: vi.fn(() => ({ global: 0n, byService: {}, resetsAt: 0 })),
+      budgetTracker: {},
+    })) as any);
+
+    const result = await handleX402SessionStart({
+      endpoint: TEST_ENDPOINT,
+      max_payment_eth: '0.0000000000000000001', // 1e-19 ETH → 0n wei
+    });
+
+    expect(result.isError).toBe(true);
+    expect(result.content[0]!.text).toContain('exceeds max_payment_eth cap');
+    // No session may be created from a rejected payment.
+    expect(listActiveSessions()).toHaveLength(0);
+  });
+
   it('handles AbortError (timeout) gracefully', async () => {
     const abortErr = new Error('Aborted');
     abortErr.name = 'AbortError';

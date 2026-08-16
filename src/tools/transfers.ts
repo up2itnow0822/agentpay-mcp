@@ -61,9 +61,12 @@ export async function handleSendToken(
 
     const rawAmount = parseAmount(input.amount, token.decimals)
 
+    // rawAmount is in the token's base units; decimals lets the policy
+    // normalise to its 18-decimal ETH-equivalent caps.
     const policyDecision = await enforceSpendPolicy({
       merchant: input.recipientAddress,
       amount: rawAmount,
+      decimals: token.decimals,
     })
     if (policyDecision.status === 'rejected') {
       throw new Error(

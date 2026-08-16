@@ -17,7 +17,7 @@ import {
   isTvmOrTonNetwork,
   supportedX402NetworksForChainId,
 } from '../utils/x402-networks.js';
-import { maxPaymentBaseUnits } from '../utils/payment-cap.js';
+import { maxPaymentBaseUnits, resolveX402AssetDecimals } from '../utils/payment-cap.js';
 import { findSessionForUrl, buildSessionHeaders } from './session.js';
 import { recordSessionCall } from '../session/manager.js';
 import { enforceSpendPolicy } from './budget.js';
@@ -311,9 +311,17 @@ export async function handleX402Pay(
           }
         }
 
+        // amount is in the offered asset's base units; the decimals thunk
+        // only runs when a policy is configured, and resolution failures
+        // reject (fail closed) inside enforceSpendPolicy.
         const policyDecision = await enforceSpendPolicy({
           merchant: req.payTo,
           amount,
+          decimals: () =>
+            resolveX402AssetDecimals(
+              req.asset ?? '0x0000000000000000000000000000000000000000',
+              config.chainId
+            ),
         });
         if (policyDecision.status !== 'approved') {
           throw new Error(

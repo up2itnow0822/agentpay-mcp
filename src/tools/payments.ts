@@ -125,9 +125,12 @@ export async function handleSendPayment(
     const amountWei = parseTokenAmount(input.amount_eth, decimals);
 
     // Enforce in-process spend policy (set_spend_policy) before any transfer.
+    // amountWei is in the token's own base units; decimals lets the policy
+    // normalise to its 18-decimal ETH-equivalent caps.
     const policyDecision = await enforceSpendPolicy({
       merchant: toAddress,
       amount: amountWei,
+      decimals,
     });
     if (policyDecision.status === 'rejected') {
       throw new Error(

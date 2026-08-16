@@ -34,39 +34,100 @@ export type SpendPolicyDecision =
 /**
  * Enforce the in-process spend policy for a payment attempt.
  * If no policy is configured for the scope, the payment is allowed.
+ *
+ * Units: `amount` is in the asset's own base units (wei for ETH, 1e-6 for
+ * USDC), with `decimals` naming that asset's decimals. Policy caps from
+ * set_spend_policy are stored in 18-decimal "ETH-equivalent" units
+ * (parseEther of the human string), so the amount is normalised here by
+ * scaling base units × 10^(18 - decimals) before comparison. One whole token
+ * therefore counts as 1 ETH-equivalent: with perTxCapEth "5", a 10 USDC
+ * payment (10_000_000 base units → 1e19) is over the 5e18 cap and blocked.
+ * Never compare 6-decimal USDC base units against wei-scale caps directly —
+ * that silently loosens every cap by a factor of 1e12.
+ *
+ * `decimals` may be a thunk so that asset-decimal resolution (which can throw
+ * for unregistered assets) only runs when a policy is actually configured.
+ *
+ * Fail closed: ANY error while evaluating the policy — decimals resolution,
+ * numeric conversion, or the policy engine itself — rejects the payment, and
+ * unrecognised policy statuses are treated as rejections.
  */
 export async function enforceSpendPolicy(input: {
   scopeKey?: string
   merchant: string
-  /** Base units as bigint or number. BigInt is preferred for large ETH amounts. */
+  /** Amount in the asset's base units. BigInt is preferred for exactness. */
   amount: number | bigint
+  /** Decimals of the asset `amount` is denominated in (0–18), or a thunk. */
+  decimals: number | (() => number)
 }): Promise<SpendPolicyDecision> {
   const scopeKey = input.scopeKey?.trim() || DEFAULT_POLICY_SCOPE
   const policy = _spendingPolicyByScope.get(scopeKey)
   if (!policy) return { status: 'approved' }
 
-  // SpendingPolicy stores caps as JS numbers; only enforce when amount fits safely.
-  const amountNumber =
-    typeof input.amount === 'bigint' ? Number(input.amount) : input.amount
-  if (!Number.isSafeInteger(amountNumber)) {
+  try {
+    const decimals =
+      typeof input.decimals === 'function' ? input.decimals() : input.decimals
+    if (!Number.isInteger(decimals) || decimals < 0 || decimals > 18) {
+      return {
+        status: 'rejected',
+        reason:
+          `Spend policy check failed (fail-closed): unsupported asset decimals ` +
+          `${String(decimals)}. Expected an integer between 0 and 18.`,
+      }
+    }
+
+    const baseUnits =
+      typeof input.amount === 'bigint' ? input.amount : BigInt(input.amount)
+    if (baseUnits < 0n) {
+      return {
+        status: 'rejected',
+        reason: 'Spend policy check failed (fail-closed): negative amount.',
+      }
+    }
+
+    // Normalise to the policy's canonical 18-decimal ETH-equivalent scale.
+    const scaled = baseUnits * 10n ** BigInt(18 - decimals)
+
+    // SpendingPolicy tracks amounts as JS numbers. Convert exactly where
+    // possible; when the bigint exceeds float precision and rounds down,
+    // bias one ULP upward so boundary comparisons fail closed (the policy
+    // must never see less than the true amount).
+    let amountNumber = Number(scaled)
+    if (!Number.isFinite(amountNumber)) {
+      return {
+        status: 'rejected',
+        reason:
+          'Spend policy check failed (fail-closed): amount too large to evaluate. ' +
+          'Reduce the amount or clear the spend policy.',
+      }
+    }
+    if (BigInt(amountNumber) < scaled) {
+      amountNumber *= 1 + Number.EPSILON
+    }
+
+    const result = await policy.check({
+      merchant: input.merchant,
+      amount: amountNumber,
+    })
+
+    if (result.status === 'approved') return { status: 'approved' }
+    if (result.status === 'draft') {
+      return { status: 'draft', reason: result.reason, draftId: result.draftId }
+    }
+    // 'rejected' and anything unrecognised both deny.
     return {
       status: 'rejected',
       reason:
-        'Payment amount exceeds safe numeric range for in-process spend policy checks. ' +
-        'Reduce the amount or clear the spend policy.',
+        result.reason ??
+        `Spend policy returned unexpected status "${String(result.status)}" (fail-closed).`,
     }
-  }
-
-  const result = await policy.check({
-    merchant: input.merchant,
-    amount: amountNumber,
-  })
-
-  if (result.status === 'approved') return { status: 'approved' }
-  return {
-    status: result.status,
-    reason: result.reason,
-    draftId: result.draftId,
+  } catch (error: unknown) {
+    return {
+      status: 'rejected',
+      reason: `Spend policy check failed (fail-closed): ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    }
   }
 }
 

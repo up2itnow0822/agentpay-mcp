@@ -119,8 +119,24 @@ describe('enforceSpendPolicy', () => {
       enforceSpendPolicy({
         merchant: '0xabc',
         amount: 1,
+        decimals: 18,
       })
     ).resolves.toEqual({ status: 'approved' })
+  })
+
+  it('does not evaluate the decimals thunk when no policy is configured', async () => {
+    const decimals = vi.fn(() => {
+      throw new Error('should not be called')
+    })
+
+    await expect(
+      enforceSpendPolicy({
+        merchant: '0xabc',
+        amount: 1n,
+        decimals,
+      })
+    ).resolves.toEqual({ status: 'approved' })
+    expect(decimals).not.toHaveBeenCalled()
   })
 
   it('invokes the configured SpendingPolicy.check for the scope', async () => {
@@ -134,13 +150,148 @@ describe('enforceSpendPolicy', () => {
     const decision = await enforceSpendPolicy({
       merchant: '0xattacker',
       amount: 1000,
+      decimals: 18,
     })
 
     expect(check).toHaveBeenCalledWith({
       merchant: '0xattacker',
       amount: 1000,
     })
-    expect(decision).toEqual({ status: 'rejected', reason: 'blocked', draftId: undefined })
+    expect(decision).toEqual({ status: 'rejected', reason: 'blocked' })
+  })
+
+  it('normalises token base units to 18-decimal ETH-equivalent for the policy', async () => {
+    const check = vi.fn().mockResolvedValue({ status: 'approved' })
+    MockSpendingPolicy.mockImplementation(function() { return { check } } as any)
+
+    await handleSetSpendPolicy({ perTxCapEth: '5' })
+
+    // 10 USDC = 10_000_000 base units (6 decimals) → 1e19 ETH-equivalent
+    // wei — NOT 10_000_000, which would slip 1e12 under every cap.
+    const decision = await enforceSpendPolicy({
+      merchant: '0xmerchant',
+      amount: 10_000_000n,
+      decimals: 6,
+    })
+
+    expect(decision).toEqual({ status: 'approved' })
+    expect(check).toHaveBeenCalledWith({
+      merchant: '0xmerchant',
+      amount: 1e19,
+    })
+  })
+
+  it('never under-reports amounts that exceed float precision', async () => {
+    const check = vi.fn().mockResolvedValue({ status: 'approved' })
+    MockSpendingPolicy.mockImplementation(function() { return { check } } as any)
+
+    await handleSetSpendPolicy({ perTxCapEth: '5' })
+
+    // 2^53 + 1 wei rounds DOWN to 2^53 as a float; the fail-closed bias must
+    // round the policy-visible amount up instead.
+    await enforceSpendPolicy({
+      merchant: '0xmerchant',
+      amount: 2n ** 53n + 1n,
+      decimals: 18,
+    })
+
+    const seen = check.mock.calls[0]![0].amount as number
+    expect(seen).toBeGreaterThan(Number(2n ** 53n))
+  })
+
+  // ─── Fail-closed behaviour ─────────────────────────────────────────────
+
+  it('fails closed when SpendingPolicy.check throws', async () => {
+    const check = vi.fn().mockRejectedValue(new Error('policy engine exploded'))
+    MockSpendingPolicy.mockImplementation(function() { return { check } } as any)
+
+    await handleSetSpendPolicy({ dailyLimitEth: '0.1' })
+
+    const decision = await enforceSpendPolicy({
+      merchant: '0xabc',
+      amount: 1n,
+      decimals: 18,
+    })
+
+    expect(decision.status).toBe('rejected')
+    expect((decision as { reason?: string }).reason).toContain('fail-closed')
+    expect((decision as { reason?: string }).reason).toContain('policy engine exploded')
+  })
+
+  it('fails closed when the policy returns an unrecognised status', async () => {
+    const check = vi.fn().mockResolvedValue({ status: 'maybe-later' })
+    MockSpendingPolicy.mockImplementation(function() { return { check } } as any)
+
+    await handleSetSpendPolicy({ dailyLimitEth: '0.1' })
+
+    const decision = await enforceSpendPolicy({
+      merchant: '0xabc',
+      amount: 1n,
+      decimals: 18,
+    })
+
+    expect(decision.status).toBe('rejected')
+    expect((decision as { reason?: string }).reason).toContain('maybe-later')
+  })
+
+  it('fails closed when the decimals thunk throws', async () => {
+    const check = vi.fn().mockResolvedValue({ status: 'approved' })
+    MockSpendingPolicy.mockImplementation(function() { return { check } } as any)
+
+    await handleSetSpendPolicy({ dailyLimitEth: '0.1' })
+
+    const decision = await enforceSpendPolicy({
+      merchant: '0xabc',
+      amount: 1n,
+      decimals: () => {
+        throw new Error('Cannot resolve decimals for asset')
+      },
+    })
+
+    expect(decision.status).toBe('rejected')
+    expect((decision as { reason?: string }).reason).toContain('Cannot resolve decimals')
+    expect(check).not.toHaveBeenCalled()
+  })
+
+  it('fails closed for out-of-range decimals', async () => {
+    const check = vi.fn().mockResolvedValue({ status: 'approved' })
+    MockSpendingPolicy.mockImplementation(function() { return { check } } as any)
+
+    await handleSetSpendPolicy({ dailyLimitEth: '0.1' })
+
+    for (const decimals of [-1, 19, 1.5, NaN]) {
+      const decision = await enforceSpendPolicy({
+        merchant: '0xabc',
+        amount: 1n,
+        decimals,
+      })
+      expect(decision.status).toBe('rejected')
+    }
+    expect(check).not.toHaveBeenCalled()
+  })
+
+  it('fails closed for negative and non-finite amounts', async () => {
+    const check = vi.fn().mockResolvedValue({ status: 'approved' })
+    MockSpendingPolicy.mockImplementation(function() { return { check } } as any)
+
+    await handleSetSpendPolicy({ dailyLimitEth: '0.1' })
+
+    const negative = await enforceSpendPolicy({
+      merchant: '0xabc',
+      amount: -1n,
+      decimals: 18,
+    })
+    expect(negative.status).toBe('rejected')
+
+    // 10^400 scaled overflows Number → Infinity → reject, never approve.
+    const huge = await enforceSpendPolicy({
+      merchant: '0xabc',
+      amount: 10n ** 400n,
+      decimals: 18,
+    })
+    expect(huge.status).toBe('rejected')
+
+    expect(check).not.toHaveBeenCalled()
   })
 })
 
