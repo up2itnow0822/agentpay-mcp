@@ -7,12 +7,16 @@ import {
   evaluateSpan,
   decisionToOTelEvent,
   getDecisionHistory,
+  handleOTelBudgetStatus,
   handleOTelEvaluateSpend,
   handleOTelRegisterPolicy,
   invokeKillCallback,
   listPolicies,
+  MAX_DECISION_HISTORY,
+  MAX_LEDGER_ENTRIES,
   MAX_SEEN_SPANS,
   OTelRegisterPolicySchema,
+  _getOTelBudgetStoreSizes,
   _resetOTelBudgetState,
 } from '../src/tools/otel-budget.js'
 
@@ -402,6 +406,149 @@ describe('OTel Budget Circuit-Breaker', () => {
       })!
       expect(stillDeduped.duplicateSpan).toBe(true)
       expect(stillDeduped.accumulatedSpendUsd).toBe(MAX_SEEN_SPANS + 2)
+    })
+  })
+
+  describe('bounded spend ledger and decision log', () => {
+    const HOUR_MS = 60 * 60 * 1000
+    const DAY_MS = 24 * HOUR_MS
+    const T0 = Date.parse('2026-01-01T00:00:00Z')
+
+    beforeEach(() => {
+      vi.useFakeTimers()
+      vi.setSystemTime(T0)
+    })
+
+    afterEach(() => {
+      vi.useRealTimers()
+    })
+
+    const span = (costUsd: number, spanId: string) => ({
+      'agentcore.agent.id': 'agent-001',
+      'agentcore.cost.usd': costUsd,
+      spanId,
+    })
+
+    it('never retires a record the active rolling window still reaches', () => {
+      registerPolicy({
+        agentId: 'agent-001',
+        maxSpendUsd: 10.0,
+        windowMs: 7 * DAY_MS,
+        breachAction: 'block',
+      })
+
+      evaluateSpan(span(4.0, 'span-1'))
+
+      // Six days on: older than the 24h retention floor, but the policy's
+      // 7-day window still reaches it, so it must stay in the ledger.
+      vi.setSystemTime(T0 + 6 * DAY_MS)
+      const decision = evaluateSpan(span(4.0, 'span-2'))!
+
+      const sizes = _getOTelBudgetStoreSizes()
+      expect(sizes.ledger).toBe(2)
+      expect(sizes.archivedScopes).toBe(0)
+      expect(decision.accumulatedSpendUsd).toBe(8.0)
+    })
+
+    it('preserves lifetime totals across eviction', async () => {
+      registerPolicy({
+        agentId: 'agent-001',
+        maxSpendUsd: 5.0,
+        windowMs: 0,
+        breachAction: 'block',
+      })
+
+      evaluateSpan(span(3.0, 'span-1'))
+
+      // Past the retention floor, and a lifetime budget has no rolling window
+      // to protect the record — so it is retired into the archive.
+      vi.setSystemTime(T0 + 25 * HOUR_MS)
+      const decision = evaluateSpan(span(3.0, 'span-2'))!
+
+      const sizes = _getOTelBudgetStoreSizes()
+      expect(sizes.ledger).toBe(1)
+      expect(sizes.archivedScopes).toBe(1)
+
+      // The retired dollars still count: a lifetime budget cannot be reset by
+      // eviction.
+      expect(decision.accumulatedSpendUsd).toBe(6.0)
+      expect(decision.action).toBe('block')
+
+      const status = await handleOTelBudgetStatus({
+        agentId: 'agent-001',
+        includeHistory: false,
+        historyLimit: 20,
+      })
+      const data = JSON.parse(status.content[0].text)
+      expect(data.totalAccumulatedUsd).toBe(6.0)
+      expect(data.policies[0].accumulatedSpendUsd).toBe(6.0)
+    })
+
+    it('does not add retired spend back into a window that no longer reaches it', () => {
+      registerPolicy({
+        agentId: 'agent-001',
+        maxSpendUsd: 5.0,
+        windowMs: HOUR_MS,
+        breachAction: 'block',
+      })
+
+      evaluateSpan(span(3.0, 'span-1'))
+
+      vi.setSystemTime(T0 + 25 * HOUR_MS)
+      const decision = evaluateSpan(span(3.0, 'span-2'))!
+
+      expect(_getOTelBudgetStoreSizes().archivedScopes).toBe(1)
+      // The archived span is a day outside the one-hour window: counting it
+      // would wrongly block an agent that is inside its rolling budget.
+      expect(decision.accumulatedSpendUsd).toBe(3.0)
+      expect(decision.action).toBe('allow')
+    })
+
+    it('bounds every store under sustained load', () => {
+      registerPolicy({
+        agentId: 'agent-001',
+        maxSpendUsd: 1_000_000,
+        windowMs: 0,
+        breachAction: 'block',
+      })
+
+      const spans = MAX_LEDGER_ENTRIES + 2_000
+      let last = null
+      for (let i = 0; i < spans; i++) {
+        last = evaluateSpan(span(1.0, `span-${i}`))
+      }
+
+      const sizes = _getOTelBudgetStoreSizes()
+      expect(sizes.ledger).toBe(MAX_LEDGER_ENTRIES)
+      expect(sizes.decisions).toBe(MAX_DECISION_HISTORY)
+      expect(sizes.seenSpans).toBe(MAX_SEEN_SPANS)
+      expect(sizes.archivedScopes).toBe(1)
+
+      // Bounded, and still not a dollar short.
+      expect(last!.accumulatedSpendUsd).toBe(spans)
+    })
+
+    it('counts every dollar when the hard ceiling retires in-window records', () => {
+      registerPolicy({
+        agentId: 'agent-001',
+        maxSpendUsd: 1_000_000,
+        windowMs: 7 * DAY_MS,
+        breachAction: 'block',
+      })
+
+      // The clock is frozen, so nothing ages out: only the MAX_LEDGER_ENTRIES
+      // ceiling can retire these, and every retired record is inside the
+      // policy's 7-day window.
+      const spans = MAX_LEDGER_ENTRIES + 500
+      let last = null
+      for (let i = 0; i < spans; i++) {
+        last = evaluateSpan(span(1.0, `span-${i}`))
+      }
+
+      const sizes = _getOTelBudgetStoreSizes()
+      expect(sizes.ledger).toBe(MAX_LEDGER_ENTRIES)
+      expect(sizes.archivedScopes).toBe(1)
+      expect(last!.accumulatedSpendUsd).toBe(spans)
     })
   })
 
