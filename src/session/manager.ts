@@ -206,8 +206,12 @@ export function findSessionForUrl(url: string): SessionRecord | undefined {
  * Query parameters on the session endpoint are treated as REQUIRED
  * parameters: the requested URL must carry every endpoint parameter with an
  * equal value. Parameter order never matters (comparison goes through
- * URLSearchParams, with duplicate keys compared as value multisets), and
- * extra request parameters are allowed. The requirement applies to the
+ * URLSearchParams, with duplicate keys compared as value multisets). For a
+ * key the endpoint pins, the request's values for that key must equal the
+ * endpoint's exactly — a contradictory duplicate such as ?user=alice&user=bob
+ * against a pin of user=alice is rejected (HTTP parameter pollution).
+ * Extra request parameters under OTHER keys are allowed. The requirement
+ * applies to the
  * endpoint path itself and to sub-paths alike — e.g. /v1/users?version=2 is
  * covered by a session for /v1?version=2, but /v1/users without it is not.
  * That last case fails CLOSED deliberately: dropping a required parameter
@@ -326,21 +330,23 @@ function normalisePathname(pathname: string): string {
 
 /**
  * Check that every required (key, value) pair is present in the requested
- * search params. Order-insensitive; duplicate keys are compared as value
- * multisets (each required value must appear at least as many times in the
- * request); extra request parameters are allowed.
+ * search params. Order-insensitive. For each key the endpoint pins, the
+ * requested values must EQUAL the required values as a multiset — extra or
+ * duplicate values under a pinned key are rejected, which blocks HTTP
+ * parameter pollution (?user=alice&user=bob smuggling past a pin of
+ * user=alice). Request parameters under keys the endpoint does not pin are
+ * allowed.
  */
 function containsRequiredSearchParams(
   requested: URLSearchParams,
   required: URLSearchParams
 ): boolean {
   for (const key of new Set(required.keys())) {
-    const requiredValues = required.getAll(key);
-    const requestedValues = requested.getAll(key);
-    for (const value of new Set(requiredValues)) {
-      const requiredCount = requiredValues.filter((v) => v === value).length;
-      const requestedCount = requestedValues.filter((v) => v === value).length;
-      if (requestedCount < requiredCount) return false;
+    const requiredValues = [...required.getAll(key)].sort();
+    const requestedValues = [...requested.getAll(key)].sort();
+    if (requestedValues.length !== requiredValues.length) return false;
+    for (let i = 0; i < requiredValues.length; i++) {
+      if (requestedValues[i] !== requiredValues[i]) return false;
     }
   }
   return true;

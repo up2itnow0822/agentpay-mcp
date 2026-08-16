@@ -1066,6 +1066,16 @@ describe('isUrlCoveredBySession (prefix scope)', () => {
       ).toBe(false);
     });
 
+    it('rejects parameter pollution: a conflicting duplicate of a pinned key', () => {
+      const pinned = prefixSession('https://a.com/v1?user=alice');
+      expect(isUrlCoveredBySession('https://a.com/v1?user=alice&user=bob', pinned)).toBe(false);
+      expect(isUrlCoveredBySession('https://a.com/v1?user=bob&user=alice', pinned)).toBe(false);
+      // Even duplicating the same pinned value is rejected: the multiset must match exactly
+      expect(isUrlCoveredBySession('https://a.com/v1?user=alice&user=alice', pinned)).toBe(false);
+      // The exact pinned value still matches, with extra params under other keys
+      expect(isUrlCoveredBySession('https://a.com/v1?user=alice&page=2', pinned)).toBe(true);
+    });
+
     it('compares duplicate keys deterministically as value multisets', () => {
       const dupes = prefixSession('https://api.example.com/v1?tag=a&tag=b');
       expect(isUrlCoveredBySession('https://api.example.com/v1?tag=b&tag=a', dupes)).toBe(true);
