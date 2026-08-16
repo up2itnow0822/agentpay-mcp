@@ -7,7 +7,7 @@ import { spawnSync } from 'node:child_process';
 
 const repoRoot = dirname(dirname(fileURLToPath(import.meta.url)));
 const packageJson = JSON.parse(readFileSync(join(repoRoot, 'package.json'), 'utf8'));
-const expectedViem = '2.48.7';
+const expectedViem = '2.52.2';
 
 function assert(condition, message) {
   if (!condition) {

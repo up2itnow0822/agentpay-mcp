@@ -13,7 +13,7 @@ This file documents known issues that cannot be fixed without breaking functiona
 **Description:**
 When running tests, vitest emits a warning that `agentwallet-sdk`'s dist bundle references sourcemap files that weren't included in the npm package. This is a packaging oversight in `agentwallet-sdk`.
 
-**Impact:** None on test correctness or production behavior. Tests still pass 59/59.
+**Impact:** None on test correctness or production behavior. The full test suite still passes.
 
 **Fix:** Needs to be addressed in `agentwallet-sdk` by including sourcemap files in the `files` array of its `package.json`. A PR/issue has been filed upstream.
 
@@ -27,18 +27,19 @@ When running tests, vitest emits a warning that `agentwallet-sdk`'s dist bundle 
 **Status:** Resolved via `overrides`
 
 **Description:**
-`agentwallet-sdk` bundles its own copy of `viem@2.46.0`. Without pinning, npm would install two incompatible viem instances causing TypeScript type errors.
+`agentwallet-sdk` declares its own exact `viem` dependency (`2.46.0` as of `agentwallet-sdk@6.2.1`). Without pinning, npm would install two incompatible viem instances causing TypeScript type errors.
 
 **Mitigation:**
-`package.json` includes:
+`package.json` pins `viem` exactly and forces the same version everywhere via a root override:
 
 ```json
-"overrides": { "viem": "2.46.0" }
-```text
+"dependencies": { "viem": "2.52.2" },
+"overrides": { "viem": "2.52.2" }
+```
 
-This forces a single viem installation. If `agentwallet-sdk` is updated to a newer viem, the override must be updated to match.
+This forces a single viem installation (currently `2.52.2`, overriding `agentwallet-sdk`'s `2.46.0`). The pinned version is governed by the [payment-critical dependency pin policy](docs/dependency-pin-policy.md) and verified by `tests/dependency-pin-policy.test.ts` and `npm run smoke:clean-install` — the version in this file, `package.json`, `docs/dependency-pin-policy.md`, and `scripts/clean-install-x402-smoke.mjs` must all match.
 
-**Action Required:** When `agentwallet-sdk` publishes a new minor/major version, verify the `viem` version it uses and update the `overrides` field accordingly.
+**Action Required:** When `agentwallet-sdk` publishes a new minor/major version, verify the `viem` version it uses still type-checks against the pinned override, and bump the pin through the pin-policy upgrade process if needed.
 
 ---
 
@@ -56,4 +57,4 @@ The `x402_pay` tool only supports payment via USDC on Base network (`base:8453` 
 
 ---
 
-*Last updated: 2026-02-19*
+*Last updated: 2026-08-16*
