@@ -181,6 +181,44 @@ describe('enforceSpendPolicy', () => {
     })
   })
 
+  it('enforces policies configured under a non-default scopeKey', async () => {
+    const check = vi.fn().mockResolvedValue({ status: 'rejected', reason: 'scoped block' })
+    MockSpendingPolicy.mockImplementation(function() { return { check } } as any)
+
+    await handleSetSpendPolicy({ scopeKey: 'session-1', perTxCapEth: '0.01' })
+
+    // Call sites never pass a scope — the scoped policy must still apply.
+    const decision = await enforceSpendPolicy({
+      merchant: '0xabc',
+      amount: 10n ** 18n,
+      decimals: 18,
+    })
+
+    expect(check).toHaveBeenCalledWith({ merchant: '0xabc', amount: 1e18 })
+    expect(decision).toEqual({ status: 'rejected', reason: 'scoped block' })
+  })
+
+  it('requires every configured scope to approve (union enforcement)', async () => {
+    const approve = vi.fn().mockResolvedValue({ status: 'approved' })
+    const reject = vi.fn().mockResolvedValue({ status: 'rejected', reason: 'scoped cap' })
+    MockSpendingPolicy
+      .mockImplementationOnce(function() { return { check: approve } } as any)
+      .mockImplementationOnce(function() { return { check: reject } } as any)
+
+    await handleSetSpendPolicy({ dailyLimitEth: '1' })
+    await handleSetSpendPolicy({ scopeKey: 'session-1', dailyLimitEth: '0.001' })
+
+    const decision = await enforceSpendPolicy({
+      merchant: '0xabc',
+      amount: 10n ** 17n,
+      decimals: 18,
+    })
+
+    expect(approve).toHaveBeenCalledOnce()
+    expect(reject).toHaveBeenCalledOnce()
+    expect(decision).toEqual({ status: 'rejected', reason: 'scoped cap' })
+  })
+
   it('never under-reports amounts that exceed float precision', async () => {
     const check = vi.fn().mockResolvedValue({ status: 'approved' })
     MockSpendingPolicy.mockImplementation(function() { return { check } } as any)

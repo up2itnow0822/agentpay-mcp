@@ -33,7 +33,13 @@ export type SpendPolicyDecision =
 
 /**
  * Enforce the in-process spend policy for a payment attempt.
- * If no policy is configured for the scope, the payment is allowed.
+ * If no policy is configured at all, the payment is allowed.
+ *
+ * Scopes: every configured policy — the "global" scope and any policy set
+ * under a custom scopeKey — is enforced together (union). All of them must
+ * approve; the first rejection or draft decision wins. This keeps scoped
+ * policies fail-closed: a policy stored under any scopeKey is consulted on
+ * every value-moving path, never silently ignored.
  *
  * Units: `amount` is in the asset's own base units (wei for ETH, 1e-6 for
  * USDC), with `decimals` naming that asset's decimals. Policy caps from
@@ -53,16 +59,14 @@ export type SpendPolicyDecision =
  * unrecognised policy statuses are treated as rejections.
  */
 export async function enforceSpendPolicy(input: {
-  scopeKey?: string
   merchant: string
   /** Amount in the asset's base units. BigInt is preferred for exactness. */
   amount: number | bigint
   /** Decimals of the asset `amount` is denominated in (0–18), or a thunk. */
   decimals: number | (() => number)
 }): Promise<SpendPolicyDecision> {
-  const scopeKey = input.scopeKey?.trim() || DEFAULT_POLICY_SCOPE
-  const policy = _spendingPolicyByScope.get(scopeKey)
-  if (!policy) return { status: 'approved' }
+  const policies = Array.from(_spendingPolicyByScope.entries())
+  if (policies.length === 0) return { status: 'approved' }
 
   try {
     const decimals =
@@ -105,22 +109,26 @@ export async function enforceSpendPolicy(input: {
       amountNumber *= 1 + Number.EPSILON
     }
 
-    const result = await policy.check({
-      merchant: input.merchant,
-      amount: amountNumber,
-    })
+    for (const [scope, policy] of policies) {
+      const result = await policy.check({
+        merchant: input.merchant,
+        amount: amountNumber,
+      })
 
-    if (result.status === 'approved') return { status: 'approved' }
-    if (result.status === 'draft') {
-      return { status: 'draft', reason: result.reason, draftId: result.draftId }
+      if (result.status === 'approved') continue
+      if (result.status === 'draft') {
+        return { status: 'draft', reason: result.reason, draftId: result.draftId }
+      }
+      // 'rejected' and anything unrecognised both deny.
+      return {
+        status: 'rejected',
+        reason:
+          result.reason ??
+          `Spend policy (scope "${scope}") returned unexpected status ` +
+            `"${String(result.status)}" (fail-closed).`,
+      }
     }
-    // 'rejected' and anything unrecognised both deny.
-    return {
-      status: 'rejected',
-      reason:
-        result.reason ??
-        `Spend policy returned unexpected status "${String(result.status)}" (fail-closed).`,
-    }
+    return { status: 'approved' }
   } catch (error: unknown) {
     return {
       status: 'rejected',
@@ -137,7 +145,11 @@ export const SetSpendPolicySchema = z.object({
   scopeKey: z
     .string()
     .optional()
-    .describe('Optional session/scope key. Defaults to "global".'),
+    .describe(
+      'Optional session/scope key. Defaults to "global". Policies from ALL ' +
+      'scopes are enforced together on every value-moving path (union); a ' +
+      'scoped policy is never bypassed.'
+    ),
   dailyLimitEth: z
     .string()
     .optional()
@@ -159,13 +171,16 @@ export const setSpendPolicyTool = {
   description:
     'Configure the Agent Wallet spend policy. ' +
     'Sets a daily limit, per-transaction cap, and optional recipient allowlist. ' +
-    'The policy is enforced in-process for the lifetime of the MCP server.',
+    'The policy is enforced in-process for the lifetime of the MCP server; ' +
+    'policies from all scopes are enforced together (union).',
   inputSchema: {
     type: 'object' as const,
     properties: {
       scopeKey: {
         type: 'string',
-        description: 'Optional session/scope key (default: "global")',
+        description:
+          'Optional session/scope key (default: "global"). All scopes are ' +
+          'enforced together on every value-moving path.',
       },
       dailyLimitEth: {
         type: 'string',

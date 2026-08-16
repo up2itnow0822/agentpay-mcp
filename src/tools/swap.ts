@@ -85,13 +85,15 @@ export async function handleSwapTokens(
     // Enforce the in-process spend policy on the amount sold before swapping.
     // rawAmountIn is in fromToken base units (e.g. 6 decimals for USDC);
     // enforceSpendPolicy normalises it to the policy's 18-decimal
-    // ETH-equivalent caps (1 whole token counts as 1 ETH-equivalent). Swap
-    // proceeds return to the agent wallet itself, so the policy merchant is
-    // the wallet's own address: allowlist-only policies must include the
-    // agent wallet address to permit swaps.
-    const swapRecipient = wallet.walletClient?.account?.address
+    // ETH-equivalent caps (1 whole token counts as 1 ETH-equivalent). The SDK
+    // SwapModule custodies tokens at — and sends swap proceeds to — the agent
+    // smart-account address (attachSwap passes wallet.address as
+    // accountAddress and uses it as the swap recipient), so that address is
+    // the policy merchant: allowlist-only policies must include the agent
+    // wallet (smart-account) address to permit swaps.
+    const swapRecipient = wallet.address
     if (!swapRecipient) {
-      throw new Error('Wallet client has no account; cannot verify spend policy for swap_tokens.')
+      throw new Error('Wallet has no address; cannot verify spend policy for swap_tokens.')
     }
     const policyDecision = await enforceSpendPolicy({
       merchant: swapRecipient,

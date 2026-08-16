@@ -182,7 +182,8 @@ describe('swap_tokens', () => {
   it('blocks swaps when the spend policy allowlist rejects the wallet', async () => {
     const check = vi.fn().mockResolvedValue({
       status: 'rejected',
-      reason: 'Merchant "0xagent" is not on the allowlist.',
+      reason:
+        'Merchant "0x1234567890123456789012345678901234567890" is not on the allowlist.',
     })
     MockSpendingPolicy.mockImplementation(function () { return { check } } as any)
 
@@ -206,9 +207,13 @@ describe('swap_tokens', () => {
     expect(result.isError).toBe(true)
     expect(result.content[0].text).toContain('allowlist')
     expect(mockSwap).not.toHaveBeenCalled()
-    // Merchant is the swapping wallet itself (proceeds return to it), and
+    // Merchant is the agent smart-account address (wallet.address — the SDK
+    // SwapModule custodies tokens and receives swap proceeds there), and
     // 100 USDC sold (6 decimals) is normalised to 1e20 ETH-equivalent wei.
-    expect(check).toHaveBeenCalledWith({ merchant: '0xagent', amount: 1e20 })
+    expect(check).toHaveBeenCalledWith({
+      merchant: '0x1234567890123456789012345678901234567890',
+      amount: 1e20,
+    })
   })
 
   it('blocks swaps when the spend policy cap is exceeded', async () => {
