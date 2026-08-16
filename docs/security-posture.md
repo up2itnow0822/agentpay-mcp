@@ -64,7 +64,8 @@ MCP 2026 roadmap requires OAuth 2.1 with PKCE for server authentication in enter
 **What is recorded — on-chain event history only.** The `get_transaction_history` tool replays AgentAccountV2 contract events for the wallet:
 
 - Transaction executions (recipient, value, executor)
-- Queued transactions, approvals, and cancellations (queue ID, recipient, value)
+- Queued transactions (queue ID, recipient, value)
+- Approvals and cancellations (queue ID **only** — recipient and value appear solely on the earlier queued event, so SIEM exports must correlate approval/cancellation records with their queue event to attribute them; a queued event that falls outside the query window leaves its approval unattributable from this tool alone)
 - On-chain spend-policy updates (token, per-tx limit, period limit)
 - Operator changes
 
@@ -75,6 +76,7 @@ Each entry carries the event type, block number, and transaction hash. These rec
 - Tool invocations, tool names, or tool parameters — no MCP-level request log exists
 - In-process policy evaluation results (approvals/rejections by the `set_spend_policy` engine)
 - Payment attempts rejected or failed before a transaction reached the chain
+- **Reverted on-chain transactions** — a mined-but-reverted attempt rolls back its event logs, so event-based history cannot show it; auditors needing reverted attempts must consult transaction receipts or an external indexer
 - Read-only tool calls (balance checks, identity lookups, history queries)
 - Wall-clock timestamps — on-chain entries are ordered by block number; derive times from block timestamps
 
