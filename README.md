@@ -53,8 +53,8 @@ The trust gap is the deployment gap. Enterprises aren't saying agents don't work
 AgentPay MCP addresses this directly:
 
 - **Human-approval mode** — transactions above your threshold require explicit human confirmation before executing
-- **On-chain spend caps** — enforced by smart contract, not application code. The agent cannot override them.
-- **Full audit trail** — every payment attempt logged with merchant, amount, timestamp, approval status
+- **On-chain spend caps** — AgentAccountV2 smart contract limits that application code cannot override, when the wallet owner has configured them on the contract. The `set_spend_policy` tool sets a separate in-process policy (see [docs/security-posture.md](docs/security-posture.md) for the exact control boundaries)
+- **Audit trail** — immutable on-chain AgentAccountV2 event history via `get_transaction_history` (recipient, amount, block number). Payment attempts rejected before reaching the chain are not recorded
 - **Fail-closed** — any policy engine error produces rejection, never approval
 - **Non-custodial** — private keys never leave the local machine
 
@@ -72,8 +72,8 @@ AgentPay MCP closes this gap at the infrastructure layer:
 
 | MCP Cost Governance Gap | AgentPay MCP Solution |
 |---|---|
-| No per-call spend caps in the MCP spec | **On-chain per-transaction caps** — enforced by smart contract, not application logic |
-| No cost attribution across MCP servers | **Full transaction history** with merchant, amount, timestamp, and tool context per call |
+| No per-call spend caps in the MCP spec | **Per-transaction caps** — on-chain AgentAccountV2 limits (owner-configured on the contract) plus an in-process `set_spend_policy` cap |
+| No cost attribution across MCP servers | **On-chain transaction history** with recipient, amount, and block number per transaction (on-chain events only — there is no per-tool-call log) |
 | No rate limiting for paid tool invocations | **Daily aggregate spend limits** — hard ceiling regardless of how many tools or sessions run |
 | No human oversight mechanism in the protocol | **Human-in-the-loop approval** — transactions above threshold queue for explicit human review |
 | No simulation/dry-run for cost estimation | **Simulation mode** — preview transaction cost and recipient before committing funds |
@@ -518,7 +518,7 @@ $25 - $100   -> queued for team lead approval via queue_approval
 $100+        -> queued for finance team approval
 ```
 
-Set the auto-approve ceiling with `set_spend_policy`, and transactions above the per-tx cap automatically queue for human review. No code changes needed — the smart contract enforces it.
+Set the auto-approve ceiling with `set_spend_policy` (an in-process cap enforced by the MCP server). Transactions above the *on-chain* AgentAccountV2 limits — configured by the wallet owner on the contract — queue for human review via the smart contract itself.
 
 ### Budget Monitoring for FinOps Dashboards
 
@@ -691,10 +691,12 @@ If the cost exceeds `max_payment_eth`, the tool returns an error before paying �
 
 **Non-custodial:** The agent signs all transactions locally with its private key. No third party holds or validates keys.
 
-**On-chain enforcement:**
+**On-chain enforcement** (AgentAccountV2 limits, configured by the wallet owner on the contract):
 - Per-transaction caps — over-cap transactions queue for human approval via `queue_approval`
 - Daily period limits — aggregate spending enforced by the AgentAccountV2 smart contract
-- Recipient allowlists — restrict which addresses the agent can send to
+
+**In-process policy** (`set_spend_policy` — enforced in the MCP server, not on-chain):
+- Recipient allowlists, per-tx caps, and daily limits — a convenience guardrail, bypassable by a compromised server process. See [docs/security-posture.md](docs/security-posture.md) for the exact control boundaries.
 
 **Role separation:**  
 The agent's signing key (`AGENT_PRIVATE_KEY`) can only transact within limits set by the wallet owner. Even if the agent's key is leaked or the agent is compromised, an attacker can only spend up to the configured cap before the next reset.
@@ -793,10 +795,10 @@ AgentPay MCP aligns with the emerging MCP security standards for 2026, including
 
 **Security posture documentation:** See [`docs/security-posture.md`](docs/security-posture.md) for the full compliance matrix covering:
 
-- **CoSAI T9 (Financial Fraud)** — On-chain spend caps, merchant allowlists, and human-approval gates mitigate unauthorized agent spending
+- **CoSAI T9 (Financial Fraud)** — Layered spend controls: an in-process spend policy (`set_spend_policy`, enforced in the MCP server process — not on-chain) plus on-chain AgentAccountV2 limits and approval queueing configured by the wallet owner
 - **CoSAI T10 (Identity Spoofing)** — ERC-8004 agent identity verification + non-custodial key management prevent identity-based attacks
 - **OAuth 2.1 + PKCE** — MCP server authentication supports OAuth 2.1 with PKCE for enterprise SSO integration (Azure AD, Okta)
-- **MCP Audit Logging** — Every tool invocation logged with timestamp, parameters, outcome, and transaction hash (where applicable)
+- **Audit Logging** — On-chain AgentAccountV2 event history via `get_transaction_history` (executions, queued transactions, approvals, policy updates); there is no per-tool-invocation log — see the security posture doc for exactly what is and is not recorded
 
 For enterprise security teams evaluating MCP servers: the security posture document provides the artifact your audit process needs.
 
@@ -908,7 +910,7 @@ OpenAI has published a **Delegated Payment Spec** that defines how AI agents han
 | Delegated Payment Spec Concept | agentpay-mcp Implementation |
 |---|---|
 | **Scoped token** — agent receives limited-scope credential | `AGENT_PRIVATE_KEY` — agent signs within smart contract constraints, cannot exceed scope |
-| **Allowance cap** — maximum the agent can spend | `set_spend_policy` — per-tx and daily caps enforced on-chain by AgentAccountV2 |
+| **Allowance cap** — maximum the agent can spend | In-process per-tx and daily caps via `set_spend_policy`, plus on-chain AgentAccountV2 limits when configured by the wallet owner on the contract |
 | **Human approval** — user delegates, then agent executes | `queue_approval` — transactions above threshold require explicit human sign-off |
 | **Audit trail** — all delegated spend is logged | `get_transaction_history` — immutable on-chain event log per transaction |
 | **Revocation** — user can revoke delegation at any time | Spend policy updates are instant; wallet owner can freeze the agent key |
@@ -932,7 +934,7 @@ For developers building OpenAI Agents SDK workflows that need on-chain settlemen
 }
 ```
 
-Add this MCP server to any OpenAI Agents SDK workflow via MCP bridge. The agent gets `x402_pay`, `check_budget`, and `set_spend_policy` — the same scoped-token + allowance-cap pattern, enforced by smart contract.
+Add this MCP server to any OpenAI Agents SDK workflow via MCP bridge. The agent gets `x402_pay`, `check_budget`, and `set_spend_policy` — the same scoped-token + allowance-cap pattern. Note that `set_spend_policy` is enforced in the MCP server process; smart-contract enforcement comes from the on-chain AgentAccountV2 limits, which the wallet owner configures on the contract (see [docs/security-posture.md](docs/security-posture.md)).
 
 ---
 
@@ -957,8 +959,8 @@ agentpay-mcp satisfies all four requirements out of the box:
 |---|---|
 | Human oversight | `queue_approval` — transactions above threshold require explicit human approval before execution |
 | Audit trail | `get_transaction_history` — full on-chain event log, immutable, verifiable on basescan.org |
-| Spend controls | `set_spend_policy` — per-tx caps and daily limits enforced at the smart contract layer |
-| Scope restriction | Recipient allowlists — agent cannot send to unapproved addresses regardless of instructions |
+| Spend controls | On-chain AgentAccountV2 per-tx and period limits (owner-configured on the contract, not bypassable by the agent), plus an in-process `set_spend_policy` guardrail |
+| Scope restriction | Recipient allowlists via `set_spend_policy` — enforced in the MCP server process, not on-chain; see [docs/security-posture.md](docs/security-posture.md) for control boundaries |
 
 European enterprises deploying agent systems that touch payments have **~150 days** to implement compliant human oversight and audit controls. agentpay-mcp is the fastest path to EU AI Act compliance for MCP-compatible agent deployments.
 
