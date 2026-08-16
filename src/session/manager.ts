@@ -143,16 +143,33 @@ export function recordSessionCall(sessionId: string): void {
 }
 
 /**
- * Explicitly end a session (mark as expired by setting expiresAt to past).
+ * Explicitly end a session LOCALLY: force-expire the record and discard the
+ * stored token material (sessionToken + signature are overwritten) so the
+ * credential can no longer be read back out of this process.
+ *
+ * IMPORTANT — this is not revocation. The session token is a self-contained
+ * bearer credential signed at creation with its expiresAt baked into the
+ * signed payload; remote servers verify it offline (ecrecover) with no
+ * revocation registry to consult. Any copy of the token that already left
+ * this process (it is transmitted on every session fetch) remains
+ * technically valid to the remote endpoint until that baked-in expiry.
+ * Callers reporting on this operation must not claim otherwise.
+ *
  * Returns true if the session was found and ended.
  */
 export function endSession(sessionId: string): boolean {
   const session = store.get(sessionId);
   if (!session) return false;
 
-  // Force-expire it
-  const mutable = session as { expiresAt: number };
+  // Force-expire it and scrub the local copy of the bearer credential.
+  const mutable = session as {
+    expiresAt: number;
+    sessionToken: string;
+    signature: string;
+  };
   mutable.expiresAt = 0;
+  mutable.sessionToken = '';
+  mutable.signature = '';
   return true;
 }
 

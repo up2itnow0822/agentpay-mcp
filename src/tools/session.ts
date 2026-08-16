@@ -58,8 +58,11 @@ export const X402SessionStartSchema = z.object({
     .max(86400 * 30)
     .optional()
     .describe(
-      'Session lifetime in seconds (default: SESSION_TTL_SECONDS env var or 3600). ' +
-      'Min: 60 seconds. Max: 30 days.'
+      'Session lifetime in seconds (default: SESSION_TTL_SECONDS env var or 3600 = 1 hour). ' +
+      'Min: 60 seconds. Max: 30 days (explicit opt-in). ' +
+      'Choose the shortest TTL that fits the task: session tokens are self-contained signed ' +
+      'bearer credentials that CANNOT be revoked once issued — x402_session_end only clears ' +
+      'local state, so a leaked token stays valid to the endpoint until this TTL elapses.'
     ),
   label: z
     .string()
@@ -115,7 +118,11 @@ export const x402SessionStartTool = {
       },
       ttl_seconds: {
         type: 'number',
-        description: 'Session TTL in seconds (default: 3600 / 1 hour). Max: 30 days.',
+        description:
+          'Session TTL in seconds (default: 3600 / 1 hour). Max: 30 days (explicit opt-in). ' +
+          'Prefer the shortest TTL that fits the task: the signed session token cannot be ' +
+          'revoked once issued (x402_session_end only clears local state), so a leaked token ' +
+          'stays valid to the endpoint until this TTL elapses.',
       },
       label: {
         type: 'string',
@@ -698,9 +705,10 @@ export type X402SessionEndInput = z.infer<typeof X402SessionEndSchema>;
 export const x402SessionEndTool = {
   name: 'x402_session_end',
   description:
-    'Explicitly close an x402 V2 session before it expires naturally. ' +
-    'After calling this, x402_session_fetch will return an error for the closed session. ' +
-    'Useful for security hygiene or when you know a session is no longer needed.',
+    'Close an x402 V2 session locally before it expires naturally: this server discards its stored copy of the session token and x402_session_fetch will return an error for the closed session. ' +
+    'This is NOT server-side revocation — the signed bearer token cannot be revoked once issued, and any copy already sent to (or intercepted en route to) the remote endpoint remains technically valid there until the expiry baked into the token. ' +
+    'If you suspect the token leaked, treat it as live until that expiry and notify the endpoint operator. ' +
+    'Still useful hygiene: it stops further use from this process and scrubs the stored token material.',
   inputSchema: {
     type: 'object' as const,
     properties: {
@@ -740,16 +748,28 @@ export async function handleX402SessionEnd(
     }
 
     const { session } = lookup;
+    // Capture display fields BEFORE endSession: it force-expires the record
+    // and scrubs the stored token material in place.
+    const tokenExpiresAt = new Date(session.expiresAt * 1000).toISOString();
+    const endpoint = session.endpoint;
+    const callCount = session.callCount;
     endSession(input.session_id);
 
     return {
       content: [
         textContent(
-          `✅ **Session Closed**\n\n` +
+          `✅ **Session Closed (locally)**\n\n` +
           `  Session ID: ${session.sessionId}\n` +
-          `  Endpoint:   ${session.endpoint}\n` +
-          `  Calls made: ${session.callCount}\n\n` +
-          `The session has been closed and can no longer be used.\n` +
+          `  Endpoint:   ${endpoint}\n` +
+          `  Calls made: ${callCount}\n\n` +
+          `Local state cleared: this server discarded its stored copy of the session\n` +
+          `token, and x402_session_fetch will refuse this session from now on.\n\n` +
+          `⚠️ **Not revoked server-side.** The session token is a self-contained signed\n` +
+          `bearer credential and cannot be revoked once issued. Any copy that already\n` +
+          `left this process remains technically valid to ${endpoint}\n` +
+          `until it expires at ${tokenExpiresAt}.\n` +
+          `If you suspect the token leaked, treat it as live until then and notify the\n` +
+          `endpoint operator so they can block it server-side.\n\n` +
           `Use x402_session_start to establish a new session when needed.`
         ),
       ],
