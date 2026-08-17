@@ -153,12 +153,37 @@ function killCallbackAllowlist(): Set<string> {
 export const KILL_CALLBACK_GENERIC_FAILURE = 'Kill callback was not delivered'
 
 /**
+ * Reduce a callback URL to scheme + host + port for logging.
+ *
+ * The path and query of a webhook are routinely the credential — a signed
+ * delivery path, a `?token=` capability, a tenant id — so the full URL must not
+ * reach the log. The origin is what an operator actually needs to identify
+ * which webhook failed, and it carries no secret. Userinfo is dropped too, even
+ * though validateKillCallbackUrl already refuses it, so that any future caller
+ * of this helper cannot reintroduce the leak.
+ */
+function redactCallbackUrl(raw: string): string {
+  try {
+    const parsed = new URL(raw)
+    return `${parsed.protocol}//${parsed.host}`
+  } catch {
+    return '<unparseable callback URL>'
+  }
+}
+
+/**
  * Record why a kill callback failed where the operator can see it and the
  * caller cannot. stderr is safe for an MCP stdio server: stdout carries the
  * protocol, stderr is the server's log stream.
+ *
+ * Only the redacted origin is logged: see {@link redactCallbackUrl}. Server
+ * logs are shipped, indexed and read by more people than the webhook's owner,
+ * so a signed path or a query-string token written there is disclosed.
  */
 function logKillCallbackFailure(url: string, detail: string): void {
-  console.error(`[otel-budget] kill callback not delivered for ${url}: ${detail}`)
+  console.error(
+    `[otel-budget] kill callback not delivered for ${redactCallbackUrl(url)}: ${detail}`
+  )
 }
 
 /** Parse a dotted-quad IPv4 literal into octets, or null if it is not one. */
@@ -174,8 +199,23 @@ function parseIpv4(host: string): number[] | null {
  * True for IPv4 space that is not routable on the public internet: this-network,
  * loopback, RFC1918, link-local (which is where cloud instance-metadata lives),
  * CGNAT, multicast and reserved.
+ *
+ * The tail of the list is every remaining IANA special-purpose entry marked
+ * "Globally Reachable: False" — IETF protocol assignments (192.0.0.0/24),
+ * benchmarking (198.18.0.0/15) and the three documentation ranges
+ * (192.0.2.0/24, 198.51.100.0/24, 203.0.113.0/24). isPrivateIpv6 already
+ * refused its documentation and benchmarking equivalents (2001:db8::/32,
+ * 3fff::/20, 2001:2::/48), so leaving the IPv4 twins classified public was an
+ * asymmetry, not a decision. None of them is routed, so a callback aimed at one
+ * is either a misconfiguration or a probe; 198.18.0.0/15 in particular is
+ * commonly bound on lab and appliance networks and reachable from the host.
+ *
+ * Not listed because an earlier rule already covers them: 240.0.0.0/4 (reserved)
+ * and 255.255.255.255/32 (limited broadcast) both satisfy `a >= 224`. The
+ * AS112 ranges (192.31.196.0/24, 192.175.48.0/24) and AMT (192.52.193.0/24) are
+ * marked globally reachable by IANA and so stay accepted.
  */
-function isPrivateIpv4([a, b]: number[]): boolean {
+function isPrivateIpv4([a, b, c]: number[]): boolean {
   return (
     a === 0 ||
     a === 10 ||
@@ -184,7 +224,13 @@ function isPrivateIpv4([a, b]: number[]): boolean {
     (a === 169 && b === 254) ||
     (a === 172 && b >= 16 && b <= 31) ||
     (a === 192 && b === 168) ||
-    a >= 224
+    a >= 224 ||
+    // IETF protocol assignments 192.0.0.0/24 and documentation 192.0.2.0/24.
+    (a === 192 && b === 0 && (c === 0 || c === 2)) ||
+    // Benchmarking 198.18.0.0/15 and documentation 198.51.100.0/24.
+    (a === 198 && (b === 18 || b === 19 || (b === 51 && c === 100))) ||
+    // Documentation 203.0.113.0/24.
+    (a === 203 && b === 0 && c === 113)
   )
 }
 
@@ -363,6 +409,26 @@ export function validateKillCallbackUrl(raw: string): string | null {
 }
 
 /**
+ * Await a promise under an abort signal, rejecting as soon as the signal fires
+ * rather than waiting for the promise to settle.
+ *
+ * The underlying promise is still awaited internally, so its eventual
+ * settlement — including a rejection that arrives after the deadline — stays
+ * handled and cannot surface as an unhandled rejection.
+ */
+function withDeadline<T>(promise: Promise<T>, deadline?: AbortSignal): Promise<T> {
+  if (!deadline) return promise
+  if (deadline.aborted) return Promise.reject(deadline.reason)
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = (): void => reject(deadline.reason)
+    deadline.addEventListener('abort', onAbort, { once: true })
+    promise.then(resolve, reject).finally(() => {
+      deadline.removeEventListener('abort', onAbort)
+    })
+  })
+}
+
+/**
  * Resolve a callback host and report whether any address it maps to sits in
  * private space. This is what closes the DNS half of the SSRF: without it a
  * caller-supplied name pointing at 169.254.169.254 passes the literal checks
@@ -372,23 +438,51 @@ export function validateKillCallbackUrl(raw: string): string | null {
  * Skipped for hosts an operator has opted in via
  * {@link KILL_CALLBACK_ALLOWLIST_ENV}.
  *
+ * `deadline` is the one budget for the whole callback path, shared with the
+ * POST that follows. Without it the awaited lookup was unbounded: a resolver
+ * that accepts the query and never answers held the caller — and, through
+ * otel_evaluate_spend, the caller's span evaluation — open indefinitely, well
+ * past KILL_CALLBACK_TIMEOUT_MS, because the abort signal used to be created
+ * only for the fetch afterwards. node:dns/promises takes no signal of its own,
+ * so the lookup is raced against the deadline instead.
+ *
  * The reason string returned here is detailed on purpose — it is for the server
  * log. It must not be handed to the MCP caller verbatim: "resolves into private
  * space" vs "does not resolve" vs "resolves to nothing" would let an untrusted
  * caller enumerate the server's internal DNS view. invokeKillCallback replaces
  * it with {@link KILL_CALLBACK_GENERIC_FAILURE} before returning.
  *
- * Known residual gap: the connection is not pinned to the address that was
- * checked, so a resolver that returns a public address here and a private one
- * to the fetch (DNS rebinding) still wins the race. Closing that needs a custom
- * agent/socket, which global fetch does not expose. Operators who need a hard
- * guarantee should front the webhook with an egress allowlist. What a
- * successful rebind then yields the caller is one bit — whether the POST was
- * delivered — plus response latency; the HTTP status and the failure reason are
- * withheld. That bit cannot be removed without lying to operators about whether
- * their circuit breaker actually fired.
+ * Known residual gap — this check and the POST do separate DNS lookups, so the
+ * connection is not pinned to the address that was validated, and a resolver
+ * that answers with a public address here and a private one to the fetch (DNS
+ * rebinding) still wins the race.
+ *
+ * This is a scope decision, not an impossibility, and it should not be read as
+ * one. Pinning needs a connection whose DNS lookup can be overridden, and:
+ *
+ *   - Global `fetch` cannot do it. Node does not expose undici as a builtin
+ *     (`node:undici` is not a module), so `new Agent({ connect: { lookup } })`
+ *     plus the non-standard `dispatcher` option means taking on `undici` as a
+ *     runtime dependency, which this package does not have and does not want
+ *     for one call site.
+ *   - `node:http` / `node:https` `request()` CAN do it, dependency-free: their
+ *     `lookup` option is honoured for the connect, and TLS `servername` still
+ *     defaults to the URL hostname so certificate validation is unaffected.
+ *     Pinning to the already-validated address set is the correct fix.
+ *
+ * The second option means replacing the fetch transport on this path outright,
+ * so it is deliberately left to its own change rather than folded into a branch
+ * whose contract is that no spend figure or breaker decision moves. Until then:
+ * operators who need a hard guarantee should front the webhook with an egress
+ * allowlist, and the tool description says so. What a successful rebind yields
+ * the caller is one bit — whether the POST was delivered — plus response
+ * latency; the HTTP status and the failure reason are withheld. That bit cannot
+ * be removed without lying to operators about whether their breaker fired.
  */
-export async function resolvedHostIsPrivate(rawUrl: string): Promise<string | null> {
+export async function resolvedHostIsPrivate(
+  rawUrl: string,
+  deadline?: AbortSignal
+): Promise<string | null> {
   let hostname: string
   try {
     hostname = new URL(rawUrl).hostname.toLowerCase()
@@ -404,9 +498,12 @@ export async function resolvedHostIsPrivate(rawUrl: string): Promise<string | nu
   let addresses: Array<{ address: string; family: number }>
   try {
     const { lookup } = await import('node:dns/promises')
-    addresses = await lookup(hostname, { all: true, verbatim: true })
+    addresses = await withDeadline(lookup(hostname, { all: true, verbatim: true }), deadline)
   } catch {
-    return `killCallbackUrl host "${hostname}" could not be resolved`
+    return deadline?.aborted
+      ? `killCallbackUrl host "${hostname}" was not resolved within the ` +
+          `${KILL_CALLBACK_TIMEOUT_MS}ms kill-callback deadline`
+      : `killCallbackUrl host "${hostname}" could not be resolved`
   }
   if (addresses.length === 0) {
     return `killCallbackUrl host "${hostname}" resolved to no addresses`
@@ -593,13 +690,17 @@ export function evaluateSpan(attrs: OTelSpanCostAttributes): BudgetDecision | nu
  * POST the kill decision to the policy's circuit-breaker webhook.
  *
  * Failure handling is loud but non-fatal: an invalid URL, a host that resolves
- * into private space, a timeout (KILL_CALLBACK_TIMEOUT_MS), or a network/HTTP
- * failure is reported in the returned object (surfaced verbatim in the
+ * into private space, a timeout, or a network/HTTP failure is reported in the
+ * returned object (surfaced verbatim in the
  * otel_evaluate_spend result) and never throws. The breaker decision is
  * computed before this runs and is never altered or swallowed by it — a broken
  * webhook cannot turn a kill into an allow. Redirects are not followed: a 3xx
  * is reported as a failed callback rather than re-issued against a host that
  * never passed validation.
+ *
+ * KILL_CALLBACK_TIMEOUT_MS is one deadline for the whole path, DNS resolution
+ * included, not a per-leg timeout: a resolver that never answers cannot hold
+ * span evaluation open past it.
  *
  * Every unsuccessful outcome — refused URL host, refused DNS answer, closed
  * port, open-but-silent port, HTTP error status, timeout — returns the same
@@ -665,9 +766,14 @@ export async function invokeKillCallback(
     }
   }
 
+  // One deadline for the whole callback path — DNS resolution and the POST
+  // share it. Created here, before the lookup, because the lookup is a network
+  // round trip to a caller-influenced name and was previously unbounded.
+  const deadline = AbortSignal.timeout(KILL_CALLBACK_TIMEOUT_MS)
+
   // Names are only checkable once resolved, and only at fire time. The reason
   // is logged, not returned: see the note above on the DNS enumeration oracle.
-  const dnsError = await resolvedHostIsPrivate(policy.killCallbackUrl)
+  const dnsError = await resolvedHostIsPrivate(policy.killCallbackUrl, deadline)
   if (dnsError) {
     logKillCallbackFailure(policy.killCallbackUrl, dnsError)
     return {
@@ -686,7 +792,9 @@ export async function invokeKillCallback(
       // Do not follow redirects: a validated public URL must not be able to
       // 302 the POST into the private hosts validateKillCallbackUrl refuses.
       redirect: 'manual',
-      signal: AbortSignal.timeout(KILL_CALLBACK_TIMEOUT_MS),
+      // The same signal the DNS gate ran under, not a fresh one: the deadline
+      // is for the callback, not for each leg of it.
+      signal: deadline,
       body: JSON.stringify({
         event: 'agentpay.budget.kill',
         decision,
@@ -829,7 +937,9 @@ export const otelRegisterPolicyTool = {
           'registered and enforced. Host names are resolved and re-checked ' +
           'before the callback fires, and a host that resolves into private ' +
           'space is refused. The connection is not pinned to the checked ' +
-          'address, so a rebinding resolver is still out of scope. Undelivered ' +
+          'address, so a rebinding resolver is still out of scope — front the ' +
+          'webhook with an egress allowlist if you need a hard guarantee. ' +
+          'Undelivered ' +
           'callbacks report only ok=false and a single generic reason; the ' +
           'response status and the specific failure are never returned.',
       },

@@ -9,7 +9,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
  * resolver to an ordinary public address; the SSRF tests below override it.
  */
 const dnsLookup = vi.hoisted(() =>
-  vi.fn(async () => [{ address: '203.0.113.10', family: 4 }])
+  vi.fn(async () => [{ address: '93.184.216.34', family: 4 }])
 )
 vi.mock('node:dns/promises', () => ({ lookup: dnsLookup }))
 
@@ -39,7 +39,7 @@ describe('OTel Budget Circuit-Breaker', () => {
   beforeEach(() => {
     _resetOTelBudgetState()
     vi.restoreAllMocks()
-    dnsLookup.mockResolvedValue([{ address: '203.0.113.10', family: 4 }])
+    dnsLookup.mockResolvedValue([{ address: '93.184.216.34', family: 4 }])
     delete process.env[KILL_CALLBACK_ALLOWLIST_ENV]
     consoleError = vi.spyOn(console, 'error').mockImplementation(() => {})
   })
@@ -388,7 +388,7 @@ describe('OTel Budget Circuit-Breaker', () => {
 
   describe('kill callback URL validation', () => {
     it.each([
-      ['ftp://198.51.100.7/kill', /http: or https:/],
+      ['ftp://93.184.216.7/kill', /http: or https:/],
       ['https://user:secret@hooks.example.com/kill', /credentials/],
       ['not a url', /not a valid URL/],
     ])('drops the refused callback URL %s but keeps the cap', (url, reason) => {
@@ -471,7 +471,7 @@ describe('OTel Budget Circuit-Breaker', () => {
         maxSpendUsd: 5.0,
         windowMs: 0,
         breachAction: 'kill',
-        killCallbackUrl: 'ftp://198.51.100.7/kill',
+        killCallbackUrl: 'ftp://93.184.216.7/kill',
       })
 
       expect(result.isError).toBeUndefined()
@@ -530,6 +530,24 @@ describe('OTel Budget Circuit-Breaker', () => {
       ['http://192.168.1.10/kill', 'RFC1918 192.168/16'],
       ['http://100.64.0.1/kill', 'CGNAT 100.64/10'],
       ['http://239.255.255.250/kill', 'multicast'],
+      // The remaining IANA "Globally Reachable: False" IPv4 entries. The IPv6
+      // side already refused its documentation and benchmarking equivalents
+      // (2001:db8::/32, 3fff::/20, 2001:2::/48), so these were an asymmetry.
+      ['http://192.0.0.1/kill', 'IETF protocol assignments 192.0.0.0/24'],
+      ['http://192.0.0.170/kill', 'NAT64 discovery inside 192.0.0.0/24'],
+      ['http://192.0.2.5/kill', 'documentation TEST-NET-1 192.0.2.0/24'],
+      ['http://198.18.0.1/kill', 'benchmarking 198.18.0.0/15, lower half'],
+      ['http://198.19.255.254/kill', 'benchmarking 198.18.0.0/15, upper half'],
+      ['http://198.51.100.7/kill', 'documentation TEST-NET-2 198.51.100.0/24'],
+      ['http://203.0.113.10/kill', 'documentation TEST-NET-3 203.0.113.0/24'],
+      // Already covered by the `a >= 224` rule; pinned so a later narrowing of
+      // that rule cannot silently reopen them.
+      ['http://240.0.0.1/kill', 'reserved 240.0.0.0/4'],
+      ['http://255.255.255.255/kill', 'limited broadcast'],
+      // Tunnelled forms of the same ranges must not slip past either.
+      ['http://[::ffff:203.0.113.10]/kill', 'IPv4-mapped TEST-NET-3'],
+      ['http://[64:ff9b::c000:205]/kill', 'NAT64-tunnelled 192.0.2.5'],
+      ['http://[2002:c612:1::]/kill', '6to4-tunnelled 198.18.0.1'],
       ['http://[::]/kill', 'IPv6 unspecified'],
       ['http://[::1]/kill', 'IPv6 loopback'],
       ['http://[0:0:0:0:0:0:0:1]/kill', 'uncompressed IPv6 loopback'],
@@ -555,7 +573,7 @@ describe('OTel Budget Circuit-Breaker', () => {
       ['http://[64:ff9b::7f00:1]/kill', 'NAT64-tunnelled loopback'],
       ['http://[64:ff9b::a9fe:a9fe]/kill', 'NAT64-tunnelled metadata service'],
       // Public IPv4 payload, so only the 64:ff9b:1::/48 prefix rule refuses it.
-      ['http://[64:ff9b:1::cb00:7107]/kill', 'NAT64 local-use prefix'],
+      ['http://[64:ff9b:1::5db8:d807]/kill', 'NAT64 local-use prefix'],
       ['http://[2002:7f00:1::]/kill', '6to4-tunnelled loopback'],
       ['http://[2002:a9fe:a9fe::]/kill', '6to4-tunnelled metadata service'],
       // Teredo stores the client IPv4 bit-inverted: ~169.254.169.254 = 5601:5601.
@@ -579,11 +597,27 @@ describe('OTel Budget Circuit-Breaker', () => {
     it.each([
       'https://hooks.example.com/agent/kill',
       'http://hooks.example.com./agent/kill',
-      'https://198.51.100.7/kill',
-      'https://203.0.113.10:8443/kill',
+      'https://93.184.216.7/kill',
+      'https://93.184.216.34:8443/kill',
+      // Neighbours of the newly-refused IPv4 ranges that are ordinary global
+      // unicast. The new rules are /15 and /24 wide and must not creep: 192.0.1
+      // and 192.0.3 bracket 192.0.0/24 and 192.0.2/24, 198.17 and 198.20
+      // bracket 198.18/15, and 198.51.101 / 203.0.114 sit next to the two
+      // remaining documentation blocks.
+      'https://192.0.1.1/kill',
+      'https://192.0.3.1/kill',
+      'https://198.17.255.254/kill',
+      'https://198.20.0.1/kill',
+      'https://198.51.101.7/kill',
+      'https://203.0.114.10/kill',
+      // IANA marks AS112 and AMT globally reachable, so they stay accepted
+      // even though they are special-purpose registrations.
+      'https://192.31.196.1/kill',
+      'https://192.52.193.1/kill',
+      'https://192.175.48.1/kill',
       'http://[2606:4700:4700::1111]/kill',
-      'http://[64:ff9b::cb00:7107]/kill',
-      'http://[2002:cb00:7107::]/kill',
+      'http://[64:ff9b::5db8:d807]/kill',
+      'http://[2002:5db8:d807::]/kill',
       // Neighbours of the newly-refused ranges that are ordinary global unicast
       // and must stay reachable: 2001:4860 is not 2001:db8/2001:2/2001:20 and
       // must not be swept up by the protocol-assignment rules, 3ffe is outside
@@ -638,7 +672,7 @@ describe('OTel Budget Circuit-Breaker', () => {
       const fetchMock = vi.fn()
       global.fetch = fetchMock as typeof global.fetch
       dnsLookup.mockResolvedValue([
-        { address: '198.51.100.7', family: 4 },
+        { address: '93.184.216.7', family: 4 },
         { address: '10.1.2.3', family: 4 },
       ])
 
@@ -658,9 +692,17 @@ describe('OTel Budget Circuit-Breaker', () => {
       ['::1', 'loopback'],
       // A dotted-quad tail survives here; new URL() would have compressed it.
       ['::ffff:169.254.169.254', 'IPv4-mapped metadata service, dotted-quad tail'],
-      ['64:ff9b:1::cb00:7107', 'NAT64 local-use prefix'],
+      ['64:ff9b:1::5db8:d807', 'NAT64 local-use prefix'],
       ['ff02::1', 'all-nodes multicast'],
       ['fec0::1', 'deprecated site-local'],
+      // The DNS gate shares isPrivateIpv4 with the literal check, so the
+      // special-purpose IPv4 ranges have to be refused here too — a name is
+      // the easy way to reach one of them.
+      ['198.18.0.1', 'benchmarking 198.18.0.0/15'],
+      ['192.0.2.5', 'documentation TEST-NET-1'],
+      ['198.51.100.7', 'documentation TEST-NET-2'],
+      ['203.0.113.10', 'documentation TEST-NET-3'],
+      ['192.0.0.170', 'IETF protocol assignments 192.0.0.0/24'],
       ['2001:db8::1', 'documentation'],
       ['not-an-address', 'unparseable — must fail closed, not be treated as public'],
     ])('refuses a name that resolves to %s (%s)', async (address) => {
@@ -681,7 +723,7 @@ describe('OTel Budget Circuit-Breaker', () => {
     // a resolver that answers in that form for a public host still has to work.
     it.each([
       ['2606:4700:4700::1111', 'public IPv6'],
-      ['::ffff:203.0.113.10', 'public IPv4-mapped, dotted-quad tail'],
+      ['::ffff:93.184.216.34', 'public IPv4-mapped, dotted-quad tail'],
     ])('accepts a name that resolves to %s (%s)', async (address) => {
       const fetchMock = vi.fn().mockResolvedValue({ ok: true, status: 204 })
       global.fetch = fetchMock as typeof global.fetch
@@ -736,7 +778,7 @@ describe('OTel Budget Circuit-Breaker', () => {
     it('fetches a name that resolves entirely into public space', async () => {
       const fetchMock = vi.fn().mockResolvedValue({ ok: true, status: 204 })
       global.fetch = fetchMock as typeof global.fetch
-      dnsLookup.mockResolvedValue([{ address: '198.51.100.7', family: 4 }])
+      dnsLookup.mockResolvedValue([{ address: '93.184.216.7', family: 4 }])
 
       const result = await invokeKillCallback(
         killPolicy('https://hooks.example.com/kill'),
@@ -752,9 +794,132 @@ describe('OTel Budget Circuit-Breaker', () => {
       global.fetch = fetchMock as typeof global.fetch
       dnsLookup.mockClear()
 
-      expect(await resolvedHostIsPrivate('https://198.51.100.7/kill')).toBeNull()
+      expect(await resolvedHostIsPrivate('https://93.184.216.7/kill')).toBeNull()
       expect(await resolvedHostIsPrivate('http://[2606:4700:4700::1111]/kill')).toBeNull()
       expect(dnsLookup).not.toHaveBeenCalled()
+    })
+  })
+
+  describe('kill callback failure logging', () => {
+    // The webhook path and query are routinely the credential — a signed
+    // delivery path, a ?token= capability. Server logs are shipped, indexed and
+    // read by more people than the webhook's owner, so writing the full URL
+    // there discloses it. Only the origin is needed to identify the webhook.
+    const secretUrl =
+      'https://hooks.example.com:8443/agent/kill/s3cr3t-delivery-token?sig=abc123&tenant=acme'
+
+    const logsFor = async (arrange: () => void): Promise<string> => {
+      arrange()
+      await invokeKillCallback(killPolicy(secretUrl), killDecision)
+      const logged = consoleError.mock.calls.map((call) => String(call[0])).join('\n')
+      expect(logged).not.toBe('')
+      return logged
+    }
+
+    it.each([
+      [
+        'a transport failure',
+        () => {
+          global.fetch = vi
+            .fn()
+            .mockRejectedValue(new TypeError('fetch failed')) as unknown as typeof global.fetch
+        },
+      ],
+      [
+        'an HTTP error status',
+        () => {
+          global.fetch = vi
+            .fn()
+            .mockResolvedValue({ ok: false, status: 500 }) as unknown as typeof global.fetch
+        },
+      ],
+      [
+        'a DNS-gate refusal',
+        () => {
+          global.fetch = vi.fn() as unknown as typeof global.fetch
+          dnsLookup.mockResolvedValue([{ address: '169.254.169.254', family: 4 }])
+        },
+      ],
+    ])('redacts the callback path and query when logging %s', async (_case, arrange) => {
+      const logged = await logsFor(arrange)
+
+      expect(logged).not.toContain('s3cr3t-delivery-token')
+      expect(logged).not.toContain('sig=abc123')
+      expect(logged).not.toContain('tenant=acme')
+      // The operator still gets enough to tell which webhook failed.
+      expect(logged).toContain('https://hooks.example.com:8443')
+    })
+  })
+
+  describe('kill callback deadline', () => {
+    it('applies the callback deadline to DNS resolution, not just the fetch', async () => {
+      // The lookup used to be awaited with no deadline of its own — the abort
+      // signal was created afterwards, for the fetch only — so a resolver that
+      // accepted the query and never answered held span evaluation open
+      // indefinitely, well past KILL_CALLBACK_TIMEOUT_MS.
+      const realTimeout = AbortSignal.timeout.bind(AbortSignal)
+      let requestedTimeoutMs: number | undefined
+      vi.spyOn(AbortSignal, 'timeout').mockImplementation((ms: number) => {
+        requestedTimeoutMs = ms
+        return realTimeout(5)
+      })
+
+      const fetchMock = vi.fn()
+      global.fetch = fetchMock as typeof global.fetch
+      dnsLookup.mockImplementation(() => new Promise(() => {}))
+
+      const result = await invokeKillCallback(
+        killPolicy('https://blackhole-resolver.example.com/kill'),
+        killDecision
+      )
+
+      expect(requestedTimeoutMs).toBe(KILL_CALLBACK_TIMEOUT_MS)
+      // Refused before the wire, so the DNS gate's contract still holds.
+      expect(fetchMock).not.toHaveBeenCalled()
+      expect(result).toEqual({
+        attempted: false,
+        ok: false,
+        error: KILL_CALLBACK_GENERIC_FAILURE,
+      })
+      // The caller gets the same generic string as every other DNS refusal;
+      // the operator's log is where the deadline shows up.
+      expect(consoleError).toHaveBeenCalledWith(
+        expect.stringContaining('kill-callback deadline')
+      )
+    })
+
+    it('spends one deadline across the whole path, not one per leg', async () => {
+      const realTimeout = AbortSignal.timeout.bind(AbortSignal)
+      const timeoutSpy = vi
+        .spyOn(AbortSignal, 'timeout')
+        .mockImplementation(() => realTimeout(KILL_CALLBACK_TIMEOUT_MS))
+
+      const fetchMock = vi.fn().mockResolvedValue({ ok: true, status: 204 })
+      global.fetch = fetchMock as typeof global.fetch
+
+      await invokeKillCallback(killPolicy('https://hooks.example.com/kill'), killDecision)
+
+      // One signal, created once, shared by the lookup and the POST.
+      expect(timeoutSpy).toHaveBeenCalledTimes(1)
+      const init = fetchMock.mock.calls[0][1] as RequestInit
+      expect(init.signal).toBe(timeoutSpy.mock.results[0].value)
+    })
+
+    it('does not resolve or fetch at all when the decision is not a kill', async () => {
+      const timeoutSpy = vi.spyOn(AbortSignal, 'timeout')
+      const fetchMock = vi.fn()
+      global.fetch = fetchMock as typeof global.fetch
+      dnsLookup.mockClear()
+
+      const result = await invokeKillCallback(killPolicy('https://hooks.example.com/kill'), {
+        ...killDecision,
+        action: 'block',
+      })
+
+      expect(result).toBeNull()
+      expect(timeoutSpy).not.toHaveBeenCalled()
+      expect(dnsLookup).not.toHaveBeenCalled()
+      expect(fetchMock).not.toHaveBeenCalled()
     })
   })
 
@@ -988,7 +1153,7 @@ describe('OTel Budget Circuit-Breaker', () => {
       // A destination that passed the gate and then failed on the wire is
       // attempted=true with the same error string — the reason does not
       // distinguish them, but `attempted` does, and that is the whole leak.
-      dnsLookup.mockResolvedValue([{ address: '203.0.113.10', family: 4 }])
+      dnsLookup.mockResolvedValue([{ address: '93.184.216.34', family: 4 }])
       global.fetch = vi
         .fn()
         .mockRejectedValue(new TypeError('fetch failed')) as unknown as typeof global.fetch
