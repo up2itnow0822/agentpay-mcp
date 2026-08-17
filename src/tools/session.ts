@@ -17,7 +17,13 @@
 import { z } from 'zod';
 import { createX402Client } from 'agentwallet-sdk';
 import { getWallet, getConfig } from '../utils/client.js';
-import { textContent, formatError, formatUntrustedBody, chainName } from '../utils/format.js';
+import {
+  textContent,
+  formatError,
+  formatUntrustedBody,
+  sanitizeUntrustedInline,
+  chainName,
+} from '../utils/format.js';
 import { supportedX402NetworksForChainId } from '../utils/x402-networks.js';
 import { maxPaymentBaseUnits, resolveX402AssetDecimals } from '../utils/payment-cap.js';
 import { enforceSpendPolicy } from './budget.js';
@@ -265,7 +271,7 @@ export async function handleX402SessionStart(
           textContent(
             `ℹ️ **No Payment Required**\n\n` +
             `  Endpoint: ${input.endpoint}\n` +
-            `  Status:   ${response.status} ${response.statusText}\n\n` +
+            `  Status:   ${response.status} ${sanitizeUntrustedInline(response.statusText)}\n\n` +
             `No x402 payment was needed. The endpoint responded without requiring payment.\n` +
             `You do not need a session token — use x402_pay directly for free endpoints.\n\n` +
             `📄 **Response Body**\n` +
@@ -533,7 +539,7 @@ export async function handleX402SessionFetch(
     if (session.label) out += `  Label:       ${session.label}\n`;
     out += `  URL:         ${input.url}\n`;
     out += `  Method:      ${method}\n`;
-    out += `  Status:      ${response.status} ${response.statusText}\n`;
+    out += `  Status:      ${response.status} ${sanitizeUntrustedInline(response.statusText)}\n`;
     out += `  Session TTL: ${Math.ceil(ttlRemaining / 60)}m remaining\n`;
     out += `  💰 No payment — session token used\n\n`;
     out += `📄 **Response Body**\n`;

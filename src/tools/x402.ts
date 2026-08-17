@@ -11,7 +11,13 @@
 import { z } from 'zod';
 import { createX402Client } from 'agentwallet-sdk';
 import { getWallet, getConfig } from '../utils/client.js';
-import { textContent, formatError, formatUntrustedBody, chainName } from '../utils/format.js';
+import {
+  textContent,
+  formatError,
+  formatUntrustedBody,
+  sanitizeUntrustedInline,
+  chainName,
+} from '../utils/format.js';
 import {
   describeSupportedX402Networks,
   isTvmOrTonNetwork,
@@ -56,6 +62,21 @@ function parsePaymentRequiredFromBody(responseText: string): X402PaymentRequired
   }
 }
 
+/** Max server-supplied network/scheme names echoed into the narration region. */
+const MAX_OFFERED_LISTED = 8;
+
+/**
+ * Render a list of server-supplied values for the trusted narration region.
+ * Each value is flattened and capped, and the list itself is capped, so a
+ * hostile 402 payload cannot inject newlines (which would let it forge an
+ * UNTRUSTED_BODY_END marker above the real one) or flood the tool result.
+ */
+function describeUntrustedList(values: string[]): string {
+  const shown = values.slice(0, MAX_OFFERED_LISTED).map((v) => sanitizeUntrustedInline(v));
+  const extra = values.length - shown.length;
+  return shown.join(', ') + (extra > 0 ? ` (+${extra} more)` : '');
+}
+
 function describeUnsupported402(
   input: X402PayInput,
   response: Response,
@@ -79,10 +100,10 @@ function describeUnsupported402(
   let out = `❌ **Unsupported x402 Payment Requirement - Failed Closed**\n\n`;
   out += `  URL:       ${input.url}\n`;
   out += `  Method:    ${input.method ?? 'GET'}\n`;
-  out += `  Status:    ${response.status} ${response.statusText}\n`;
+  out += `  Status:    ${response.status} ${sanitizeUntrustedInline(response.statusText)}\n`;
   out += `  Supported: ${supportedNetworks}\n`;
-  out += `  Offered:   ${offeredNetworks.length > 0 ? offeredNetworks.join(', ') : 'not parseable'}\n`;
-  if (offeredSchemes.length > 0) out += `  Schemes:   ${offeredSchemes.join(', ')}\n`;
+  out += `  Offered:   ${offeredNetworks.length > 0 ? describeUntrustedList(offeredNetworks) : 'not parseable'}\n`;
+  if (offeredSchemes.length > 0) out += `  Schemes:   ${describeUntrustedList(offeredSchemes)}\n`;
   out += `\nAgentPay MCP did not sign or send a payment. The server returned HTTP 402, ` +
     `but none of the offered x402 payment options matched the configured AgentPay network.\n`;
 
@@ -248,7 +269,7 @@ export async function handleX402Pay(
           let out = `🌐 **x402 Fetch Result** (session)\n\n`;
           out += `  URL:        ${input.url}\n`;
           out += `  Method:     ${method}\n`;
-          out += `  Status:     ${response.status} ${response.statusText}\n`;
+          out += `  Status:     ${response.status} ${sanitizeUntrustedInline(response.statusText)}\n`;
           out += `  Network:    ${chainName(config.chainId)}\n`;
           out += `\n🔐 **Session Used** (no payment)\n`;
           out += `  Session ID: ${activeSession.sessionId}\n`;
@@ -367,7 +388,7 @@ export async function handleX402Pay(
     let out = `🌐 **x402 Fetch Result**\n\n`;
     out += `  URL:     ${input.url}\n`;
     out += `  Method:  ${method}\n`;
-    out += `  Status:  ${response.status} ${response.statusText}\n`;
+    out += `  Status:  ${response.status} ${sanitizeUntrustedInline(response.statusText)}\n`;
     out += `  Network: ${chainName(config.chainId)}\n`;
 
     if (paymentMade) {
