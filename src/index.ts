@@ -113,6 +113,8 @@ import {
   OTelBudgetStatusSchema,
 } from './tools/otel-budget.js';
 
+import { formatError, sanitizeUntrustedInline, textContent } from './utils/format.js';
+
 // ─── Server configuration ──────────────────────────────────────────────────
 
 const SERVER_INFO = {
@@ -350,20 +352,23 @@ server.setRequestHandler(CallToolRequestSchema, async (request: CallToolRequest)
           content: [
             {
               type: 'text' as const,
-              text: `❌ Unknown tool: "${name}". Available tools: ${ALL_TOOLS.map(t => t.name).join(', ')}`,
+              text:
+                `❌ Unknown tool: "${sanitizeUntrustedInline(name, 64)}". ` +
+                `Available tools: ${ALL_TOOLS.map(t => t.name).join(', ')}`,
             },
           ],
           isError: true,
         };
     }
   } catch (error: unknown) {
-    const message = error instanceof Error ? error.message : String(error);
+    // Route through the same envelope every handler uses. Schema validation
+    // failures land here *before* any handler runs, and zod quotes the
+    // offending value verbatim — an agent one hop from hostile text (it lifted
+    // a `method` out of a paid response body) would otherwise reproduce that
+    // text, forged END marker and all, in the trusted narration region.
     return {
       content: [
-        {
-          type: 'text' as const,
-          text: `❌ Tool "${name}" failed: ${message}`,
-        },
+        textContent(formatError(error, `Tool "${sanitizeUntrustedInline(name, 64)}"`)),
       ],
       isError: true,
     };

@@ -17,9 +17,24 @@
 import { z } from 'zod';
 import { createX402Client } from 'agentwallet-sdk';
 import { getWallet, getConfig } from '../utils/client.js';
-import { textContent, formatError, chainName } from '../utils/format.js';
+import {
+  textContent,
+  formatError,
+  formatUntrustedBody,
+  sanitizeUntrustedInline,
+  sanitizeUntrustedUrl,
+  describeFinalUrl,
+  formatHttpStatus,
+  noControlChars,
+  chainName,
+} from '../utils/format.js';
 import { supportedX402NetworksForChainId } from '../utils/x402-networks.js';
-import { maxPaymentBaseUnits, resolveX402AssetDecimals } from '../utils/payment-cap.js';
+import {
+  assertPayableX402Recipient,
+  assertParsableX402Amount,
+  maxPaymentBaseUnits,
+  resolveX402AssetDecimals,
+} from '../utils/payment-cap.js';
 import { enforceSpendPolicy } from './budget.js';
 import {
   createSession,
@@ -38,9 +53,7 @@ import {
 // ─── x402_session_start ────────────────────────────────────────────────────
 
 export const X402SessionStartSchema = z.object({
-  endpoint: z
-    .string()
-    .url()
+  endpoint: noControlChars(z.string().url())
     .describe(
       'The base URL or endpoint to establish a session for. ' +
       'The agent pays once and the session covers all subsequent requests to this endpoint.'
@@ -66,9 +79,7 @@ export const X402SessionStartSchema = z.object({
       'bearer credentials that CANNOT be revoked once issued — x402_session_end only clears ' +
       'local state, so a leaked token stays valid to the endpoint until this TTL elapses.'
     ),
-  label: z
-    .string()
-    .max(100)
+  label: noControlChars(z.string().max(100))
     .optional()
     .describe('Optional human-readable label for this session (e.g. "Premium API session")'),
   max_payment_eth: z
@@ -188,7 +199,14 @@ export async function handleX402SessionStart(
       maxRetries: 1,
       supportedNetworks: supportedX402NetworksForChainId(config.chainId),
       onBeforePayment: async (req) => {
-        const amount = BigInt(req.amount);
+        // The 402's payTo is remote-controlled and ends up inside error
+        // messages (SDK allowlist rejection, viem InvalidAddressError).
+        // Reject non-addresses before signing or interpolating.
+        const merchant = assertPayableX402Recipient(req.payTo);
+        // req.amount is remote-controlled; a raw BigInt() here would put the
+        // whole value verbatim into V8's "Cannot convert <amount> to a
+        // BigInt" message.
+        const amount = assertParsableX402Amount(req.amount);
         if (input.max_payment_eth) {
           const maxRaw = maxPaymentBaseUnits(
             input.max_payment_eth,
@@ -208,7 +226,7 @@ export async function handleX402SessionStart(
         // only runs when a policy is configured, and resolution failures
         // reject (fail closed) inside enforceSpendPolicy.
         const policyDecision = await enforceSpendPolicy({
-          merchant: req.payTo,
+          merchant,
           amount,
           decimals: () =>
             resolveX402AssetDecimals(
@@ -264,12 +282,13 @@ export async function handleX402SessionStart(
         content: [
           textContent(
             `ℹ️ **No Payment Required**\n\n` +
-            `  Endpoint: ${input.endpoint}\n` +
-            `  Status:   ${response.status} ${response.statusText}\n\n` +
+            `  Endpoint: ${sanitizeUntrustedUrl(input.endpoint)}\n` +
+            describeFinalUrl(input.endpoint, response) +
+            `  Status:   ${formatHttpStatus(response.status)}\n\n` +
             `No x402 payment was needed. The endpoint responded without requiring payment.\n` +
             `You do not need a session token — use x402_pay directly for free endpoints.\n\n` +
             `📄 **Response Body**\n` +
-            '```\n' + responseText.slice(0, 4000) + (responseText.length > 4000 ? '\n... [truncated]' : '') + '\n```'
+            formatUntrustedBody(responseText, 4000)
           ),
         ],
       };
@@ -301,22 +320,26 @@ export async function handleX402SessionStart(
 
     let out = `🔐 **x402 Session Established**\n\n`;
     out += `  Session ID:    ${session.sessionId}\n`;
-    out += `  Endpoint:      ${session.endpoint}\n`;
+    out += `  Endpoint:      ${sanitizeUntrustedUrl(session.endpoint)}\n`;
+    out += describeFinalUrl(input.endpoint, response);
     out += `  Scope:         ${session.scope}\n`;
-    if (session.label) out += `  Label:         ${session.label}\n`;
+    if (session.label) out += `  Label:         ${sanitizeUntrustedInline(session.label, 100)}\n`;
     out += `  Network:       ${chainName(config.chainId)}\n`;
     out += `  TTL:           ${Math.ceil(ttlRemaining / 60)}m (expires ${expiresAt})\n\n`;
     out += `💳 **Session Payment**\n`;
     out += `  Amount:    ${paymentAmount.toString()} (base units)\n`;
-    out += `  Recipient: ${paymentRecipient}\n`;
-    out += `  TX Hash:   ${paymentTxHash}\n\n`;
+    // Both come from the SDK's payment log: `recipient` is the 402's own
+    // `payTo`, i.e. remote text, and `txHash` is whatever the write returned.
+    // They sit in the trusted narration region above the fence, so they are
+    // flattened and capped like every other untrusted value echoed there.
+    out += `  Recipient: ${sanitizeUntrustedInline(paymentRecipient, 64)}\n`;
+    out += `  TX Hash:   ${sanitizeUntrustedInline(paymentTxHash, 80)}\n\n`;
     out += `✅ **Next Steps**\n`;
     out += `  Use \`x402_session_fetch\` with session_id="${session.sessionId}" for all subsequent\n`;
-    out += `  requests to ${input.endpoint} — no further payments will be made during this session.\n`;
+    out += `  requests to ${sanitizeUntrustedUrl(input.endpoint)} — no further payments will be made during this session.\n`;
     out += `  Check session status with \`x402_session_status\`.\n\n`;
     out += `📄 **Initial Response** (${response.status})\n`;
-    const truncated = responseText.length > 4000;
-    out += '```\n' + responseText.slice(0, 4000) + (truncated ? '\n... [truncated]' : '') + '\n```';
+    out += formatUntrustedBody(responseText, 4000);
 
     return { content: [textContent(out)] };
   } catch (error: unknown) {
@@ -340,9 +363,7 @@ export const X402SessionFetchSchema = z.object({
     .string()
     .uuid()
     .describe('Session ID returned by x402_session_start.'),
-  url: z
-    .string()
-    .url()
+  url: noControlChars(z.string().url())
     .describe('URL to fetch within the session. Must be covered by the session endpoint/scope.'),
   method: z
     .enum(['GET', 'POST', 'PUT', 'PATCH', 'DELETE'])
@@ -423,7 +444,7 @@ export async function handleX402SessionFetch(
       return {
         content: [
           textContent(
-            `❌ Session not found: "${input.session_id}"\n\n` +
+            `❌ Session not found: "${sanitizeUntrustedInline(input.session_id, 100)}"\n\n` +
             `Create a new session with x402_session_start first.`
           ),
         ],
@@ -440,8 +461,8 @@ export async function handleX402SessionFetch(
         content: [
           textContent(
             `⏰ **Session Expired**\n\n` +
-            `  Session ID: ${input.session_id}\n` +
-            `  Endpoint:   ${lookup.session.endpoint}\n` +
+            `  Session ID: ${sanitizeUntrustedInline(input.session_id, 100)}\n` +
+            `  Endpoint:   ${sanitizeUntrustedUrl(lookup.session.endpoint)}\n` +
             (endedLocally
               ? `  Ended:      locally via x402_session_end\n` +
                 `  Expires:    ${tokenExpiresAt} (issued token expiry)\n\n`
@@ -462,9 +483,9 @@ export async function handleX402SessionFetch(
         content: [
           textContent(
             `❌ URL not covered by this session.\n\n` +
-            `  Session endpoint: ${session.endpoint}\n` +
+            `  Session endpoint: ${sanitizeUntrustedUrl(session.endpoint)}\n` +
             `  Session scope:    ${session.scope}\n` +
-            `  Requested URL:    ${input.url}\n\n` +
+            `  Requested URL:    ${sanitizeUntrustedUrl(input.url)}\n\n` +
             `This URL is outside the session's ${session.scope === 'exact' ? 'exact match' : 'prefix match'} scope.\n` +
             `Create a new session for this URL with x402_session_start, or use x402_pay for a one-time request.`
           ),
@@ -510,8 +531,9 @@ export async function handleX402SessionFetch(
         content: [
           textContent(
             `⚠️ **Server returned 402 — Session Not Recognised**\n\n` +
-            `  URL:        ${input.url}\n` +
-            `  Session ID: ${input.session_id}\n\n` +
+            `  URL:        ${sanitizeUntrustedUrl(input.url)}\n` +
+            describeFinalUrl(input.url, response) +
+            `  Session ID: ${sanitizeUntrustedInline(input.session_id, 100)}\n\n` +
             `The server returned HTTP 402 despite session headers being sent.\n` +
             `This means the server does not support x402 V2 session tokens yet,\n` +
             `or the session has been invalidated server-side.\n\n` +
@@ -519,33 +541,27 @@ export async function handleX402SessionFetch(
             `  • Use x402_pay for a one-time payment to this URL\n` +
             `  • Contact the API provider about x402 V2 session support\n\n` +
             `📄 **Response Body**\n` +
-            '```\n' + responseText.slice(0, 2000) + '\n```'
+            formatUntrustedBody(responseText, 2000)
           ),
         ],
         isError: true,
       };
     }
 
-    // Truncate very large responses
-    const MAX_LEN = 8000;
-    const truncated = responseText.length > MAX_LEN;
-    const displayText = truncated
-      ? responseText.slice(0, MAX_LEN) + '\n\n... [response truncated]'
-      : responseText;
-
     const ttlRemaining = session.expiresAt - Math.floor(Date.now() / 1000);
     const callNumber = session.callCount; // after recordSessionCall incremented it
 
     let out = `⚡ **x402 Session Fetch** (call #${callNumber})\n\n`;
     out += `  Session ID:  ${session.sessionId}\n`;
-    if (session.label) out += `  Label:       ${session.label}\n`;
-    out += `  URL:         ${input.url}\n`;
+    if (session.label) out += `  Label:       ${sanitizeUntrustedInline(session.label, 100)}\n`;
+    out += `  URL:         ${sanitizeUntrustedUrl(input.url)}\n`;
+    out += describeFinalUrl(input.url, response);
     out += `  Method:      ${method}\n`;
-    out += `  Status:      ${response.status} ${response.statusText}\n`;
+    out += `  Status:      ${formatHttpStatus(response.status)}\n`;
     out += `  Session TTL: ${Math.ceil(ttlRemaining / 60)}m remaining\n`;
     out += `  💰 No payment — session token used\n\n`;
     out += `📄 **Response Body**\n`;
-    out += '```\n' + displayText + '\n```';
+    out += formatUntrustedBody(responseText, 8000);
 
     return { content: [textContent(out)] };
   } catch (error: unknown) {
@@ -565,8 +581,7 @@ export async function handleX402SessionFetch(
 // ─── x402_session_status ──────────────────────────────────────────────────
 
 export const X402SessionStatusSchema = z.object({
-  session_id: z
-    .string()
+  session_id: noControlChars(z.string().max(200))
     .optional()
     .describe(
       'Specific session ID to inspect. ' +
@@ -609,7 +624,7 @@ export async function handleX402SessionStatus(
         return {
           content: [
             textContent(
-              `❌ Session not found: "${input.session_id}"\n\n` +
+              `❌ Session not found: "${sanitizeUntrustedInline(input.session_id, 100)}"\n\n` +
               `Use x402_session_status (no arguments) to list active sessions.`
             ),
           ],
@@ -633,9 +648,9 @@ export async function handleX402SessionStatus(
           : `🔐 **Session Details**\n\n`;
 
       out += `  Session ID:    ${session.sessionId}\n`;
-      if (session.label) out += `  Label:         ${session.label}\n`;
+      if (session.label) out += `  Label:         ${sanitizeUntrustedInline(session.label, 100)}\n`;
       out += `  Status:        ${endedLocally ? '🛑 Ended locally' : expired ? '❌ Expired' : '✅ Active'}\n`;
-      out += `  Endpoint:      ${session.endpoint}\n`;
+      out += `  Endpoint:      ${sanitizeUntrustedUrl(session.endpoint)}\n`;
       out += `  Scope:         ${session.scope}\n`;
       out += `  Wallet:        ${session.walletAddress}\n\n`;
 
@@ -648,9 +663,11 @@ export async function handleX402SessionStatus(
       out += `  Call Count:    ${session.callCount}\n\n`;
 
       out += `💳 **Session Payment**\n`;
-      out += `  TX Hash:       ${session.paymentTxHash}\n`;
-      out += `  Amount:        ${session.paymentAmount} (base units)\n`;
-      out += `  Recipient:     ${session.paymentRecipient}\n`;
+      // 80 leaves headroom over a canonical 66-char tx hash rather than
+      // truncating at exactly the expected length.
+      out += `  TX Hash:       ${sanitizeUntrustedInline(session.paymentTxHash, 80)}\n`;
+      out += `  Amount:        ${sanitizeUntrustedInline(session.paymentAmount)} (base units)\n`;
+      out += `  Recipient:     ${sanitizeUntrustedInline(session.paymentRecipient)}\n`;
       out += `  Token:         ${session.paymentToken === '0x0000000000000000000000000000000000000000' ? 'ETH (native)' : session.paymentToken}\n\n`;
 
       if (decoded) {
@@ -695,12 +712,12 @@ export async function handleX402SessionStatus(
 
       out += `─────────────────────────────────────\n`;
       out += `  ID:       ${session.sessionId}\n`;
-      if (session.label) out += `  Label:    ${session.label}\n`;
-      out += `  Endpoint: ${session.endpoint}\n`;
+      if (session.label) out += `  Label:    ${sanitizeUntrustedInline(session.label, 100)}\n`;
+      out += `  Endpoint: ${sanitizeUntrustedUrl(session.endpoint)}\n`;
       out += `  Scope:    ${session.scope}\n`;
       out += `  TTL:      ${formatTtl(ttlRemaining)} ${ttlBar}\n`;
       out += `  Calls:    ${session.callCount}\n`;
-      out += `  Payment:  ${session.paymentAmount} base units → TX ${session.paymentTxHash.slice(0, 18)}...\n`;
+      out += `  Payment:  ${sanitizeUntrustedInline(session.paymentAmount)} base units → TX ${sanitizeUntrustedInline(session.paymentTxHash.slice(0, 18))}...\n`;
       out += '\n';
     }
 
@@ -755,7 +772,9 @@ export async function handleX402SessionEnd(
     if (!lookup.found) {
       return {
         content: [
-          textContent(`❌ Session not found: "${input.session_id}"`),
+          textContent(
+            `❌ Session not found: "${sanitizeUntrustedInline(input.session_id, 100)}"`
+          ),
         ],
         isError: true,
       };
@@ -767,7 +786,10 @@ export async function handleX402SessionEnd(
       const alreadyEnded = wasEndedLocally(expiredSession);
       const tokenExpiry = tokenExpiryOf(expiredSession);
       const tokenExpiresAtIso = new Date(tokenExpiry * 1000).toISOString();
-      const expiredEndpoint = expiredSession.endpoint;
+      // Sanitize once, at capture: the endpoint is echoed both directly and
+      // through tokenStillValidNote, and it is remote-influenced.
+      const expiredEndpoint = sanitizeUntrustedUrl(expiredSession.endpoint);
+      const expiredSessionId = sanitizeUntrustedInline(input.session_id, 100);
 
       // Scrub here too. An expired record lingers in the store until the next
       // pruneExpired(), and until then the token material is still readable
@@ -775,8 +797,8 @@ export async function handleX402SessionEnd(
       endSession(input.session_id);
 
       let out = alreadyEnded
-        ? `ℹ️ Session "${input.session_id}" was already ended locally.\n\n`
-        : `ℹ️ Session "${input.session_id}" was already expired.\n\n`;
+        ? `ℹ️ Session "${expiredSessionId}" was already ended locally.\n\n`
+        : `ℹ️ Session "${expiredSessionId}" was already expired.\n\n`;
       out += `  Endpoint:   ${expiredEndpoint}\n`;
       out += `  Expires:    ${tokenExpiresAtIso} (issued token expiry)\n\n`;
       out += `Local state cleared: this server holds no copy of the session token.\n\n`;
@@ -791,7 +813,9 @@ export async function handleX402SessionEnd(
     // the record as tokenExpiresAt so status can still report it).
     const tokenExpiry = session.expiresAt;
     const tokenExpiresAt = new Date(tokenExpiry * 1000).toISOString();
-    const endpoint = session.endpoint;
+    // Sanitized at capture: the endpoint is remote-influenced and is echoed
+    // both directly and inside tokenStillValidNote.
+    const endpoint = sanitizeUntrustedUrl(session.endpoint);
     const callCount = session.callCount;
     const tokenStillValid = tokenExpiry > Math.floor(Date.now() / 1000);
     endSession(input.session_id);

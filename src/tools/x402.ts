@@ -11,13 +11,29 @@
 import { z } from 'zod';
 import { createX402Client } from 'agentwallet-sdk';
 import { getWallet, getConfig } from '../utils/client.js';
-import { textContent, formatError, chainName } from '../utils/format.js';
+import {
+  textContent,
+  formatError,
+  formatUntrustedBody,
+  sanitizeUntrustedInline,
+  sanitizeUntrustedList,
+  sanitizeUntrustedUrl,
+  describeFinalUrl,
+  formatHttpStatus,
+  noControlChars,
+  chainName,
+} from '../utils/format.js';
 import {
   describeSupportedX402Networks,
   isTvmOrTonNetwork,
   supportedX402NetworksForChainId,
 } from '../utils/x402-networks.js';
-import { maxPaymentBaseUnits, resolveX402AssetDecimals } from '../utils/payment-cap.js';
+import {
+  assertPayableX402Recipient,
+  assertParsableX402Amount,
+  maxPaymentBaseUnits,
+  resolveX402AssetDecimals,
+} from '../utils/payment-cap.js';
 import { findSessionForUrl, buildSessionHeaders } from './session.js';
 import { recordSessionCall } from '../session/manager.js';
 import { enforceSpendPolicy } from './budget.js';
@@ -56,6 +72,30 @@ function parsePaymentRequiredFromBody(responseText: string): X402PaymentRequired
   }
 }
 
+/** Max server-supplied network/scheme names echoed into the narration region. */
+const MAX_OFFERED_LISTED = 8;
+
+/**
+ * Collect the distinct values of one `accepts[]` field from a 402 payload.
+ *
+ * The payload comes from `JSON.parse`, so a field declared `string?` in the
+ * local type can be a number, array or object at runtime. Anything that is
+ * not a string is dropped rather than coerced: these values are rendered as
+ * network/scheme names, and a non-string is not one.
+ */
+function collectOfferedStrings(
+  accepts: X402PaymentAccept[],
+  field: 'network' | 'scheme'
+): string[] {
+  return Array.from(
+    new Set(
+      accepts
+        .map((req) => (req as Record<string, unknown>)[field])
+        .filter((value): value is string => typeof value === 'string' && value.length > 0)
+    )
+  );
+}
+
 function describeUnsupported402(
   input: X402PayInput,
   response: Response,
@@ -67,22 +107,22 @@ function describeUnsupported402(
     parsePaymentRequiredFromHeader(response.headers.get('x-payment-required')) ??
     parsePaymentRequiredFromBody(responseText);
 
+  const accepts = requirements?.accepts ?? [];
   const supportedNetworks = describeSupportedX402Networks(chainId);
-  const offeredNetworks = Array.from(
-    new Set((requirements?.accepts ?? []).map((req) => req.network).filter((network): network is string => Boolean(network)))
-  );
-  const offeredSchemes = Array.from(
-    new Set((requirements?.accepts ?? []).map((req) => req.scheme).filter((scheme): scheme is string => Boolean(scheme)))
-  );
+  const offeredNetworks = collectOfferedStrings(accepts, 'network');
+  const offeredSchemes = collectOfferedStrings(accepts, 'scheme');
   const tvmDetected = offeredNetworks.some(isTvmOrTonNetwork);
 
   let out = `❌ **Unsupported x402 Payment Requirement - Failed Closed**\n\n`;
-  out += `  URL:       ${input.url}\n`;
+  out += `  URL:       ${sanitizeUntrustedUrl(input.url)}\n`;
+  out += describeFinalUrl(input.url, response);
   out += `  Method:    ${input.method ?? 'GET'}\n`;
-  out += `  Status:    ${response.status} ${response.statusText}\n`;
+  out += `  Status:    ${formatHttpStatus(response.status)}\n`;
   out += `  Supported: ${supportedNetworks}\n`;
-  out += `  Offered:   ${offeredNetworks.length > 0 ? offeredNetworks.join(', ') : 'not parseable'}\n`;
-  if (offeredSchemes.length > 0) out += `  Schemes:   ${offeredSchemes.join(', ')}\n`;
+  out += `  Offered:   ${offeredNetworks.length > 0 ? sanitizeUntrustedList(offeredNetworks, MAX_OFFERED_LISTED) : 'not parseable'}\n`;
+  if (offeredSchemes.length > 0) {
+    out += `  Schemes:   ${sanitizeUntrustedList(offeredSchemes, MAX_OFFERED_LISTED)}\n`;
+  }
   out += `\nAgentPay MCP did not sign or send a payment. The server returned HTTP 402, ` +
     `but none of the offered x402 payment options matched the configured AgentPay network.\n`;
 
@@ -95,7 +135,7 @@ function describeUnsupported402(
   out += `\nGuidance: fund and publish a Base-compatible x402 exact option, or keep this ` +
     `endpoint disabled for AgentPay MCP until TVM support ships deliberately.\n`;
   out += `\n📄 **402 Response Body**\n`;
-  out += '```\n' + responseText.slice(0, 4000) + (responseText.length > 4000 ? '\n... [truncated]' : '') + '\n```';
+  out += formatUntrustedBody(responseText, 4000);
 
   return out;
 }
@@ -103,9 +143,7 @@ function describeUnsupported402(
 // ─── Schema ────────────────────────────────────────────────────────────────
 
 export const X402PaySchema = z.object({
-  url: z
-    .string()
-    .url()
+  url: noControlChars(z.string().url())
     .describe('URL to fetch. If it returns HTTP 402, payment is handled automatically.'),
   method: z
     .enum(['GET', 'POST', 'PUT', 'PATCH', 'DELETE'])
@@ -243,18 +281,13 @@ export async function handleX402Pay(
           const responseText = await response.text();
           recordSessionCall(activeSession.sessionId);
 
-          const MAX_LEN = 8000;
-          const truncated = responseText.length > MAX_LEN;
-          const displayText = truncated
-            ? responseText.slice(0, MAX_LEN) + '\n\n... [response truncated]'
-            : responseText;
-
           const ttlRemaining = activeSession.expiresAt - Math.floor(Date.now() / 1000);
 
           let out = `🌐 **x402 Fetch Result** (session)\n\n`;
-          out += `  URL:        ${input.url}\n`;
+          out += `  URL:        ${sanitizeUntrustedUrl(input.url)}\n`;
+          out += describeFinalUrl(input.url, response);
           out += `  Method:     ${method}\n`;
-          out += `  Status:     ${response.status} ${response.statusText}\n`;
+          out += `  Status:     ${formatHttpStatus(response.status)}\n`;
           out += `  Network:    ${chainName(config.chainId)}\n`;
           out += `\n🔐 **Session Used** (no payment)\n`;
           out += `  Session ID: ${activeSession.sessionId}\n`;
@@ -262,7 +295,7 @@ export async function handleX402Pay(
           out += `  TTL:        ${Math.ceil(ttlRemaining / 60)}m remaining\n`;
           out += `  Calls:      ${activeSession.callCount}\n`;
           out += `\n📄 **Response Body**\n`;
-          out += '```\n' + displayText + '\n```';
+          out += formatUntrustedBody(responseText, 8000);
 
           return { content: [textContent(out)] };
         }
@@ -295,7 +328,14 @@ export async function handleX402Pay(
       maxRetries: 1,
       supportedNetworks: supportedX402NetworksForChainId(config.chainId),
       onBeforePayment: async (req, _url) => {
-        const amount = BigInt(req.amount);
+        // The 402's payTo is remote-controlled and ends up inside error
+        // messages (SDK allowlist rejection, viem InvalidAddressError).
+        // Reject non-addresses before signing or interpolating.
+        const merchant = assertPayableX402Recipient(req.payTo);
+        // req.amount is remote-controlled; a raw BigInt() here would put the
+        // whole value verbatim into V8's "Cannot convert <amount> to a
+        // BigInt" message.
+        const amount = assertParsableX402Amount(req.amount);
         if (input.max_payment_eth) {
           const maxRaw = maxPaymentBaseUnits(
             input.max_payment_eth,
@@ -315,7 +355,7 @@ export async function handleX402Pay(
         // only runs when a policy is configured, and resolution failures
         // reject (fail closed) inside enforceSpendPolicy.
         const policyDecision = await enforceSpendPolicy({
-          merchant: req.payTo,
+          merchant,
           amount,
           decimals: () =>
             resolveX402AssetDecimals(
@@ -363,13 +403,6 @@ export async function handleX402Pay(
     const response = await x402Client.fetch(input.url, requestInit);
     const responseText = await response.text();
 
-    // Truncate very large responses for readability
-    const MAX_RESPONSE_LEN = 8000;
-    const truncated = responseText.length > MAX_RESPONSE_LEN;
-    const displayText = truncated
-      ? responseText.slice(0, MAX_RESPONSE_LEN) + '\n\n... [response truncated]'
-      : responseText;
-
     if (response.status === 402 && !paymentMade) {
       return {
         content: [textContent(describeUnsupported402(input, response, responseText, config.chainId))],
@@ -378,23 +411,28 @@ export async function handleX402Pay(
     }
 
     let out = `🌐 **x402 Fetch Result**\n\n`;
-    out += `  URL:     ${input.url}\n`;
+    out += `  URL:     ${sanitizeUntrustedUrl(input.url)}\n`;
+    out += describeFinalUrl(input.url, response);
     out += `  Method:  ${method}\n`;
-    out += `  Status:  ${response.status} ${response.statusText}\n`;
+    out += `  Status:  ${formatHttpStatus(response.status)}\n`;
     out += `  Network: ${chainName(config.chainId)}\n`;
 
     if (paymentMade) {
       out += `\n💳 **Payment Made**\n`;
       out += `  Amount:    ${paymentAmount.toString()} (base units)\n`;
-      out += `  Recipient: ${paymentRecipient}\n`;
-      out += `  TX Hash:   ${paymentTxHash}\n`;
+      // Both come from the SDK's payment log: `recipient` is the 402's own
+      // `payTo`, i.e. remote text, and `txHash` is whatever the write returned.
+      // They sit in the trusted narration region above the fence, so they are
+      // flattened and capped like every other untrusted value echoed there.
+      out += `  Recipient: ${sanitizeUntrustedInline(paymentRecipient, 64)}\n`;
+      out += `  TX Hash:   ${sanitizeUntrustedInline(paymentTxHash, 80)}\n`;
       out += `\n💡 Tip: Use x402_session_start to pay once for a session and skip per-call payments.\n`;
     } else {
       out += `\n✅ No payment required\n`;
     }
 
     out += `\n📄 **Response Body**\n`;
-    out += '```\n' + displayText + '\n```';
+    out += formatUntrustedBody(responseText, 8000);
 
     return { content: [textContent(out)] };
   } catch (error: unknown) {
