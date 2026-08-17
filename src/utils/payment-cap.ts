@@ -41,6 +41,31 @@ export function assertPayableX402Recipient(payTo: string | undefined): Address {
 }
 
 /**
+ * Validate a server-supplied x402 `amount` before it is parsed or echoed.
+ *
+ * `accepts[].amount` is fully remote-controlled and is fed to `BigInt()`,
+ * whose V8 failure message interpolates the whole value verbatim and
+ * untruncated (`Cannot convert <amount> to a BigInt`). The SDK reaches that
+ * call inside `X402Client.fetch` *before* `onBeforePayment` runs, so this
+ * guard cannot pre-empt the first parse — `formatError` fences that message
+ * instead. What this does cover is the SDK's second parse, in
+ * `executePayment`, plus any future caller that validates before signing.
+ *
+ * Fails closed on anything that is not a non-negative integer literal.
+ */
+export function assertParsableX402Amount(amount: string | undefined): bigint {
+  const candidate = (amount ?? '').trim()
+  if (!/^\d+$/.test(candidate)) {
+    throw new Error(
+      `x402 payment amount is not a non-negative integer in base units: ` +
+        `"${sanitizeUntrustedInline(candidate, 48)}". ` +
+        'AgentPay failed closed and did not sign a payment.'
+    )
+  }
+  return BigInt(candidate)
+}
+
+/**
  * Resolve decimals for an x402 asset (address or symbol) on the active chain.
  */
 export function resolveX402AssetDecimals(asset: string, chainId: number): number {

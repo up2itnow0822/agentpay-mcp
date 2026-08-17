@@ -16,6 +16,10 @@ import {
   formatError,
   formatUntrustedBody,
   sanitizeUntrustedInline,
+  sanitizeUntrustedList,
+  sanitizeUntrustedUrl,
+  describeFinalUrl,
+  noControlChars,
   chainName,
 } from '../utils/format.js';
 import {
@@ -25,6 +29,7 @@ import {
 } from '../utils/x402-networks.js';
 import {
   assertPayableX402Recipient,
+  assertParsableX402Amount,
   maxPaymentBaseUnits,
   resolveX402AssetDecimals,
 } from '../utils/payment-cap.js';
@@ -70,15 +75,24 @@ function parsePaymentRequiredFromBody(responseText: string): X402PaymentRequired
 const MAX_OFFERED_LISTED = 8;
 
 /**
- * Render a list of server-supplied values for the trusted narration region.
- * Each value is flattened and capped, and the list itself is capped, so a
- * hostile 402 payload cannot inject newlines (which would let it forge an
- * UNTRUSTED_BODY_END marker above the real one) or flood the tool result.
+ * Collect the distinct values of one `accepts[]` field from a 402 payload.
+ *
+ * The payload comes from `JSON.parse`, so a field declared `string?` in the
+ * local type can be a number, array or object at runtime. Anything that is
+ * not a string is dropped rather than coerced: these values are rendered as
+ * network/scheme names, and a non-string is not one.
  */
-function describeUntrustedList(values: string[]): string {
-  const shown = values.slice(0, MAX_OFFERED_LISTED).map((v) => sanitizeUntrustedInline(v));
-  const extra = values.length - shown.length;
-  return shown.join(', ') + (extra > 0 ? ` (+${extra} more)` : '');
+function collectOfferedStrings(
+  accepts: X402PaymentAccept[],
+  field: 'network' | 'scheme'
+): string[] {
+  return Array.from(
+    new Set(
+      accepts
+        .map((req) => (req as Record<string, unknown>)[field])
+        .filter((value): value is string => typeof value === 'string' && value.length > 0)
+    )
+  );
 }
 
 function describeUnsupported402(
@@ -92,22 +106,22 @@ function describeUnsupported402(
     parsePaymentRequiredFromHeader(response.headers.get('x-payment-required')) ??
     parsePaymentRequiredFromBody(responseText);
 
+  const accepts = requirements?.accepts ?? [];
   const supportedNetworks = describeSupportedX402Networks(chainId);
-  const offeredNetworks = Array.from(
-    new Set((requirements?.accepts ?? []).map((req) => req.network).filter((network): network is string => Boolean(network)))
-  );
-  const offeredSchemes = Array.from(
-    new Set((requirements?.accepts ?? []).map((req) => req.scheme).filter((scheme): scheme is string => Boolean(scheme)))
-  );
+  const offeredNetworks = collectOfferedStrings(accepts, 'network');
+  const offeredSchemes = collectOfferedStrings(accepts, 'scheme');
   const tvmDetected = offeredNetworks.some(isTvmOrTonNetwork);
 
   let out = `❌ **Unsupported x402 Payment Requirement - Failed Closed**\n\n`;
-  out += `  URL:       ${input.url}\n`;
+  out += `  URL:       ${sanitizeUntrustedUrl(input.url)}\n`;
+  out += describeFinalUrl(input.url, response);
   out += `  Method:    ${input.method ?? 'GET'}\n`;
   out += `  Status:    ${response.status} ${sanitizeUntrustedInline(response.statusText)}\n`;
   out += `  Supported: ${supportedNetworks}\n`;
-  out += `  Offered:   ${offeredNetworks.length > 0 ? describeUntrustedList(offeredNetworks) : 'not parseable'}\n`;
-  if (offeredSchemes.length > 0) out += `  Schemes:   ${describeUntrustedList(offeredSchemes)}\n`;
+  out += `  Offered:   ${offeredNetworks.length > 0 ? sanitizeUntrustedList(offeredNetworks, MAX_OFFERED_LISTED) : 'not parseable'}\n`;
+  if (offeredSchemes.length > 0) {
+    out += `  Schemes:   ${sanitizeUntrustedList(offeredSchemes, MAX_OFFERED_LISTED)}\n`;
+  }
   out += `\nAgentPay MCP did not sign or send a payment. The server returned HTTP 402, ` +
     `but none of the offered x402 payment options matched the configured AgentPay network.\n`;
 
@@ -128,9 +142,7 @@ function describeUnsupported402(
 // ─── Schema ────────────────────────────────────────────────────────────────
 
 export const X402PaySchema = z.object({
-  url: z
-    .string()
-    .url()
+  url: noControlChars(z.string().url())
     .describe('URL to fetch. If it returns HTTP 402, payment is handled automatically.'),
   method: z
     .enum(['GET', 'POST', 'PUT', 'PATCH', 'DELETE'])
@@ -271,7 +283,8 @@ export async function handleX402Pay(
           const ttlRemaining = activeSession.expiresAt - Math.floor(Date.now() / 1000);
 
           let out = `🌐 **x402 Fetch Result** (session)\n\n`;
-          out += `  URL:        ${input.url}\n`;
+          out += `  URL:        ${sanitizeUntrustedUrl(input.url)}\n`;
+          out += describeFinalUrl(input.url, response);
           out += `  Method:     ${method}\n`;
           out += `  Status:     ${response.status} ${sanitizeUntrustedInline(response.statusText)}\n`;
           out += `  Network:    ${chainName(config.chainId)}\n`;
@@ -318,7 +331,10 @@ export async function handleX402Pay(
         // messages (SDK allowlist rejection, viem InvalidAddressError).
         // Reject non-addresses before signing or interpolating.
         const merchant = assertPayableX402Recipient(req.payTo);
-        const amount = BigInt(req.amount);
+        // req.amount is remote-controlled; a raw BigInt() here would put the
+        // whole value verbatim into V8's "Cannot convert <amount> to a
+        // BigInt" message.
+        const amount = assertParsableX402Amount(req.amount);
         if (input.max_payment_eth) {
           const maxRaw = maxPaymentBaseUnits(
             input.max_payment_eth,
@@ -394,7 +410,8 @@ export async function handleX402Pay(
     }
 
     let out = `🌐 **x402 Fetch Result**\n\n`;
-    out += `  URL:     ${input.url}\n`;
+    out += `  URL:     ${sanitizeUntrustedUrl(input.url)}\n`;
+    out += describeFinalUrl(input.url, response);
     out += `  Method:  ${method}\n`;
     out += `  Status:  ${response.status} ${sanitizeUntrustedInline(response.statusText)}\n`;
     out += `  Network: ${chainName(config.chainId)}\n`;

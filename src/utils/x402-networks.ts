@@ -22,7 +22,16 @@ export function describeSupportedX402Networks(chainId: number): string {
   return networks.length > 0 ? networks.join(', ') : `none for CHAIN_ID ${chainId}`;
 }
 
-export function isTvmOrTonNetwork(network: string): boolean {
+/**
+ * Detect a TVM/TON network name in a 402's `accepts[].network`.
+ *
+ * The value comes from `JSON.parse` of a remote payload, so it is not
+ * guaranteed to be a string — a hostile 402 can make it a number, array or
+ * object. A non-string is not a TVM network, and must not crash the
+ * fail-closed explanation on `.toLowerCase()`.
+ */
+export function isTvmOrTonNetwork(network: unknown): boolean {
+  if (typeof network !== 'string') return false;
   const normalized = network.toLowerCase();
   return normalized.startsWith('tvm:') || normalized.includes('ton');
 }
