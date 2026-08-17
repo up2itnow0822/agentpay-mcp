@@ -87,11 +87,64 @@ export const KILL_CALLBACK_TIMEOUT_MS = 10_000
 
 const KILL_CALLBACK_ALLOWED_PROTOCOLS = new Set(['http:', 'https:'])
 
+/** Name suffixes that only ever resolve inside a private network. */
+const KILL_CALLBACK_BLOCKED_HOST_SUFFIXES = ['.internal', '.local', '.localhost', '.home.arpa']
+
+/** Exact host names that are never a legitimate external webhook. */
+const KILL_CALLBACK_BLOCKED_HOSTS = new Set(['localhost', 'metadata.google.internal'])
+
+/** Parse a dotted-quad IPv4 literal into octets, or null if it is not one. */
+function parseIpv4(host: string): number[] | null {
+  const parts = host.split('.')
+  if (parts.length !== 4) return null
+  const octets = parts.map((part) => (/^\d{1,3}$/.test(part) ? Number(part) : Number.NaN))
+  if (octets.some((octet) => !Number.isInteger(octet) || octet > 255)) return null
+  return octets
+}
+
+/**
+ * True for IPv4 space that is not routable on the public internet: this-network,
+ * loopback, RFC1918, link-local (which is where cloud instance-metadata lives),
+ * CGNAT, multicast and reserved.
+ */
+function isPrivateIpv4([a, b]: number[]): boolean {
+  return (
+    a === 0 ||
+    a === 10 ||
+    a === 127 ||
+    (a === 100 && b >= 64 && b <= 127) ||
+    (a === 169 && b === 254) ||
+    (a === 172 && b >= 16 && b <= 31) ||
+    (a === 192 && b === 168) ||
+    a >= 224
+  )
+}
+
+/**
+ * True for IPv6 space that is not routable on the public internet:
+ * unspecified, loopback, unique-local (fc00::/7), link-local (fe80::/10) and
+ * IPv4-mapped (::ffff:0:0/96, which would otherwise smuggle in an IPv4 target).
+ * The host arrives already lowercased and compressed by the URL parser.
+ */
+function isPrivateIpv6(host: string): boolean {
+  if (host === '::' || host === '::1') return true
+  if (host.startsWith('::ffff:')) return true
+  return /^f[cd][0-9a-f]{2}:/.test(host) || /^fe[89ab][0-9a-f]:/.test(host)
+}
+
 /**
  * Validate a kill-callback URL against the rules for outbound webhooks:
- * must parse as an absolute URL, must use the http: or https: scheme, and
- * must not embed credentials (userinfo). Returns a human-readable error
- * message naming the violated rule, or null if the URL is acceptable.
+ * must parse as an absolute URL, must use the http: or https: scheme, must
+ * not embed credentials (userinfo), and must not name a host inside the
+ * private/loopback/link-local ranges the server itself can reach — the URL
+ * comes from an untrusted MCP caller and the response status is handed back to
+ * it, so an unconstrained destination is an SSRF and a status oracle against
+ * internal services. Returns a human-readable error message naming the violated
+ * rule, or null if the URL is acceptable.
+ *
+ * Denylist, not allowlist: a public name that resolves to a private address
+ * (DNS rebinding) still gets through. Operators who need a hard guarantee
+ * should front the webhook with an egress allowlist.
  *
  * Applied fail-closed at configuration time (registerPolicy / the
  * otel_register_budget_policy schema) and again at fire time
@@ -110,6 +163,21 @@ export function validateKillCallbackUrl(raw: string): string | null {
   if (parsed.username !== '' || parsed.password !== '') {
     return 'killCallbackUrl must not embed credentials (user:pass@host) — remove the userinfo component'
   }
+
+  const hostname = parsed.hostname.toLowerCase()
+  const host = hostname.startsWith('[')
+    ? hostname.slice(1, -1)
+    : // "localhost." is the same host as "localhost" — drop the FQDN root dot.
+      hostname.replace(/\.$/, '')
+  const ipv4 = parseIpv4(host)
+  const privateHost =
+    host === '' ||
+    KILL_CALLBACK_BLOCKED_HOSTS.has(host) ||
+    KILL_CALLBACK_BLOCKED_HOST_SUFFIXES.some((suffix) => host.endsWith(suffix)) ||
+    (ipv4 !== null ? isPrivateIpv4(ipv4) : isPrivateIpv6(host))
+  if (privateHost) {
+    return `killCallbackUrl must not target a private, loopback or link-local host — "${parsed.hostname}" is not externally routable`
+  }
   return null
 }
 
@@ -118,15 +186,38 @@ export function validateKillCallbackUrl(raw: string): string | null {
 /**
  * Hard ceiling on per-span records held in the spend ledger. Matched to
  * MAX_SEEN_SPANS so the dedupe horizon is never shallower than the ledger:
- * no span whose own record is still retained can be counted twice.
+ * an identity is never evicted while its own record is still retained.
  */
 export const MAX_LEDGER_ENTRIES = 10_000
 
 /** Maximum number of span identities retained for duplicate detection. */
 export const MAX_SEEN_SPANS = 10_000
 
+/**
+ * How long a counted span identity may keep suppressing a repeat. OTel
+ * re-deliveries and MCP client retries arrive seconds behind the original, so
+ * a repeat that turns up minutes later is treated as a new span and charged.
+ */
+export const SPAN_DEDUPE_WINDOW_MS = 5 * 60 * 1000
+
+/**
+ * How many charges one span identity may suppress before repeats are counted
+ * again. Bounds what a caller replaying a single spanId can avoid paying for:
+ * past this many suppressions the spend lands on the ledger and the breaker
+ * still trips.
+ */
+export const MAX_SPAN_REPEAT_SUPPRESSIONS = 3
+
 /** Hard ceiling on retained budget decisions (audit/history only). */
 export const MAX_DECISION_HISTORY = 1_000
+
+/**
+ * Widest rolling window a policy may declare (30 days). Ledger retention is
+ * stretched to cover the widest registered window, so an unbounded windowMs
+ * would disable age-based pruning outright and force every eviction through
+ * the MAX_LEDGER_ENTRIES ceiling.
+ */
+export const MAX_POLICY_WINDOW_MS = 30 * 24 * 60 * 60 * 1000
 
 /**
  * Floor on how long a spend record stays in the ledger before it may be
@@ -139,17 +230,36 @@ export const MIN_LEDGER_RETENTION_MS = 24 * 60 * 60 * 1000
 export const MAX_ARCHIVE_SCOPES = 1_000
 
 /**
+ * Resolution at which archived spend keeps its position in time. Retired
+ * dollars are bucketed by this width so a rolling-window query sums only the
+ * buckets it actually overlaps instead of the scope's entire history.
+ */
+export const ARCHIVE_BUCKET_MS = 60 * 60 * 1000
+
+/**
+ * Hard ceiling on time buckets retained per archived scope. The age-based
+ * pruning below normally keeps this far lower (retention horizon / bucket
+ * width); this is only a backstop against a pathological clock.
+ */
+export const MAX_ARCHIVE_BUCKETS_PER_SCOPE = 1_000
+
+/**
  * Spend that has been retired from the per-span ledger, rolled up per
- * (agentId, taskId) scope. `throughTs` is the newest timestamp folded in,
- * which is what lets a rolling-window query tell "all of this is older than
- * my window" (exclude it — exact) from "some of it might not be" (include
- * it — over-counts, never under-counts).
+ * (agentId, taskId) scope.
+ *
+ * Two views of the same dollars:
+ *  - `amountUsd` is the scope's whole retired total, which is what a lifetime
+ *    budget reads — exact.
+ *  - `buckets` maps ARCHIVE_BUCKET_MS bucket start → dollars retired in that
+ *    bucket, which is what a rolling window reads. Keeping the dollars located
+ *    in time is what stops one scope's ancient spend (or an unrelated agent's
+ *    volume forcing an early eviction) from being folded into every window.
  */
 interface ArchivedSpend {
   agentId: string
   taskId?: string
   amountUsd: number
-  throughTs: number
+  buckets: Map<number, number>
 }
 
 const _policies: Map<string, AgentBudgetPolicy> = new Map()
@@ -157,26 +267,54 @@ const _spendLedger: SpendRecord[] = []
 const _decisions: BudgetDecision[] = []
 const _archivedSpend: Map<string, ArchivedSpend> = new Map()
 
-/** Widest rolling window any registered policy consults. */
+/**
+ * Widest rolling window any *currently registered* policy consults. Recomputed
+ * from _policies on every registration so replacing a wide policy with a narrow
+ * one narrows ledger retention again instead of pinning it forever.
+ */
 let _maxPolicyWindowMs = 0
+
+function recomputeMaxPolicyWindow(): void {
+  let widest = 0
+  for (const policy of _policies.values()) {
+    widest = Math.max(widest, policy.windowMs)
+  }
+  _maxPolicyWindowMs = widest
+}
+
+/** What a counted span identity remembers, for suppressing re-deliveries. */
+interface SeenSpan {
+  /** Amount charged when the identity was first counted. */
+  amountUsd: number
+  /** When the identity was first counted. */
+  firstSeenTs: number
+  /** How many repeats this identity has already suppressed. */
+  suppressed: number
+}
 
 /**
  * Span identities already counted against the spend ledger, in insertion
  * order. Bounded FIFO: past MAX_SEEN_SPANS the oldest identity is evicted,
  * so dedupe covers the most recent MAX_SEEN_SPANS distinct spans.
  *
+ * Every part of the identity is caller-asserted, so suppression is deliberately
+ * narrow — it only ever covers what an honest re-delivery looks like (same
+ * agent, trace, span AND amount, arriving within SPAN_DEDUPE_WINDOW_MS, at most
+ * MAX_SPAN_REPEAT_SUPPRESSIONS times). Anything else is charged, because
+ * over-counting merely trips the breaker early while under-counting lets a
+ * budget over-run.
+ *
  * Tradeoff, deliberately taken: a re-delivery that arrives after its identity
- * has been evicted is counted a second time. That is the fail-safe direction
- * (spend is over-counted, so the breaker trips early rather than letting a
- * budget over-run), re-deliveries in practice arrive close behind the
+ * has been evicted (or after the dedupe window) is counted a second time. That
+ * is the fail-safe direction, re-deliveries in practice arrive close behind the
  * original, and an unbounded seen-set would simply recreate the unbounded
  * growth this module is otherwise trying to avoid.
  */
-const _seenSpans: Set<string> = new Set()
+const _seenSpans: Map<string, SeenSpan> = new Map()
 
-/** Build a policy key from agentId + optional taskId */
+/** Build a policy key from agentId + optional taskId. */
 function policyKey(agentId: string, taskId?: string): string {
-  return taskId ? `${agentId}::${taskId}` : agentId
+  return spendScopeKey(agentId, taskId)
 }
 
 /**
@@ -188,17 +326,42 @@ function policyKey(agentId: string, taskId?: string): string {
  * supply a spanId but omit traceId are asserting that the spanId alone
  * identifies the span within that agent — reusing one across spans then reads
  * as a re-delivery.
+ *
+ * Encoded with JSON.stringify so no separator can be smuggled in through a
+ * component: agentId "a" + traceId "b::c" must not key the same as agentId
+ * "a::b" + traceId "c", or one agent could silence another agent's spend.
  */
 function spanDedupeKey(agentId: string, attrs: OTelSpanCostAttributes): string | null {
   if (!attrs.spanId) return null
-  return `${agentId}::${attrs.traceId ?? ''}::${attrs.spanId}`
+  return JSON.stringify([agentId, attrs.traceId ?? null, attrs.spanId])
 }
 
-function markSpanSeen(key: string): void {
-  _seenSpans.add(key)
+/**
+ * Decide whether an incoming span repeats one already charged.
+ *
+ * Suppression requires an exact match on the recorded amount (a different cost
+ * is a different span, not a re-delivery — silently dropping it would lose real
+ * money), arrival inside SPAN_DEDUPE_WINDOW_MS of the original, and fewer than
+ * MAX_SPAN_REPEAT_SUPPRESSIONS suppressions already granted to that identity.
+ * Every other repeat is charged.
+ */
+function suppressAsDuplicate(key: string, amountUsd: number): boolean {
+  const seen = _seenSpans.get(key)
+  if (seen === undefined) return false
+  if (seen.amountUsd !== amountUsd) return false
+  if (Date.now() - seen.firstSeenTs > SPAN_DEDUPE_WINDOW_MS) return false
+  if (seen.suppressed >= MAX_SPAN_REPEAT_SUPPRESSIONS) return false
+  seen.suppressed++
+  return true
+}
+
+function markSpanSeen(key: string, amountUsd: number): void {
+  // Re-insert so the identity's recency reflects the charge just recorded.
+  _seenSpans.delete(key)
+  _seenSpans.set(key, { amountUsd, firstSeenTs: Date.now(), suppressed: 0 })
   if (_seenSpans.size > MAX_SEEN_SPANS) {
-    // Sets iterate in insertion order — evict the oldest identity.
-    const oldest = _seenSpans.values().next().value
+    // Maps iterate in insertion order — evict the oldest identity.
+    const oldest = _seenSpans.keys().next().value
     if (oldest !== undefined) _seenSpans.delete(oldest)
   }
 }
@@ -208,11 +371,35 @@ function spendScopeKey(agentId: string, taskId?: string): string {
   return JSON.stringify([agentId, taskId ?? null])
 }
 
+/** Retention horizon: no window any registered policy consults reaches past it. */
+function retentionHorizonMs(): number {
+  return Math.max(MIN_LEDGER_RETENTION_MS, _maxPolicyWindowMs)
+}
+
 /**
- * Fold a retired spend record into its scope's archived total.
+ * Drop buckets no rolling window can still reach. They stay counted in the
+ * scope's lifetime `amountUsd`, so this loses nothing a window query needs and
+ * nothing a lifetime budget reads — it just keeps the bucket map bounded.
+ */
+function pruneArchiveBuckets(archived: ArchivedSpend): void {
+  const cutoff = Date.now() - retentionHorizonMs()
+  for (const bucketStart of archived.buckets.keys()) {
+    if (bucketStart + ARCHIVE_BUCKET_MS < cutoff) archived.buckets.delete(bucketStart)
+  }
+  while (archived.buckets.size > MAX_ARCHIVE_BUCKETS_PER_SCOPE) {
+    const oldest = archived.buckets.keys().next().value
+    if (oldest === undefined) break
+    archived.buckets.delete(oldest)
+  }
+}
+
+/**
+ * Fold a retired spend record into its scope's archived totals.
  *
  * Retiring a record never discards its spend: lifetime budgets read the
  * archive back in full, so eviction cannot make a lifetime budget under-count.
+ * The record's timestamp is kept at ARCHIVE_BUCKET_MS resolution so a rolling
+ * window can still tell which retired dollars it reaches.
  *
  * The archive itself is bounded by MAX_ARCHIVE_SCOPES on a least-recently-
  * archived basis. Documented tradeoff: a lifetime budget (windowMs = 0) is an
@@ -224,11 +411,13 @@ function spendScopeKey(agentId: string, taskId?: string): string {
  */
 function archiveRecord(record: SpendRecord): void {
   const key = spendScopeKey(record.agentId, record.taskId)
+  const bucket = Math.floor(record.timestamp / ARCHIVE_BUCKET_MS) * ARCHIVE_BUCKET_MS
   const existing = _archivedSpend.get(key)
 
   if (existing) {
     existing.amountUsd += record.amountUsd
-    existing.throughTs = Math.max(existing.throughTs, record.timestamp)
+    existing.buckets.set(bucket, (existing.buckets.get(bucket) ?? 0) + record.amountUsd)
+    pruneArchiveBuckets(existing)
     // Re-insert to refresh recency — Maps iterate in insertion order.
     _archivedSpend.delete(key)
     _archivedSpend.set(key, existing)
@@ -239,7 +428,7 @@ function archiveRecord(record: SpendRecord): void {
     agentId: record.agentId,
     taskId: record.taskId,
     amountUsd: record.amountUsd,
-    throughTs: record.timestamp,
+    buckets: new Map([[bucket, record.amountUsd]]),
   })
 
   if (_archivedSpend.size > MAX_ARCHIVE_SCOPES) {
@@ -262,12 +451,11 @@ function archiveRecord(record: SpendRecord): void {
  *  2. Ceiling. MAX_LEDGER_ENTRIES caps the ledger regardless of age, so a
  *     burst cannot grow it without limit. This is the only path that can
  *     retire a record an active window still reaches; getAccumulatedSpend
- *     handles that by falling back to the archived total, which over-counts
- *     rather than under-counts.
+ *     handles that by reading the archive's time buckets, so the record keeps
+ *     counting for exactly as long as the window reaches it.
  */
 function pruneLedger(): void {
-  const horizon = Math.max(MIN_LEDGER_RETENTION_MS, _maxPolicyWindowMs)
-  const cutoff = Date.now() - horizon
+  const cutoff = Date.now() - retentionHorizonMs()
 
   let retire = 0
   while (retire < _spendLedger.length && _spendLedger[retire].timestamp < cutoff) {
@@ -326,8 +514,9 @@ export function _getOTelBudgetStoreSizes(): {
  * Register a budget policy for an agent or agent+task combination.
  *
  * Fails closed: a policy carrying an invalid killCallbackUrl (non-http(s)
- * scheme, embedded credentials, or unparseable) is rejected outright rather
- * than stored with a callback that would be refused at fire time.
+ * scheme, embedded credentials, unparseable, or pointed at a private/loopback
+ * host) or a windowMs outside [0, MAX_POLICY_WINDOW_MS] is rejected outright
+ * rather than stored.
  */
 export function registerPolicy(policy: AgentBudgetPolicy): void {
   if (policy.killCallbackUrl !== undefined) {
@@ -336,10 +525,20 @@ export function registerPolicy(policy: AgentBudgetPolicy): void {
       throw new Error(`Refusing to register budget policy: ${urlError}`)
     }
   }
+  if (
+    !Number.isFinite(policy.windowMs) ||
+    policy.windowMs < 0 ||
+    policy.windowMs > MAX_POLICY_WINDOW_MS
+  ) {
+    throw new Error(
+      `Refusing to register budget policy: windowMs must be between 0 and ${MAX_POLICY_WINDOW_MS} ms (30 days) — got ${policy.windowMs}`
+    )
+  }
   const key = policyKey(policy.agentId, policy.taskId)
   _policies.set(key, policy)
-  // Ledger retention must cover every window the budget math consults.
-  _maxPolicyWindowMs = Math.max(_maxPolicyWindowMs, policy.windowMs)
+  // Ledger retention must cover every window the budget math consults — and
+  // no longer, so a retired policy's window stops widening it.
+  recomputeMaxPolicyWindow()
 }
 
 function getApplicablePolicy(agentId: string, taskId?: string): AgentBudgetPolicy | undefined {
@@ -357,13 +556,14 @@ function getApplicablePolicy(agentId: string, taskId?: string): AgentBudgetPolic
  *
  * The archive is folded in so eviction can never under-count:
  *  - lifetime (windowMs 0/undefined) counts every archived dollar — exact;
- *  - a rolling window skips the archive when its newest archived timestamp
- *    predates the window, which is the normal case because pruneLedger will
- *    not retire a record any active window still reaches — also exact;
- *  - only when the MAX_LEDGER_ENTRIES ceiling forced a still-in-window record
- *    out does the window count the whole archived total. That over-counts,
- *    which trips the breaker early instead of letting a budget over-run, and
- *    it self-clears once the window advances past the retired records.
+ *  - a rolling window counts only the archived buckets it overlaps, so retired
+ *    dollars from outside the window stay outside it no matter what forced the
+ *    retirement (age, or the MAX_LEDGER_ENTRIES ceiling under another agent's
+ *    load);
+ *  - the one residual imprecision is the bucket straddling the cutoff, which is
+ *    counted whole: at most ARCHIVE_BUCKET_MS of extra history, which
+ *    over-counts (tripping the breaker early rather than letting a budget
+ *    over-run) and ages out with the bucket.
  */
 function getAccumulatedSpend(agentId: string, taskId?: string, windowMs?: number): number {
   const now = Date.now()
@@ -382,8 +582,13 @@ function getAccumulatedSpend(agentId: string, taskId?: string, windowMs?: number
   for (const archived of _archivedSpend.values()) {
     if (archived.agentId !== agentId) continue
     if (taskId !== undefined && archived.taskId !== taskId) continue
-    if (window === 0 || archived.throughTs >= cutoff) {
+    if (window === 0) {
       total += archived.amountUsd
+      continue
+    }
+    for (const [bucketStart, amount] of archived.buckets) {
+      // A bucket counts if any part of it falls inside the window.
+      if (bucketStart + ARCHIVE_BUCKET_MS > cutoff) total += amount
     }
   }
 
@@ -396,12 +601,17 @@ function getAccumulatedSpend(agentId: string, taskId?: string, windowMs?: number
  * This is the main entry point: feed it span attributes from an
  * AgentCore-instrumented agent, and it returns an enforcement decision.
  *
- * Spend accounting is at-most-once per span identity: OTel pipelines and
- * MCP clients both re-deliver by design, so a span that has already been
- * counted is still evaluated against current accumulated spend — the caller
- * gets the enforcement decision it asked for — but adds nothing to the
- * ledger. Without this, one retried span at $4 against a $10 budget trips
- * the breaker at $8 of apparent spend for $4 of real cost.
+ * Spend accounting suppresses re-deliveries: OTel pipelines and MCP clients
+ * both re-deliver by design, so a span that has already been counted is still
+ * evaluated against current accumulated spend — the caller gets the enforcement
+ * decision it asked for — but adds nothing to the ledger. Without this, one
+ * retried span at $4 against a $10 budget trips the breaker at $8 of apparent
+ * spend for $4 of real cost.
+ *
+ * Suppression is narrow on purpose (see suppressAsDuplicate): identical amount,
+ * inside SPAN_DEDUPE_WINDOW_MS, at most MAX_SPAN_REPEAT_SUPPRESSIONS times. The
+ * span identity is asserted by the same caller whose spend is being capped, so
+ * anything outside that shape is charged rather than trusted.
  */
 export function evaluateSpan(attrs: OTelSpanCostAttributes): BudgetDecision | null {
   const agentId = attrs['agentcore.agent.id']
@@ -415,7 +625,7 @@ export function evaluateSpan(attrs: OTelSpanCostAttributes): BudgetDecision | nu
 
   // Record spend — once per span identity
   const dedupeKey = spanDedupeKey(agentId, attrs)
-  const duplicateSpan = dedupeKey !== null && _seenSpans.has(dedupeKey)
+  const duplicateSpan = dedupeKey !== null && suppressAsDuplicate(dedupeKey, costUsd)
 
   if (!duplicateSpan) {
     const record: SpendRecord = {
@@ -427,7 +637,7 @@ export function evaluateSpan(attrs: OTelSpanCostAttributes): BudgetDecision | nu
       traceId: attrs.traceId ?? 'unknown',
     }
     _spendLedger.push(record)
-    if (dedupeKey !== null) markSpanSeen(dedupeKey)
+    if (dedupeKey !== null) markSpanSeen(dedupeKey, costUsd)
     pruneLedger()
   }
 
@@ -490,7 +700,9 @@ export function evaluateSpan(attrs: OTelSpanCostAttributes): BudgetDecision | nu
  * Failure handling is loud but non-fatal: an invalid URL, timeout
  * (KILL_CALLBACK_TIMEOUT_MS), or network/HTTP failure is reported in the
  * returned object (surfaced verbatim in the otel_evaluate_spend result) and
- * never throws, so a broken webhook cannot crash budget evaluation.
+ * never throws, so a broken webhook cannot crash budget evaluation. Redirects
+ * are not followed — a 3xx is reported as a failed callback rather than
+ * re-issued against a host that never passed validation.
  *
  * Retry policy: no in-process retry. Spend evaluation must not block on
  * webhook health, and every subsequent over-budget span evaluation fires the
@@ -531,6 +743,9 @@ export async function invokeKillCallback(
       headers: {
         'content-type': 'application/json',
       },
+      // Do not follow redirects: a validated public URL must not be able to
+      // 302 the POST into the private hosts validateKillCallbackUrl refuses.
+      redirect: 'manual',
       signal: AbortSignal.timeout(KILL_CALLBACK_TIMEOUT_MS),
       body: JSON.stringify({
         event: 'agentpay.budget.kill',
@@ -609,8 +824,9 @@ export const OTelRegisterPolicySchema = z.object({
   windowMs: z
     .number()
     .min(0)
+    .max(MAX_POLICY_WINDOW_MS)
     .default(0)
-    .describe('Rolling window in ms (0 = lifetime budget)'),
+    .describe('Rolling window in ms (0 = lifetime budget, max 30 days)'),
   breachAction: z
     .enum(['warn', 'block', 'kill'])
     .default('block')
@@ -626,7 +842,8 @@ export const OTelRegisterPolicySchema = z.object({
     .optional()
     .describe(
       'Webhook URL to invoke when circuit-breaker trips (kill action). ' +
-        'Must be http(s) and must not embed credentials.'
+        'Must be http(s), must not embed credentials, and must not point at a ' +
+        'private, loopback or link-local host.'
     ),
 })
 
@@ -646,7 +863,10 @@ export const otelRegisterPolicyTool = {
       agentId: { type: 'string', description: 'Agent/session ID from AgentCore' },
       taskId: { type: 'string', description: 'Optional task-level ID' },
       maxSpendUsd: { type: 'number', description: 'Max spend in USD' },
-      windowMs: { type: 'number', description: 'Rolling window in ms (0 = lifetime)' },
+      windowMs: {
+        type: 'number',
+        description: 'Rolling window in ms (0 = lifetime, max 30 days)',
+      },
       breachAction: {
         type: 'string',
         enum: ['warn', 'block', 'kill'],
@@ -654,7 +874,9 @@ export const otelRegisterPolicyTool = {
       },
       killCallbackUrl: {
         type: 'string',
-        description: 'Circuit-breaker webhook URL (http(s) only, no embedded credentials)',
+        description:
+          'Circuit-breaker webhook URL (http(s) only, no embedded credentials, ' +
+          'no private/loopback/link-local hosts)',
       },
     },
     required: ['agentId', 'maxSpendUsd'],
@@ -715,9 +937,11 @@ export const otelEvaluateSpendTool = {
     'Evaluate a spend event from an OTel span against registered budget policies. ' +
     'Returns a budget decision (allow/warn/block/kill) with utilization details. ' +
     'The decision is also formatted as OTel event attributes for re-emission ' +
-    'into the AgentCore telemetry pipeline. Safe to retry: a span already ' +
-    'counted (same agent, traceId and spanId) is re-evaluated but not ' +
-    'charged twice, and the decision is flagged duplicateSpan.',
+    'into the AgentCore telemetry pipeline. Safe to retry: a prompt retry of ' +
+    'an already-counted span (same agent, traceId, spanId and costUsd) is ' +
+    're-evaluated but not charged twice, and the decision is flagged ' +
+    'duplicateSpan. Repeats that differ in cost, arrive later, or keep ' +
+    'replaying one span id are charged.',
   inputSchema: {
     type: 'object' as const,
     properties: {

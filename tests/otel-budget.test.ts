@@ -12,10 +12,14 @@ import {
   handleOTelRegisterPolicy,
   invokeKillCallback,
   listPolicies,
+  KILL_CALLBACK_TIMEOUT_MS,
   MAX_DECISION_HISTORY,
   MAX_LEDGER_ENTRIES,
+  MAX_POLICY_WINDOW_MS,
   MAX_SEEN_SPANS,
+  MAX_SPAN_REPEAT_SUPPRESSIONS,
   OTelRegisterPolicySchema,
+  SPAN_DEDUPE_WINDOW_MS,
   _getOTelBudgetStoreSizes,
   _resetOTelBudgetState,
 } from '../src/tools/otel-budget.js'
@@ -407,6 +411,112 @@ describe('OTel Budget Circuit-Breaker', () => {
       expect(stillDeduped.duplicateSpan).toBe(true)
       expect(stillDeduped.accumulatedSpendUsd).toBe(MAX_SEEN_SPANS + 2)
     })
+
+    it('charges a repeat that reports a different cost — a new amount is a new span', () => {
+      registerPolicy(bigBudget)
+
+      const cheap = evaluateSpan({
+        'agentcore.agent.id': 'agent-001',
+        'agentcore.cost.usd': 0.01,
+        spanId: 'span-1',
+        traceId: 'trace-1',
+      })!
+      const expensive = evaluateSpan({
+        'agentcore.agent.id': 'agent-001',
+        'agentcore.cost.usd': 900,
+        spanId: 'span-1',
+        traceId: 'trace-1',
+      })!
+
+      expect(cheap.accumulatedSpendUsd).toBe(0.01)
+      // Suppressing on identity alone would silently drop the $900.
+      expect(expensive.duplicateSpan).toBe(false)
+      expect(expensive.accumulatedSpendUsd).toBe(900.01)
+    })
+
+    it('caps how much one replayed span identity can avoid being charged', () => {
+      registerPolicy({
+        agentId: 'rogue',
+        maxSpendUsd: 10.0,
+        windowMs: 0,
+        breachAction: 'kill',
+      })
+
+      const replay = () =>
+        evaluateSpan({
+          'agentcore.agent.id': 'rogue',
+          'agentcore.cost.usd': 5.0,
+          spanId: 'same-span',
+          traceId: 'same-trace',
+        })!
+
+      const decisions = Array.from({ length: 100 }, replay)
+      const last = decisions[decisions.length - 1]
+
+      // Identity is caller-asserted, so replaying one spanId must not buy
+      // unlimited free spend: the ledger keeps growing and the breaker trips.
+      expect(last.accumulatedSpendUsd).toBeGreaterThan(10.0)
+      expect(last.action).toBe('kill')
+      expect(decisions.filter((d) => d.duplicateSpan)).toHaveLength(
+        // Each recorded charge grants at most this many suppressions.
+        decisions.filter((d) => !d.duplicateSpan).length * MAX_SPAN_REPEAT_SUPPRESSIONS
+      )
+    })
+
+    it('stops suppressing a repeat that arrives long after the original', () => {
+      vi.useFakeTimers()
+      try {
+        const T0 = Date.parse('2026-01-01T00:00:00Z')
+        vi.setSystemTime(T0)
+        registerPolicy(bigBudget)
+
+        const span = {
+          'agentcore.agent.id': 'agent-001',
+          'agentcore.cost.usd': 2.0,
+          spanId: 'span-1',
+          traceId: 'trace-1',
+        }
+        evaluateSpan(span)
+        vi.setSystemTime(T0 + SPAN_DEDUPE_WINDOW_MS + 1)
+        const late = evaluateSpan(span)!
+
+        expect(late.duplicateSpan).toBe(false)
+        expect(late.accumulatedSpendUsd).toBe(4.0)
+      } finally {
+        vi.useRealTimers()
+      }
+    })
+
+    it('does not let one agent silence another agent through separator collision', () => {
+      registerPolicy({ ...bigBudget, agentId: 'acme' })
+      registerPolicy({
+        agentId: 'acme::victim',
+        maxSpendUsd: 100,
+        windowMs: 0,
+        breachAction: 'kill',
+      })
+
+      // 'acme' + traceId 'victim::trace' must not key the same identity as
+      // 'acme::victim' + traceId 'trace' — same cost, so only the key encoding
+      // decides whether the victim's span is silently swallowed.
+      evaluateSpan({
+        'agentcore.agent.id': 'acme',
+        'agentcore.cost.usd': 120,
+        traceId: 'victim::trace',
+        spanId: 'span-1',
+      })
+
+      const victim = evaluateSpan({
+        'agentcore.agent.id': 'acme::victim',
+        'agentcore.cost.usd': 120,
+        traceId: 'trace',
+        spanId: 'span-1',
+      })!
+
+      expect(victim.duplicateSpan).toBe(false)
+      expect(victim.accumulatedSpendUsd).toBe(120)
+      expect(victim.action).toBe('kill')
+    })
   })
 
   describe('bounded spend ledger and decision log', () => {
@@ -549,6 +659,108 @@ describe('OTel Budget Circuit-Breaker', () => {
       expect(sizes.ledger).toBe(MAX_LEDGER_ENTRIES)
       expect(sizes.archivedScopes).toBe(1)
       expect(last!.accumulatedSpendUsd).toBe(spans)
+    })
+
+    it("keeps one agent's rolling window free of its own out-of-window history when another agent forces eviction", () => {
+      registerPolicy({
+        agentId: 'victim',
+        maxSpendUsd: 10.0,
+        windowMs: HOUR_MS,
+        breachAction: 'kill',
+      })
+
+      evaluateSpan({
+        'agentcore.agent.id': 'victim',
+        'agentcore.cost.usd': 9.0,
+        spanId: 'victim-old',
+      })
+
+      // A day later that $9 is a day outside the one-hour window.
+      vi.setSystemTime(T0 + 25 * HOUR_MS)
+      const beforeLoad = evaluateSpan({
+        'agentcore.agent.id': 'victim',
+        'agentcore.cost.usd': 1.0,
+        spanId: 'victim-recent',
+      })!
+      expect(beforeLoad.accumulatedSpendUsd).toBe(1.0)
+      expect(beforeLoad.action).toBe('allow')
+
+      // An unrelated high-volume agent pushes the shared ledger past its
+      // ceiling, retiring still-recent records into the archive.
+      for (let i = 0; i < MAX_LEDGER_ENTRIES + 10; i++) {
+        evaluateSpan({
+          'agentcore.agent.id': 'noisy',
+          'agentcore.cost.usd': 0.01,
+          spanId: `noisy-${i}`,
+        })
+      }
+
+      const afterLoad = evaluateSpan({
+        'agentcore.agent.id': 'victim',
+        'agentcore.cost.usd': 0.01,
+        spanId: 'victim-after-load',
+      })!
+
+      // The archived dollars keep their place in time, so the retired $9 stays
+      // outside the one-hour window instead of being folded back in.
+      expect(afterLoad.accumulatedSpendUsd).toBeCloseTo(1.01, 6)
+      expect(afterLoad.action).toBe('allow')
+    })
+
+    it('narrows ledger retention again when a wide policy is replaced by a narrow one', () => {
+      registerPolicy({
+        agentId: 'agent-001',
+        maxSpendUsd: 10.0,
+        windowMs: 7 * DAY_MS,
+        breachAction: 'block',
+      })
+      evaluateSpan(span(1.0, 'span-1'))
+
+      // Same policy key, narrower window: the 7-day horizon must not survive it.
+      registerPolicy({
+        agentId: 'agent-001',
+        maxSpendUsd: 10.0,
+        windowMs: 0,
+        breachAction: 'block',
+      })
+
+      vi.setSystemTime(T0 + 25 * HOUR_MS)
+      evaluateSpan(span(1.0, 'span-2'))
+
+      const sizes = _getOTelBudgetStoreSizes()
+      expect(sizes.ledger).toBe(1)
+      expect(sizes.archivedScopes).toBe(1)
+    })
+  })
+
+  describe('policy window bounds', () => {
+    it('refuses a window wider than the retention horizon can support', () => {
+      expect(() =>
+        registerPolicy({
+          agentId: 'agent-001',
+          maxSpendUsd: 5.0,
+          windowMs: Number.MAX_SAFE_INTEGER,
+          breachAction: 'block',
+        })
+      ).toThrow(/windowMs must be between 0 and/)
+      expect(listPolicies()).toHaveLength(0)
+    })
+
+    it('rejects an out-of-range windowMs in the tool input schema', () => {
+      expect(
+        OTelRegisterPolicySchema.safeParse({
+          agentId: 'agent-001',
+          maxSpendUsd: 5.0,
+          windowMs: Number.MAX_SAFE_INTEGER,
+        }).success
+      ).toBe(false)
+      expect(
+        OTelRegisterPolicySchema.safeParse({
+          agentId: 'agent-001',
+          maxSpendUsd: 5.0,
+          windowMs: MAX_POLICY_WINDOW_MS,
+        }).success
+      ).toBe(true)
     })
   })
 
@@ -756,6 +968,71 @@ describe('OTel Budget Circuit-Breaker', () => {
         error: expect.stringMatching(/credentials/),
       })
     })
+
+    it.each([
+      'http://169.254.169.254/latest/meta-data/iam/security-credentials/',
+      'http://metadata.google.internal/computeMetadata/v1/',
+      'http://127.0.0.1:8080/admin',
+      'http://localhost/internal',
+      'http://localhost./internal',
+      'http://2130706433/kill',
+      'http://[::1]/kill',
+      'http://[::ffff:127.0.0.1]/kill',
+      'http://10.0.0.5/kill',
+      'http://192.168.1.10/kill',
+      'http://172.16.4.4/kill',
+      'https://console.svc.internal/kill',
+    ])('refuses a credential-free URL pointed at an internal host: %s', (url) => {
+      expect(() =>
+        registerPolicy({
+          agentId: 'agent-001',
+          maxSpendUsd: 5.0,
+          windowMs: 0,
+          breachAction: 'kill',
+          killCallbackUrl: url,
+        })
+      ).toThrow(/not externally routable/)
+      expect(listPolicies()).toHaveLength(0)
+
+      const parsed = OTelRegisterPolicySchema.safeParse({
+        agentId: 'agent-001',
+        maxSpendUsd: 5.0,
+        breachAction: 'kill',
+        killCallbackUrl: url,
+      })
+      expect(parsed.success).toBe(false)
+    })
+
+    it('still accepts an ordinary public webhook URL', () => {
+      registerPolicy({
+        agentId: 'agent-001',
+        maxSpendUsd: 5.0,
+        windowMs: 0,
+        breachAction: 'kill',
+        killCallbackUrl: 'https://hooks.example.com/agent/kill',
+      })
+      expect(listPolicies()).toHaveLength(1)
+    })
+
+    it('does not follow redirects, so a public URL cannot bounce into a private host', async () => {
+      const fetchMock = vi.fn().mockResolvedValue({ ok: false, status: 302 })
+      global.fetch = fetchMock as typeof global.fetch
+
+      const result = await invokeKillCallback(
+        {
+          agentId: 'agent-001',
+          maxSpendUsd: 1.0,
+          windowMs: 0,
+          breachAction: 'kill',
+          killCallbackUrl: 'https://hooks.example.com/agent/kill',
+        },
+        killDecision
+      )
+
+      const init = fetchMock.mock.calls[0][1] as RequestInit
+      expect(init.redirect).toBe('manual')
+      expect(result).toMatchObject({ attempted: true, ok: false, status: 302 })
+    })
   })
 
   describe('kill callback timeout and failure isolation', () => {
@@ -780,6 +1057,57 @@ describe('OTel Budget Circuit-Breaker', () => {
       expect(fetchMock).toHaveBeenCalledTimes(1)
       const init = fetchMock.mock.calls[0][1] as RequestInit
       expect(init.signal).toBeInstanceOf(AbortSignal)
+    })
+
+    it('aborts a kill callback that never responds once the timeout elapses', async () => {
+      // Same wiring as production, with the deadline compressed so the test
+      // does not have to wait KILL_CALLBACK_TIMEOUT_MS for a real hang.
+      const realTimeout = AbortSignal.timeout.bind(AbortSignal)
+      let requestedTimeoutMs: number | undefined
+      vi.spyOn(AbortSignal, 'timeout').mockImplementation((ms: number) => {
+        requestedTimeoutMs = ms
+        return realTimeout(5)
+      })
+
+      let abortReason: unknown
+      const fetchMock = vi.fn(
+        (_url: string, init: RequestInit) =>
+          new Promise((_resolve, reject) => {
+            const signal = init.signal as AbortSignal
+            signal.addEventListener('abort', () => {
+              abortReason = signal.reason
+              reject(signal.reason)
+            })
+          })
+      )
+      global.fetch = fetchMock as unknown as typeof global.fetch
+
+      const result = await invokeKillCallback(
+        {
+          agentId: 'agent-001',
+          maxSpendUsd: 1.0,
+          windowMs: 0,
+          breachAction: 'kill',
+          killCallbackUrl: 'https://example.com/kill',
+        },
+        {
+          agentId: 'agent-001',
+          action: 'kill',
+          accumulatedSpendUsd: 2,
+          budgetLimitUsd: 1,
+          remainingUsd: 0,
+          utilizationPct: 200,
+          reason: 'Budget exceeded',
+          timestamp: Date.now(),
+        }
+      )
+
+      // A signal that never fires would leave this fetch — and the caller —
+      // hanging forever, which is the failure the timeout exists to prevent.
+      expect(requestedTimeoutMs).toBe(KILL_CALLBACK_TIMEOUT_MS)
+      expect((abortReason as Error).name).toBe('TimeoutError')
+      expect(result).toMatchObject({ attempted: true, ok: false })
+      expect(result!.error).toBeTruthy()
     })
 
     it('reports a failed kill callback without failing budget evaluation', async () => {
