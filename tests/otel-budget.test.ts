@@ -25,6 +25,8 @@ import {
   resolvedHostIsPrivate,
   validateKillCallbackUrl,
   KILL_CALLBACK_TIMEOUT_MS,
+  KILL_CALLBACK_ALLOWLIST_ENV,
+  KILL_CALLBACK_GENERIC_FAILURE,
   OTelRegisterPolicySchema,
   _resetOTelBudgetState,
 } from '../src/tools/otel-budget.js'
@@ -32,14 +34,19 @@ import {
 const originalFetch = global.fetch
 
 describe('OTel Budget Circuit-Breaker', () => {
+  let consoleError: ReturnType<typeof vi.spyOn>
+
   beforeEach(() => {
     _resetOTelBudgetState()
     vi.restoreAllMocks()
     dnsLookup.mockResolvedValue([{ address: '203.0.113.10', family: 4 }])
+    delete process.env[KILL_CALLBACK_ALLOWLIST_ENV]
+    consoleError = vi.spyOn(console, 'error').mockImplementation(() => {})
   })
 
   afterEach(() => {
     global.fetch = originalFetch
+    delete process.env[KILL_CALLBACK_ALLOWLIST_ENV]
   })
 
   describe('registerPolicy', () => {
@@ -380,33 +387,62 @@ describe('OTel Budget Circuit-Breaker', () => {
   })
 
   describe('kill callback URL validation', () => {
-    it('rejects non-http(s) schemes at registration time', () => {
-      expect(() => registerPolicy(killPolicy('ftp://198.51.100.7/kill'))).toThrow(
-        /http: or https:/
-      )
-      expect(listPolicies()).toHaveLength(0)
-    })
+    it.each([
+      ['ftp://198.51.100.7/kill', /http: or https:/],
+      ['https://user:secret@hooks.example.com/kill', /credentials/],
+      ['not a url', /not a valid URL/],
+    ])('drops the refused callback URL %s but keeps the cap', (url, reason) => {
+      const result = registerPolicy(killPolicy(url))
 
-    it('rejects embedded credentials at registration time', () => {
-      expect(() =>
-        registerPolicy(killPolicy('https://user:secret@hooks.example.com/kill'))
-      ).toThrow(/credentials/)
-      expect(listPolicies()).toHaveLength(0)
-    })
-
-    it('rejects unparseable URLs at registration time', () => {
-      expect(() => registerPolicy(killPolicy('not a url'))).toThrow(/not a valid URL/)
-      expect(listPolicies()).toHaveLength(0)
-    })
-
-    it('leaves an existing policy intact when a re-registration is rejected', () => {
-      registerPolicy(killPolicy('https://hooks.example.com/kill'))
-      expect(() => registerPolicy(killPolicy('http://169.254.169.254/kill'))).toThrow()
-
-      // Rejecting the bad URL must not have removed the live spend cap: that
-      // would turn a hardening check into a fail-open budget bypass.
+      // The URL is refused — but the spend cap the caller asked for must
+      // survive. Refusing the whole policy would leave the agent uncapped,
+      // which is a worse outcome than the SSRF being refused.
+      expect(result.killCallbackWarning).toMatch(reason)
       expect(listPolicies()).toHaveLength(1)
-      expect(listPolicies()[0].killCallbackUrl).toBe('https://hooks.example.com/kill')
+      expect(listPolicies()[0].maxSpendUsd).toBe(1.0)
+      expect(listPolicies()[0].killCallbackUrl).toBeUndefined()
+    })
+
+    it('still fires kill at the configured limit when the callback was refused', async () => {
+      const fetchMock = vi.fn()
+      global.fetch = fetchMock as typeof global.fetch
+
+      // The exact case that was silently uncapped: a first-time registration
+      // whose kill webhook points into private space.
+      const result = registerPolicy({
+        agentId: 'agent-001',
+        maxSpendUsd: 1.0,
+        windowMs: 0,
+        breachAction: 'kill',
+        killCallbackUrl: 'http://10.0.0.5:8080/kill',
+      })
+      expect(result.killCallbackWarning).toMatch(/not externally routable/)
+
+      const decision = evaluateSpan({
+        'agentcore.agent.id': 'agent-001',
+        'agentcore.cost.usd': 500,
+        spanId: 'span-1',
+      })
+
+      expect(decision?.action).toBe('kill')
+      expect(decision?.budgetLimitUsd).toBe(1.0)
+      expect(decision?.accumulatedSpendUsd).toBe(500)
+      expect(decision?.reason).toMatch(/Budget exceeded/)
+
+      // ...and the refused destination is still never contacted.
+      const policy = listPolicies()[0]
+      expect(await invokeKillCallback(policy, decision!)).toBeNull()
+      expect(fetchMock).not.toHaveBeenCalled()
+    })
+
+    it('keeps the cap in force when a re-registration carries a bad callback URL', () => {
+      registerPolicy(killPolicy('https://hooks.example.com/kill'))
+      const result = registerPolicy(killPolicy('http://169.254.169.254/kill'))
+
+      expect(result.killCallbackWarning).toBeTruthy()
+      expect(listPolicies()).toHaveLength(1)
+      expect(listPolicies()[0].maxSpendUsd).toBe(1.0)
+      expect(listPolicies()[0].killCallbackUrl).toBeUndefined()
 
       const decision = evaluateSpan({
         'agentcore.agent.id': 'agent-001',
@@ -417,20 +453,19 @@ describe('OTel Budget Circuit-Breaker', () => {
       expect(decision?.accumulatedSpendUsd).toBe(1.5)
     })
 
-    it('rejects an invalid killCallbackUrl in the tool input schema', () => {
+    it('accepts an invalid killCallbackUrl in the tool input schema', () => {
+      // Schema-level rejection would fail the whole call and leave the agent
+      // with no cap at all; the URL is dropped downstream instead.
       const parsed = OTelRegisterPolicySchema.safeParse({
         agentId: 'agent-001',
         maxSpendUsd: 5.0,
         breachAction: 'kill',
         killCallbackUrl: 'file:///etc/passwd',
       })
-      expect(parsed.success).toBe(false)
-      if (!parsed.success) {
-        expect(parsed.error.issues[0].message).toMatch(/http: or https:/)
-      }
+      expect(parsed.success).toBe(true)
     })
 
-    it('returns a tool error instead of registering a policy with a bad callback URL', async () => {
+    it('registers the cap and warns instead of erroring on a bad callback URL', async () => {
       const result = await handleOTelRegisterPolicy({
         agentId: 'agent-001',
         maxSpendUsd: 5.0,
@@ -438,9 +473,17 @@ describe('OTel Budget Circuit-Breaker', () => {
         breachAction: 'kill',
         killCallbackUrl: 'ftp://198.51.100.7/kill',
       })
-      expect(result.isError).toBe(true)
-      expect(result.content[0].text).toMatch(/http: or https:/)
-      expect(listPolicies()).toHaveLength(0)
+
+      expect(result.isError).toBeUndefined()
+      const data = JSON.parse(result.content[0].text)
+      expect(data.success).toBe(true)
+      expect(data.killCallbackWarning).toMatch(/http: or https:/)
+      // The rejected URL must not be echoed back as though it were in force.
+      expect(data.policy.killCallbackUrl).toBeUndefined()
+
+      expect(listPolicies()).toHaveLength(1)
+      expect(listPolicies()[0].maxSpendUsd).toBe(5.0)
+      expect(listPolicies()[0].killCallbackUrl).toBeUndefined()
     })
 
     it('refuses to fire the callback for an invalid URL and never fetches', async () => {
@@ -503,16 +546,12 @@ describe('OTel Budget Circuit-Breaker', () => {
     ])('refuses the internal destination %s (%s)', (url) => {
       expect(validateKillCallbackUrl(url)).toContain('not externally routable')
 
-      expect(() => registerPolicy(killPolicy(url))).toThrow(/not externally routable/)
-      expect(listPolicies()).toHaveLength(0)
-
-      const parsed = OTelRegisterPolicySchema.safeParse({
-        agentId: 'agent-001',
-        maxSpendUsd: 5.0,
-        breachAction: 'kill',
-        killCallbackUrl: url,
-      })
-      expect(parsed.success).toBe(false)
+      // The destination is refused; the policy's spend cap is not.
+      const result = registerPolicy(killPolicy(url))
+      expect(result.killCallbackWarning).toMatch(/not externally routable/)
+      expect(listPolicies()).toHaveLength(1)
+      expect(listPolicies()[0].maxSpendUsd).toBe(1.0)
+      expect(listPolicies()[0].killCallbackUrl).toBeUndefined()
     })
 
     it.each([
@@ -560,7 +599,8 @@ describe('OTel Budget Circuit-Breaker', () => {
       // resolution this was a working SSRF probe from a payment server.
       expect(fetchMock).not.toHaveBeenCalled()
       expect(result).toMatchObject({ attempted: false, ok: false })
-      expect(result?.error).toContain('private')
+      // The caller is not told *why*: see the indistinguishability test below.
+      expect(result?.error).toBe(KILL_CALLBACK_GENERIC_FAILURE)
     })
 
     it('refuses a name where only one of several addresses is private', async () => {
@@ -634,7 +674,11 @@ describe('OTel Budget Circuit-Breaker', () => {
 
       expect(fetchMock).not.toHaveBeenCalled()
       expect(result).toMatchObject({ attempted: false, ok: false })
-      expect(result?.error).toContain('could not be resolved')
+      expect(result?.error).toBe(KILL_CALLBACK_GENERIC_FAILURE)
+      // The detail an operator needs goes to the server log, not the caller.
+      expect(consoleError).toHaveBeenCalledWith(
+        expect.stringContaining('could not be resolved')
+      )
     })
 
     it('fails closed when the callback host resolves to no addresses', async () => {
@@ -649,7 +693,10 @@ describe('OTel Budget Circuit-Breaker', () => {
 
       expect(fetchMock).not.toHaveBeenCalled()
       expect(result).toMatchObject({ attempted: false, ok: false })
-      expect(result?.error).toContain('no addresses')
+      expect(result?.error).toBe(KILL_CALLBACK_GENERIC_FAILURE)
+      expect(consoleError).toHaveBeenCalledWith(
+        expect.stringContaining('no addresses')
+      )
     })
 
     it('fetches a name that resolves entirely into public space', async () => {
@@ -751,8 +798,10 @@ describe('OTel Budget Circuit-Breaker', () => {
       expect(data.killCallback).toEqual({
         attempted: true,
         ok: false,
-        error: expect.stringContaining('timeout'),
+        error: KILL_CALLBACK_GENERIC_FAILURE,
       })
+      // The timeout detail reaches the operator's log, not the caller.
+      expect(consoleError).toHaveBeenCalledWith(expect.stringContaining('timeout'))
     })
 
     it('keeps the breaker decision intact when the callback is refused outright', async () => {
@@ -793,6 +842,145 @@ describe('OTel Budget Circuit-Breaker', () => {
       expect(data.killCallback.ok).toBe(false)
       expect(data.killCallback).not.toHaveProperty('status')
       expect(JSON.stringify(data)).not.toContain('403')
+    })
+  })
+
+  // ── The caller must not be able to read the internal network off the
+  //    failure reason. Withholding only the HTTP status left a working
+  //    port/service scanner and a DNS enumerator behind; these pin the
+  //    remaining channels shut.
+  describe('kill callback failure indistinguishability', () => {
+    const failureFor = async (arrange: () => void): Promise<string | undefined> => {
+      arrange()
+      const result = await invokeKillCallback(
+        killPolicy('https://probe.example.com/kill'),
+        killDecision
+      )
+      expect(result).toMatchObject({ ok: false })
+      return result?.error
+    }
+
+    it('returns one identical reason for every transport and HTTP outcome', async () => {
+      const reasons = [
+        // Open port, speaks HTTP, refuses.
+        await failureFor(() => {
+          global.fetch = vi
+            .fn()
+            .mockResolvedValue({ ok: false, status: 403 }) as unknown as typeof global.fetch
+        }),
+        // Closed port / no route.
+        await failureFor(() => {
+          global.fetch = vi
+            .fn()
+            .mockRejectedValue(new TypeError('fetch failed')) as unknown as typeof global.fetch
+        }),
+        // Open TCP port that never speaks HTTP.
+        await failureFor(() => {
+          global.fetch = vi
+            .fn()
+            .mockRejectedValue(
+              new Error('The operation was aborted due to timeout')
+            ) as unknown as typeof global.fetch
+        }),
+      ]
+
+      // All four target states (these three plus ok=true) must collapse to two
+      // observations: delivered, or not. Anything finer is a service scanner.
+      expect(new Set(reasons)).toEqual(new Set([KILL_CALLBACK_GENERIC_FAILURE]))
+    })
+
+    it('returns one identical reason for every DNS-gate refusal', async () => {
+      const fetchMock = vi.fn()
+      global.fetch = fetchMock as typeof global.fetch
+
+      const reasons = [
+        // Name exists and maps into private space.
+        await failureFor(() => {
+          dnsLookup.mockResolvedValue([{ address: '10.1.2.3', family: 4 }])
+        }),
+        // Name does not exist in the server's DNS view.
+        await failureFor(() => {
+          dnsLookup.mockRejectedValue(new Error('ENOTFOUND'))
+        }),
+        // Name exists but has no address records.
+        await failureFor(() => {
+          dnsLookup.mockResolvedValue([])
+        }),
+      ]
+
+      expect(fetchMock).not.toHaveBeenCalled()
+      // Distinct strings here would let a caller enumerate internal DNS and
+      // learn which names map into RFC1918 space.
+      expect(new Set(reasons)).toEqual(new Set([KILL_CALLBACK_GENERIC_FAILURE]))
+    })
+
+    it('does not leak the host or address into the reason string', async () => {
+      dnsLookup.mockResolvedValue([{ address: '169.254.169.254', family: 4 }])
+      const result = await invokeKillCallback(
+        killPolicy('https://rebind.example.com/kill'),
+        killDecision
+      )
+      expect(result?.error).not.toContain('169.254')
+      expect(result?.error).not.toContain('rebind.example.com')
+    })
+  })
+
+  describe('kill callback operator allowlist', () => {
+    it('permits an opted-in private host end to end', async () => {
+      process.env[KILL_CALLBACK_ALLOWLIST_ENV] = 'orchestrator.svc.internal, 10.0.0.5'
+
+      // A kill webhook on a private orchestrator is an ordinary in-VPC
+      // deployment; without an opt-in there was no way to keep it working.
+      expect(validateKillCallbackUrl('http://10.0.0.5:8080/kill')).toBeNull()
+      expect(
+        validateKillCallbackUrl('https://orchestrator.svc.internal/kill')
+      ).toBeNull()
+
+      const fetchMock = vi.fn().mockResolvedValue({ ok: true, status: 204 })
+      global.fetch = fetchMock as typeof global.fetch
+      dnsLookup.mockResolvedValue([{ address: '10.9.9.9', family: 4 }])
+
+      const { killCallbackWarning } = registerPolicy(
+        killPolicy('https://orchestrator.svc.internal/kill')
+      )
+      expect(killCallbackWarning).toBeUndefined()
+      expect(listPolicies()[0].killCallbackUrl).toBe(
+        'https://orchestrator.svc.internal/kill'
+      )
+
+      const result = await invokeKillCallback(listPolicies()[0], killDecision)
+      expect(fetchMock).toHaveBeenCalledTimes(1)
+      expect(result).toEqual({ attempted: true, ok: true })
+    })
+
+    it('waives only the private-space rule, never scheme or credentials', () => {
+      process.env[KILL_CALLBACK_ALLOWLIST_ENV] = 'localhost,169.254.169.254'
+
+      expect(validateKillCallbackUrl('ftp://localhost/kill')).toMatch(
+        /http: or https:/
+      )
+      expect(
+        validateKillCallbackUrl('http://user:pw@169.254.169.254/latest/meta-data')
+      ).toMatch(/credentials/)
+    })
+
+    it('is empty by default, so private destinations stay refused', () => {
+      expect(process.env[KILL_CALLBACK_ALLOWLIST_ENV]).toBeUndefined()
+      expect(validateKillCallbackUrl('http://10.0.0.5:8080/kill')).toContain(
+        'not externally routable'
+      )
+    })
+
+    it('does not let an unrelated host ride along on an allowlist entry', () => {
+      process.env[KILL_CALLBACK_ALLOWLIST_ENV] = 'orchestrator.svc.internal'
+
+      // Suffix/substring near-misses must not match.
+      expect(
+        validateKillCallbackUrl('https://evil-orchestrator.svc.internal/kill')
+      ).toContain('not externally routable')
+      expect(
+        validateKillCallbackUrl('https://a.orchestrator.svc.internal/kill')
+      ).toContain('not externally routable')
     })
   })
 })

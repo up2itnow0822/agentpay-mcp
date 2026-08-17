@@ -87,6 +87,59 @@ const KILL_CALLBACK_BLOCKED_HOST_SUFFIXES = ['.internal', '.local', '.localhost'
 /** Exact host names that are never a legitimate external webhook. */
 const KILL_CALLBACK_BLOCKED_HOSTS = new Set(['localhost', 'metadata.google.internal'])
 
+/**
+ * Comma-separated operator allowlist of hosts whose private-space destination is
+ * explicitly permitted, for deployments whose circuit-breaker webhook genuinely
+ * lives in-VPC (`orchestrator.svc.internal`, a 10/8 address, …). Empty by
+ * default, so the private-space rule is fail-closed unless an operator opts a
+ * specific host in. It waives only the private/loopback/link-local rule — the
+ * http(s)-scheme and no-embedded-credentials rules always apply.
+ */
+export const KILL_CALLBACK_ALLOWLIST_ENV = 'AGENTPAY_KILL_CALLBACK_ALLOWED_HOSTS'
+
+/**
+ * Normalise a URL hostname for comparison: lower-cased, IPv6 brackets stripped,
+ * and the FQDN root dot dropped ("localhost." is the same host as "localhost").
+ */
+function normalizeHost(hostname: string): string {
+  const host = hostname.toLowerCase()
+  return host.startsWith('[') && host.endsWith(']')
+    ? host.slice(1, -1)
+    : host.replace(/\.$/, '')
+}
+
+/** Read the operator allowlist. Read per call so config changes need no restart. */
+function killCallbackAllowlist(): Set<string> {
+  const raw = process.env[KILL_CALLBACK_ALLOWLIST_ENV]
+  if (!raw) return new Set()
+  return new Set(
+    raw
+      .split(',')
+      .map((entry) => normalizeHost(entry.trim()))
+      .filter((entry) => entry !== '')
+  )
+}
+
+/**
+ * Generic refusal handed back to the MCP caller when a kill callback is not
+ * delivered. Every refusal and every transport failure shares this one string
+ * on purpose: the destination is caller-supplied, so a reason that varied with
+ * what the server found (name resolves / does not resolve, resolves into
+ * private space, port closed, port open but silent, HTTP error) would let an
+ * untrusted caller enumerate internal DNS and internal services through this
+ * tool. The specific reason goes to the server log instead.
+ */
+export const KILL_CALLBACK_GENERIC_FAILURE = 'Kill callback was not delivered'
+
+/**
+ * Record why a kill callback failed where the operator can see it and the
+ * caller cannot. stderr is safe for an MCP stdio server: stdout carries the
+ * protocol, stderr is the server's log stream.
+ */
+function logKillCallbackFailure(url: string, detail: string): void {
+  console.error(`[otel-budget] kill callback not delivered for ${url}: ${detail}`)
+}
+
 /** Parse a dotted-quad IPv4 literal into octets, or null if it is not one. */
 function parseIpv4(host: string): number[] | null {
   const parts = host.split('.')
@@ -215,9 +268,13 @@ function isPrivateIpv6(host: string): boolean {
  * Names are resolved and re-checked at fire time by
  * {@link resolvedHostIsPrivate}; see its notes for the residual rebinding gap.
  *
- * Applied fail-closed at configuration time (registerPolicy / the
- * otel_register_budget_policy schema) and again at fire time
- * (invokeKillCallback) as defense in depth.
+ * The private-space rule (only that rule) is waived for hosts an operator has
+ * opted in via {@link KILL_CALLBACK_ALLOWLIST_ENV}.
+ *
+ * Applied at configuration time (registerPolicy drops a callback URL that fails
+ * this check, keeping the rest of the policy) and again at fire time
+ * (invokeKillCallback) as defense in depth. It gates the callback only: it
+ * never gates whether the spend cap itself is registered and enforced.
  */
 export function validateKillCallbackUrl(raw: string): string | null {
   let parsed: URL
@@ -233,14 +290,12 @@ export function validateKillCallbackUrl(raw: string): string | null {
     return 'killCallbackUrl must not embed credentials (user:pass@host) — remove the userinfo component'
   }
 
-  const hostname = parsed.hostname.toLowerCase()
-  const ipv6Literal = hostname.startsWith('[')
-  const host = ipv6Literal
-    ? hostname.slice(1, -1)
-    : // "localhost." is the same host as "localhost" — drop the FQDN root dot.
-      hostname.replace(/\.$/, '')
+  const ipv6Literal = parsed.hostname.startsWith('[')
   // No empty-host case: the WHATWG parser rejects an http(s) URL without a host
   // outright, so `new URL` above has already thrown for those.
+  const host = normalizeHost(parsed.hostname)
+  // Operator opt-in: this host's private destination is intentional.
+  if (killCallbackAllowlist().has(host)) return null
   const ipv4 = parseIpv4(host)
   const privateHost =
     KILL_CALLBACK_BLOCKED_HOSTS.has(host) ||
@@ -259,14 +314,24 @@ export function validateKillCallbackUrl(raw: string): string | null {
  * above and gets fetched verbatim.
  *
  * Fails closed — a name that cannot be resolved is refused rather than fetched.
+ * Skipped for hosts an operator has opted in via
+ * {@link KILL_CALLBACK_ALLOWLIST_ENV}.
+ *
+ * The reason string returned here is detailed on purpose — it is for the server
+ * log. It must not be handed to the MCP caller verbatim: "resolves into private
+ * space" vs "does not resolve" vs "resolves to nothing" would let an untrusted
+ * caller enumerate the server's internal DNS view. invokeKillCallback replaces
+ * it with {@link KILL_CALLBACK_GENERIC_FAILURE} before returning.
  *
  * Known residual gap: the connection is not pinned to the address that was
  * checked, so a resolver that returns a public address here and a private one
  * to the fetch (DNS rebinding) still wins the race. Closing that needs a custom
  * agent/socket, which global fetch does not expose. Operators who need a hard
- * guarantee should front the webhook with an egress allowlist. The status of the
- * callback response is deliberately not returned to the caller, so even a
- * successful rebind yields no oracle.
+ * guarantee should front the webhook with an egress allowlist. What a
+ * successful rebind then yields the caller is one bit — whether the POST was
+ * delivered — plus response latency; the HTTP status and the failure reason are
+ * withheld. That bit cannot be removed without lying to operators about whether
+ * their circuit breaker actually fired.
  */
 export async function resolvedHostIsPrivate(rawUrl: string): Promise<string | null> {
   let hostname: string
@@ -277,7 +342,9 @@ export async function resolvedHostIsPrivate(rawUrl: string): Promise<string | nu
   }
   // Bracketed literals were already checked exactly by validateKillCallbackUrl.
   if (hostname.startsWith('[')) return null
-  if (parseIpv4(hostname.replace(/\.$/, '')) !== null) return null
+  hostname = normalizeHost(hostname)
+  if (killCallbackAllowlist().has(hostname)) return null
+  if (parseIpv4(hostname) !== null) return null
 
   let addresses: Array<{ address: string; family: number }>
   try {
@@ -320,23 +387,51 @@ export function _resetOTelBudgetState(): void {
 
 // ─── Core Logic ────────────────────────────────────────────────────────────
 
+/** Outcome of {@link registerPolicy}. */
+export interface PolicyRegistrationResult {
+  /**
+   * Present when the policy's killCallbackUrl was refused and dropped. The
+   * policy — including its spend cap — was still registered.
+   */
+  killCallbackWarning?: string
+}
+
 /**
  * Register a budget policy for an agent or agent+task combination.
  *
- * Fail-closed on the kill-callback URL: a policy naming a destination this
- * server must not POST to (non-http(s) scheme, embedded credentials, private /
- * loopback / link-local host) is rejected outright rather than stored, so the
- * SSRF is refused at configuration time instead of at breach time.
+ * Fail-closed on the kill-callback URL, but scoped to the callback alone: a
+ * policy naming a destination this server must not POST to (non-http(s) scheme,
+ * embedded credentials, private / loopback / link-local host) is stored with
+ * that URL stripped and a warning returned, rather than being rejected.
+ *
+ * Refusing the whole policy would be a worse outcome than the SSRF it prevents:
+ * the caller asked for a $N spend ceiling, and dropping the registration
+ * silently leaves that agent's spend uncapped (evaluateSpan falls through to
+ * "No budget policy registered", action 'allow', limit Infinity). Stripping the
+ * URL refuses the SSRF just as completely — nothing is ever POSTed to it — while
+ * the cap the caller actually asked for takes effect. Operators whose webhook
+ * legitimately lives in private space can opt that host in via
+ * {@link KILL_CALLBACK_ALLOWLIST_ENV}.
  */
-export function registerPolicy(policy: AgentBudgetPolicy): void {
+export function registerPolicy(policy: AgentBudgetPolicy): PolicyRegistrationResult {
+  let stored = policy
+  let killCallbackWarning: string | undefined
+
   if (policy.killCallbackUrl !== undefined) {
     const urlError = validateKillCallbackUrl(policy.killCallbackUrl)
     if (urlError) {
-      throw new Error(`Refusing to register budget policy: ${urlError}`)
+      killCallbackWarning =
+        `Kill callback disabled — ${urlError}. The spend cap is registered and ` +
+        `enforced; no callback will be sent on breach. If this webhook is a ` +
+        `trusted internal host, add it to ${KILL_CALLBACK_ALLOWLIST_ENV}.`
+      const { killCallbackUrl: _refused, ...withoutCallback } = policy
+      stored = withoutCallback
     }
   }
+
   const key = policyKey(policy.agentId, policy.taskId)
-  _policies.set(key, policy)
+  _policies.set(key, stored)
+  return killCallbackWarning ? { killCallbackWarning } : {}
 }
 
 function getApplicablePolicy(agentId: string, taskId?: string): AgentBudgetPolicy | undefined {
@@ -451,10 +546,21 @@ export function evaluateSpan(attrs: OTelSpanCostAttributes): BudgetDecision | nu
  * is reported as a failed callback rather than re-issued against a host that
  * never passed validation.
  *
- * The response status is deliberately NOT returned. The destination is
- * caller-supplied, so handing back a per-host status code would turn the
- * callback into a probe oracle for whatever the server can reach. Callers get
- * ok/failed and a generic reason only.
+ * Every unsuccessful outcome — refused URL host, refused DNS answer, closed
+ * port, open-but-silent port, HTTP error status, timeout — returns the same
+ * {@link KILL_CALLBACK_GENERIC_FAILURE} string, and the response status is
+ * never returned. The destination is caller-supplied, so any reason that varied
+ * with what the server found would be a probe oracle: distinct strings for
+ * "resolves into private space" / "does not resolve" / "connection refused" /
+ * "timed out" / "HTTP error" are between them a working internal DNS
+ * enumerator and port scanner. The specific reason is logged server-side.
+ *
+ * What remains visible to the caller is exactly one bit — `ok`, whether the
+ * POST was delivered — plus how long the call took. Neither can be removed
+ * without lying to operators about whether their circuit breaker fired. The
+ * literal-URL rejections (bad scheme, embedded credentials, a private address
+ * written out as a literal) do keep their specific message: those describe the
+ * string the caller itself supplied and disclose nothing about the network.
  *
  * Retry policy: no in-process retry. Spend evaluation must not block on
  * webhook health, and every subsequent over-budget span evaluation fires the
@@ -488,13 +594,15 @@ export async function invokeKillCallback(
     }
   }
 
-  // Names are only checkable once resolved, and only at fire time.
+  // Names are only checkable once resolved, and only at fire time. The reason
+  // is logged, not returned: see the note above on the DNS enumeration oracle.
   const dnsError = await resolvedHostIsPrivate(policy.killCallbackUrl)
   if (dnsError) {
+    logKillCallbackFailure(policy.killCallbackUrl, dnsError)
     return {
       attempted: false,
       ok: false,
-      error: `Kill callback not invoked: ${dnsError}`,
+      error: KILL_CALLBACK_GENERIC_FAILURE,
     }
   }
 
@@ -521,18 +629,32 @@ export async function invokeKillCallback(
       }),
     })
 
-    // No status code: the destination is caller-supplied and echoing per-host
-    // statuses back would make this a probe oracle for internal services.
+    // No status code, and the same string an unreachable host produces: the
+    // destination is caller-supplied, and a reason that distinguished "spoke
+    // HTTP and refused" from "never spoke" is a service scanner.
+    if (!response.ok) {
+      logKillCallbackFailure(
+        policy.killCallbackUrl,
+        `webhook returned HTTP ${response.status}`
+      )
+    }
     return {
       attempted: true,
       ok: response.ok,
-      ...(response.ok ? {} : { error: 'Kill callback was rejected by the webhook' }),
+      ...(response.ok ? {} : { error: KILL_CALLBACK_GENERIC_FAILURE }),
     }
   } catch (error: unknown) {
+    // Transport failures are not distinguished either: "fetch failed" (closed
+    // port / no route) and "aborted due to timeout" (open port that never
+    // speaks HTTP) are together a port scanner.
+    logKillCallbackFailure(
+      policy.killCallbackUrl,
+      error instanceof Error ? error.message : String(error)
+    )
     return {
       attempted: true,
       ok: false,
-      error: error instanceof Error ? error.message : String(error),
+      error: KILL_CALLBACK_GENERIC_FAILURE,
     }
   }
 }
@@ -590,19 +712,18 @@ export const OTelRegisterPolicySchema = z.object({
     .enum(['warn', 'block', 'kill'])
     .default('block')
     .describe('Action on budget breach: warn, block, or kill (circuit-breaker)'),
+  // Deliberately NOT rejected here. A schema-level refusal fails the whole
+  // otel_register_budget_policy call, which would leave the agent with no
+  // spend cap at all — a strictly worse outcome than the SSRF being refused.
+  // registerPolicy drops an unacceptable URL and keeps the cap; see its notes.
   killCallbackUrl: z
     .string()
-    .superRefine((value, ctx) => {
-      const urlError = validateKillCallbackUrl(value)
-      if (urlError) {
-        ctx.addIssue({ code: z.ZodIssueCode.custom, message: urlError })
-      }
-    })
     .optional()
     .describe(
       'Webhook URL to invoke when circuit-breaker trips (kill action). ' +
         'Must be http(s), must not embed credentials, and must not point at a ' +
-        'private, loopback or link-local host.'
+        'private, loopback or link-local host. A URL that fails those rules is ' +
+        'dropped with a warning; the spend cap is still registered and enforced.'
     ),
 })
 
@@ -632,11 +753,14 @@ export const otelRegisterPolicyTool = {
         type: 'string',
         description:
           'Circuit-breaker webhook URL (http(s) only, no embedded credentials, ' +
-          'no private/loopback/link-local hosts). Host names are resolved and ' +
-          're-checked before the callback fires, and a host that resolves into ' +
-          'private space is refused. The connection is not pinned to the checked ' +
-          'address, so a rebinding resolver is still out of scope; the response ' +
-          'status is never returned to the caller.',
+          'no private/loopback/link-local hosts). A URL failing those rules is ' +
+          'dropped with a killCallbackWarning — the spend cap is still ' +
+          'registered and enforced. Host names are resolved and re-checked ' +
+          'before the callback fires, and a host that resolves into private ' +
+          'space is refused. The connection is not pinned to the checked ' +
+          'address, so a rebinding resolver is still out of scope. Undelivered ' +
+          'callbacks report only ok=false and a single generic reason; the ' +
+          'response status and the specific failure are never returned.',
       },
     },
     required: ['agentId', 'maxSpendUsd'],
@@ -656,7 +780,12 @@ export async function handleOTelRegisterPolicy(
       killCallbackUrl: input.killCallbackUrl,
     }
 
-    registerPolicy(policy)
+    const { killCallbackWarning } = registerPolicy(policy)
+    if (killCallbackWarning) {
+      // The callback was refused, so do not echo the rejected URL back as if
+      // it were in force.
+      delete policy.killCallbackUrl
+    }
 
     return {
       content: [
@@ -667,6 +796,7 @@ export async function handleOTelRegisterPolicy(
               key: policyKey(policy.agentId, policy.taskId),
               ...policy,
             },
+            ...(killCallbackWarning ? { killCallbackWarning } : {}),
           })
         ),
       ],

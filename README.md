@@ -551,6 +551,14 @@ RPC_URL=https://mainnet.base.org # Custom RPC (Alchemy/Infura recommended for pr
 SESSION_TTL_SECONDS=3600         # x402 session lifetime (default: 1 hour)
 FACTORY_ADDRESS=0x...            # For deploy_wallet and create_escrow
 NFT_CONTRACT_ADDRESS=0x...       # For deploy_wallet
+
+# Optional — otel_register_budget_policy circuit breaker
+# Comma-separated hosts whose private/loopback/link-local kill-callback URL is
+# explicitly permitted. Empty by default: a killCallbackUrl pointing into
+# private space is dropped (with a warning) and never POSTed to, though the
+# budget policy's spend cap is always registered and enforced regardless.
+# Set this only if your circuit-breaker webhook genuinely lives in-VPC.
+AGENTPAY_KILL_CALLBACK_ALLOWED_HOSTS=orchestrator.svc.internal
 ```
 
 ---
