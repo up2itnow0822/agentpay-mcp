@@ -24,6 +24,7 @@ import {
   sanitizeUntrustedInline,
   sanitizeUntrustedUrl,
   describeFinalUrl,
+  formatHttpStatus,
   noControlChars,
   chainName,
 } from '../utils/format.js';
@@ -283,7 +284,7 @@ export async function handleX402SessionStart(
             `ℹ️ **No Payment Required**\n\n` +
             `  Endpoint: ${sanitizeUntrustedUrl(input.endpoint)}\n` +
             describeFinalUrl(input.endpoint, response) +
-            `  Status:   ${response.status} ${sanitizeUntrustedInline(response.statusText)}\n\n` +
+            `  Status:   ${formatHttpStatus(response.status)}\n\n` +
             `No x402 payment was needed. The endpoint responded without requiring payment.\n` +
             `You do not need a session token — use x402_pay directly for free endpoints.\n\n` +
             `📄 **Response Body**\n` +
@@ -552,7 +553,7 @@ export async function handleX402SessionFetch(
     out += `  URL:         ${sanitizeUntrustedUrl(input.url)}\n`;
     out += describeFinalUrl(input.url, response);
     out += `  Method:      ${method}\n`;
-    out += `  Status:      ${response.status} ${sanitizeUntrustedInline(response.statusText)}\n`;
+    out += `  Status:      ${formatHttpStatus(response.status)}\n`;
     out += `  Session TTL: ${Math.ceil(ttlRemaining / 60)}m remaining\n`;
     out += `  💰 No payment — session token used\n\n`;
     out += `📄 **Response Body**\n`;

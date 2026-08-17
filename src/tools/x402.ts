@@ -15,10 +15,10 @@ import {
   textContent,
   formatError,
   formatUntrustedBody,
-  sanitizeUntrustedInline,
   sanitizeUntrustedList,
   sanitizeUntrustedUrl,
   describeFinalUrl,
+  formatHttpStatus,
   noControlChars,
   chainName,
 } from '../utils/format.js';
@@ -116,7 +116,7 @@ function describeUnsupported402(
   out += `  URL:       ${sanitizeUntrustedUrl(input.url)}\n`;
   out += describeFinalUrl(input.url, response);
   out += `  Method:    ${input.method ?? 'GET'}\n`;
-  out += `  Status:    ${response.status} ${sanitizeUntrustedInline(response.statusText)}\n`;
+  out += `  Status:    ${formatHttpStatus(response.status)}\n`;
   out += `  Supported: ${supportedNetworks}\n`;
   out += `  Offered:   ${offeredNetworks.length > 0 ? sanitizeUntrustedList(offeredNetworks, MAX_OFFERED_LISTED) : 'not parseable'}\n`;
   if (offeredSchemes.length > 0) {
@@ -286,7 +286,7 @@ export async function handleX402Pay(
           out += `  URL:        ${sanitizeUntrustedUrl(input.url)}\n`;
           out += describeFinalUrl(input.url, response);
           out += `  Method:     ${method}\n`;
-          out += `  Status:     ${response.status} ${sanitizeUntrustedInline(response.statusText)}\n`;
+          out += `  Status:     ${formatHttpStatus(response.status)}\n`;
           out += `  Network:    ${chainName(config.chainId)}\n`;
           out += `\n🔐 **Session Used** (no payment)\n`;
           out += `  Session ID: ${activeSession.sessionId}\n`;
@@ -413,7 +413,7 @@ export async function handleX402Pay(
     out += `  URL:     ${sanitizeUntrustedUrl(input.url)}\n`;
     out += describeFinalUrl(input.url, response);
     out += `  Method:  ${method}\n`;
-    out += `  Status:  ${response.status} ${sanitizeUntrustedInline(response.statusText)}\n`;
+    out += `  Status:  ${formatHttpStatus(response.status)}\n`;
     out += `  Network: ${chainName(config.chainId)}\n`;
 
     if (paymentMade) {
