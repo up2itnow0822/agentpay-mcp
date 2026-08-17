@@ -25,7 +25,11 @@ import {
   chainName,
 } from '../utils/format.js';
 import { supportedX402NetworksForChainId } from '../utils/x402-networks.js';
-import { maxPaymentBaseUnits, resolveX402AssetDecimals } from '../utils/payment-cap.js';
+import {
+  assertPayableX402Recipient,
+  maxPaymentBaseUnits,
+  resolveX402AssetDecimals,
+} from '../utils/payment-cap.js';
 import { enforceSpendPolicy } from './budget.js';
 import {
   createSession,
@@ -194,6 +198,10 @@ export async function handleX402SessionStart(
       maxRetries: 1,
       supportedNetworks: supportedX402NetworksForChainId(config.chainId),
       onBeforePayment: async (req) => {
+        // The 402's payTo is remote-controlled and ends up inside error
+        // messages (SDK allowlist rejection, viem InvalidAddressError).
+        // Reject non-addresses before signing or interpolating.
+        const merchant = assertPayableX402Recipient(req.payTo);
         const amount = BigInt(req.amount);
         if (input.max_payment_eth) {
           const maxRaw = maxPaymentBaseUnits(
@@ -214,7 +222,7 @@ export async function handleX402SessionStart(
         // only runs when a policy is configured, and resolution failures
         // reject (fail closed) inside enforceSpendPolicy.
         const policyDecision = await enforceSpendPolicy({
-          merchant: req.payTo,
+          merchant,
           amount,
           decimals: () =>
             resolveX402AssetDecimals(

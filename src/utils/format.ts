@@ -139,10 +139,19 @@ export function textContent(text: string): { type: 'text'; text: string } {
 
 /**
  * Format an error into a human-readable MCP error response text.
+ *
+ * Error messages are NOT trusted: remote-controlled strings reach them
+ * routinely (a hostile 402 `payTo` is interpolated verbatim into the SDK's
+ * `Merchant "<payTo>" is not on the allowlist.` rejection, and into viem's
+ * `InvalidAddressError`). Emitting that raw would give any paid endpoint an
+ * unfenced, multi-line channel into the tool result — including the ability
+ * to forge an UNTRUSTED_BODY_END marker and pass the text after it off as
+ * trusted narration. Every message is therefore flattened, delimiter-redacted
+ * and capped, exactly like any other untrusted inline value.
  */
 export function formatError(error: unknown, context: string): string {
   const msg = error instanceof Error ? error.message : String(error);
-  return `❌ ${context} failed: ${msg}`;
+  return `❌ ${context} failed: ${sanitizeUntrustedInline(msg, MAX_ERROR_MESSAGE_LEN)}`;
 }
 
 // ─── Untrusted remote content wrapping ─────────────────────────────────────
@@ -164,6 +173,21 @@ const INLINE_CONTROL_CHARS = new RegExp('[\\u0000-\\u001f\\u007f\\u2028\\u2029]'
 const REDACTED_MARKER = '[redacted marker]';
 
 /**
+ * Generous cap for error messages, which are usually legitimate local text
+ * but can carry remote-controlled fragments (see formatError).
+ */
+const MAX_ERROR_MESSAGE_LEN = 512;
+
+/** Replace any forged BEGIN/END delimiter with the redaction placeholder. */
+function redactDelimiters(value: string): string {
+  return value
+    .split(UNTRUSTED_BODY_BEGIN)
+    .join(REDACTED_MARKER)
+    .split(UNTRUSTED_BODY_END)
+    .join(REDACTED_MARKER);
+}
+
+/**
  * Flatten an untrusted single-line value (status text, offered network/scheme
  * names, ...) so it cannot escape the narration line it is interpolated into.
  *
@@ -176,12 +200,7 @@ const REDACTED_MARKER = '[redacted marker]';
  *   - the result is hard-capped, so it cannot flood the tool result.
  */
 export function sanitizeUntrustedInline(value: string, maxLen = 64): string {
-  const flattened = value
-    .replace(INLINE_CONTROL_CHARS, ' ')
-    .split(UNTRUSTED_BODY_BEGIN)
-    .join(REDACTED_MARKER)
-    .split(UNTRUSTED_BODY_END)
-    .join(REDACTED_MARKER);
+  const flattened = redactDelimiters(value.replace(INLINE_CONTROL_CHARS, ' '));
   return flattened.length > maxLen ? flattened.slice(0, maxLen - 1) + '…' : flattened;
 }
 
@@ -197,15 +216,21 @@ export function sanitizeUntrustedInline(value: string, maxLen = 64): string {
  *      longer fence are clipped in the body instead, so an all-backtick body
  *      cannot inflate the result past maxLen plus a small constant.
  *   3. Explicit BEGIN/END markers plus a one-line warning name the body as
- *      untrusted remote data. A spoofed END marker inside the body stays
- *      quoted inside the fence, so it cannot fake an early end.
+ *      untrusted remote data. Any BEGIN/END marker the body contains is
+ *      redacted, so the emitted END marker is always the only one and cannot
+ *      be forged early — the fence alone is not enough, because a model
+ *      reading raw tool-result text keys off the delimiters.
  */
 export function formatUntrustedBody(body: string, maxLen: number): string {
   const truncated =
     body.length > maxLen ? body.slice(0, maxLen) + '\n\n... [response truncated]' : body;
 
-  // Never grows the body: an over-long run is replaced by a shorter one.
-  const display = truncated.replace(OVERLONG_RUN, '`'.repeat(MAX_FENCE_LEN - 1));
+  // Never grows the body: forged delimiters and over-long backtick runs are
+  // both replaced by strictly shorter text.
+  const display = redactDelimiters(truncated).replace(
+    OVERLONG_RUN,
+    '`'.repeat(MAX_FENCE_LEN - 1)
+  );
 
   const longestBacktickRun =
     display.match(/`+/g)?.reduce((max, run) => Math.max(max, run.length), 0) ?? 0;
