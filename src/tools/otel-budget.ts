@@ -100,12 +100,33 @@ export const KILL_CALLBACK_ALLOWLIST_ENV = 'AGENTPAY_KILL_CALLBACK_ALLOWED_HOSTS
 /**
  * Normalise a URL hostname for comparison: lower-cased, IPv6 brackets stripped,
  * and the FQDN root dot dropped ("localhost." is the same host as "localhost").
+ *
+ * Every trailing dot is dropped, not just one. The WHATWG parser preserves a
+ * run of them verbatim ("metadata.google.internal.." stays two dots), so a
+ * single-dot strip left "metadata.google.internal." — which matches neither the
+ * exact-host set, nor the suffix list, nor an allowlist entry, and so sailed
+ * through the whole name-based layer.
  */
 function normalizeHost(hostname: string): string {
   const host = hostname.toLowerCase()
   return host.startsWith('[') && host.endsWith(']')
     ? host.slice(1, -1)
-    : host.replace(/\.$/, '')
+    : host.replace(/\.+$/, '')
+}
+
+/**
+ * True for a host name carrying an empty DNS label: a leading dot, or two or
+ * more dots in a row anywhere (including the trailing run). The single trailing
+ * root dot of an FQDN is not one, so "hooks.example.com." stays acceptable.
+ *
+ * Such a name is not resolvable, so refusing it costs nothing — and it has to be
+ * refused *before* the operator allowlist is consulted, because normalizeHost
+ * folds "orchestrator.svc.internal.." down onto the allowlisted
+ * "orchestrator.svc.internal", which would otherwise hand a caller the
+ * private-space waiver for a spelling the operator never wrote down.
+ */
+function hasEmptyLabel(hostname: string): boolean {
+  return /^\.|\.\./.test(hostname)
 }
 
 /** Read the operator allowlist. Read per call so config changes need no restart. */
@@ -217,11 +238,20 @@ function embeddedIpv4IsPrivate(hi: number, lo: number): boolean {
 /**
  * True for IPv6 space that is not routable on the public internet, or that
  * tunnels an IPv4 target that is not: unspecified, loopback, unique-local
- * (fc00::/7), link-local (fe80::/10), and every transition format that carries
- * an IPv4 address inside an IPv6 literal — IPv4-mapped (::ffff:0:0/96),
- * IPv4-compatible (::a.b.c.d, e.g. ::a9fe:a9fe for the metadata service), NAT64
- * (64:ff9b::/96), 6to4 (2002::/16) and Teredo (2001:0::/32). Each of those
- * would otherwise smuggle a private IPv4 destination past the IPv4 checks.
+ * (fc00::/7), link-local (fe80::/10), deprecated site-local (fec0::/10),
+ * multicast (ff00::/8), discard-only (100::/64), documentation (2001:db8::/32
+ * and 3fff::/20), benchmarking (2001:2::/48), ORCHIDv2 (2001:20::/28), SRv6 SIDs
+ * (5f00::/16), and every transition format that carries an IPv4 address inside
+ * an IPv6 literal — IPv4-mapped (::ffff:0:0/96), IPv4-compatible (::a.b.c.d,
+ * e.g. ::a9fe:a9fe for the metadata service), NAT64 (64:ff9b::/96), 6to4
+ * (2002::/16) and Teredo (2001:0::/32). Each of the transition formats would
+ * otherwise smuggle a private IPv4 destination past the IPv4 checks.
+ *
+ * The non-unicast and non-global ranges matter more here than they look: a
+ * bracketed IPv6 literal gets no DNS backstop (resolvedHostIsPrivate returns
+ * early for one, there being nothing to resolve), so for those hosts this
+ * function is the only gate between an untrusted caller and the socket.
+ * ff02::1 — all nodes on the local link — is the case that motivated the sweep.
  */
 function isPrivateIpv6(host: string): boolean {
   const h = parseIpv6(host)
@@ -234,9 +264,16 @@ function isPrivateIpv6(host: string): boolean {
   // which land in 0.0.0.0/8): the two most important addresses in this list
   // stay refused even if either rule is later narrowed.
   if (zeroPrefix(7) && (h[7] === 0 || h[7] === 1)) return true
-  // Unique-local fc00::/7 and link-local fe80::/10.
+  // Unique-local fc00::/7, link-local fe80::/10, deprecated site-local
+  // fec0::/10 (RFC 3879 — deprecated, but still configured on older kit).
   if ((h[0] & 0xfe00) === 0xfc00) return true
   if ((h[0] & 0xffc0) === 0xfe80) return true
+  if ((h[0] & 0xffc0) === 0xfec0) return true
+  // Multicast ff00::/8. A webhook destination is unicast by definition, and the
+  // link-local groups (ff02::1 all-nodes, ff02::2 all-routers) are reachable
+  // from the host with no routing at all — the IPv6 twin of the IPv4 a >= 224
+  // rule, which this function previously had no counterpart for.
+  if ((h[0] & 0xff00) === 0xff00) return true
   // IPv4-mapped ::ffff:a.b.c.d and IPv4-compatible ::a.b.c.d.
   if (zeroPrefix(5) && h[5] === 0xffff) return embeddedIpv4IsPrivate(h[6], h[7])
   if (zeroPrefix(6)) return embeddedIpv4IsPrivate(h[6], h[7])
@@ -250,6 +287,19 @@ function isPrivateIpv6(host: string): boolean {
   if (h[0] === 0x2001 && h[1] === 0x0000) {
     return embeddedIpv4IsPrivate(~h[6] & 0xffff, ~h[7] & 0xffff)
   }
+  // Discard-only prefix 100::/64 (RFC 6666).
+  if (h[0] === 0x0100 && h[1] === 0 && h[2] === 0 && h[3] === 0) return true
+  // Benchmarking 2001:2::/48 (RFC 5180) and ORCHIDv2 2001:20::/28 (RFC 7343).
+  // Both sit inside the IETF protocol-assignment block; neither is globally
+  // reachable, and neither is caught by the Teredo rule above (h[1] !== 0).
+  if (h[0] === 0x2001 && h[1] === 0x0002 && h[2] === 0x0000) return true
+  if (h[0] === 0x2001 && (h[1] & 0xfff0) === 0x0020) return true
+  // Documentation 2001:db8::/32 (RFC 3849) and 3fff::/20 (RFC 9637). Never
+  // routed, so a callback aimed at one is either a mistake or a probe.
+  if (h[0] === 0x2001 && h[1] === 0x0db8) return true
+  if (h[0] === 0x3fff && (h[1] & 0xf000) === 0x0000) return true
+  // SRv6 SIDs 5f00::/16 (RFC 9602) — segment identifiers, not destinations.
+  if (h[0] === 0x5f00) return true
   return false
 }
 
@@ -293,6 +343,11 @@ export function validateKillCallbackUrl(raw: string): string | null {
   const ipv6Literal = parsed.hostname.startsWith('[')
   // No empty-host case: the WHATWG parser rejects an http(s) URL without a host
   // outright, so `new URL` above has already thrown for those.
+  // Unresolvable empty-label names are refused ahead of everything else, so a
+  // dot-padded spelling of an allowlisted host cannot claim its waiver.
+  if (!ipv6Literal && hasEmptyLabel(parsed.hostname)) {
+    return `killCallbackUrl must not target a private, loopback or link-local host — "${parsed.hostname}" is not externally routable`
+  }
   const host = normalizeHost(parsed.hostname)
   // Operator opt-in: this host's private destination is intentional.
   if (killCallbackAllowlist().has(host)) return null
@@ -555,12 +610,28 @@ export function evaluateSpan(attrs: OTelSpanCostAttributes): BudgetDecision | nu
  * "timed out" / "HTTP error" are between them a working internal DNS
  * enumerator and port scanner. The specific reason is logged server-side.
  *
- * What remains visible to the caller is exactly one bit — `ok`, whether the
- * POST was delivered — plus how long the call took. Neither can be removed
- * without lying to operators about whether their circuit breaker fired. The
- * literal-URL rejections (bad scheme, embedded credentials, a private address
- * written out as a literal) do keep their specific message: those describe the
- * string the caller itself supplied and disclose nothing about the network.
+ * What remains visible to the caller is two bits, not one, plus how long the
+ * call took: `ok` (was the POST delivered) and `attempted` (did the request
+ * leave this process at all). `attempted` is false for exactly the two
+ * pre-flight refusals — the literal-URL check and the DNS gate.
+ *
+ * On the literal-URL side that second bit carries nothing: those refusals are a
+ * pure function of the string the caller itself supplied (bad scheme, embedded
+ * credentials, a private address written out as a literal), so the caller learns
+ * only what it already knew. That is also why those refusals keep their specific
+ * message rather than collapsing to the generic one.
+ *
+ * On the DNS side it is a real oracle, and a deliberately accepted one:
+ * attempted=false says "this name did not yield a usable public address from
+ * this server". Judgement: acceptable. The three underlying states — resolves
+ * into private space, does not resolve, resolves to nothing — still collapse
+ * into that single value, so the primitive that actually enumerates an internal
+ * network (does this name exist? does it point somewhere private?) stays shut.
+ * What leaks is one bit per name, and it says something a public resolver does
+ * not already say only where the name is split-horizon. The alternative —
+ * reporting attempted=true for a callback that never left the process — would
+ * tell an operator their circuit-breaker webhook fired when it never did, so
+ * neither bit can be removed without lying about whether the breaker fired.
  *
  * Retry policy: no in-process retry. Spend evaluation must not block on
  * webhook health, and every subsequent over-budget span evaluation fires the

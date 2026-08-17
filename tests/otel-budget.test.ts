@@ -510,6 +510,15 @@ describe('OTel Budget Circuit-Breaker', () => {
       ['http://localhost/internal', 'loopback name'],
       ['http://localhost./internal', 'loopback name with trailing dot'],
       ['http://127.0.0.1./kill', 'loopback literal with trailing dot'],
+      // A run of trailing dots survives the WHATWG parser verbatim. Stripping
+      // only one left a name that matched neither the exact-host set, nor the
+      // suffix list, nor the allowlist — i.e. the whole name layer was bypassed.
+      ['http://metadata.google.internal../kill', 'GCP metadata name, two trailing dots'],
+      ['http://localhost.../internal', 'loopback name, three trailing dots'],
+      ['http://127.0.0.1../kill', 'loopback literal with two trailing dots'],
+      ['https://console.svc.internal../kill', '.internal suffix with two trailing dots'],
+      ['https://a..b.example.com/kill', 'interior empty label'],
+      ['https://.example.com/kill', 'leading empty label'],
       ['http://2130706433/kill', 'decimal IPv4 for 127.0.0.1'],
       ['http://0177.0.0.1/kill', 'octal IPv4 for 127.0.0.1'],
       ['http://0x7f.0x0.0x0.0x1/kill', 'hex IPv4 for 127.0.0.1'],
@@ -526,6 +535,19 @@ describe('OTel Budget Circuit-Breaker', () => {
       ['http://[0:0:0:0:0:0:0:1]/kill', 'uncompressed IPv6 loopback'],
       ['http://[fd00::1]/kill', 'IPv6 unique-local fc00::/7'],
       ['http://[fe80::1]/kill', 'IPv6 link-local fe80::/10'],
+      // A bracketed literal gets no DNS backstop — resolvedHostIsPrivate returns
+      // early for one — so validateKillCallbackUrl is the only gate for these.
+      ['http://[ff02::1]/kill', 'IPv6 all-nodes multicast on the local link'],
+      ['http://[ff02::2]/kill', 'IPv6 all-routers multicast'],
+      ['http://[ff05::1:3]/kill', 'IPv6 site-local multicast DHCP servers'],
+      ['http://[fec0::1]/kill', 'IPv6 deprecated site-local fec0::/10'],
+      ['http://[100::1]/kill', 'IPv6 discard-only 100::/64'],
+      ['http://[2001:db8::1]/kill', 'IPv6 documentation 2001:db8::/32'],
+      ['http://[3fff:0:0:0:0:0:0:1]/kill', 'IPv6 documentation 3fff::/20'],
+      ['http://[2001:2::1]/kill', 'IPv6 benchmarking 2001:2::/48'],
+      ['http://[2001:20::1]/kill', 'IPv6 ORCHIDv2 2001:20::/28'],
+      ['http://[2001:2f::1]/kill', 'IPv6 ORCHIDv2 upper edge 2001:2f::'],
+      ['http://[5f00::1]/kill', 'IPv6 SRv6 SIDs 5f00::/16'],
       ['http://[::ffff:127.0.0.1]/kill', 'IPv4-mapped loopback'],
       ['http://[::ffff:169.254.169.254]/kill', 'IPv4-mapped metadata service'],
       ['http://[::ffff:a9fe:a9fe]/kill', 'IPv4-mapped metadata service, hextet form'],
@@ -562,6 +584,15 @@ describe('OTel Budget Circuit-Breaker', () => {
       'http://[2606:4700:4700::1111]/kill',
       'http://[64:ff9b::cb00:7107]/kill',
       'http://[2002:cb00:7107::]/kill',
+      // Neighbours of the newly-refused ranges that are ordinary global unicast
+      // and must stay reachable: 2001:4860 is not 2001:db8/2001:2/2001:20 and
+      // must not be swept up by the protocol-assignment rules, 3ffe is outside
+      // 3fff::/20, and 5f01 is outside 5f00::/16.
+      'http://[2001:4860:4860::8888]/kill',
+      'http://[2001:db9::1]/kill',
+      'http://[2001:30::1]/kill',
+      'http://[3ffe::1]/kill',
+      'http://[5f01::1]/kill',
     ])('still accepts the public destination %s', (url) => {
       expect(validateKillCallbackUrl(url)).toBeNull()
       registerPolicy(killPolicy(url))
@@ -628,6 +659,9 @@ describe('OTel Budget Circuit-Breaker', () => {
       // A dotted-quad tail survives here; new URL() would have compressed it.
       ['::ffff:169.254.169.254', 'IPv4-mapped metadata service, dotted-quad tail'],
       ['64:ff9b:1::cb00:7107', 'NAT64 local-use prefix'],
+      ['ff02::1', 'all-nodes multicast'],
+      ['fec0::1', 'deprecated site-local'],
+      ['2001:db8::1', 'documentation'],
       ['not-an-address', 'unparseable — must fail closed, not be treated as public'],
     ])('refuses a name that resolves to %s (%s)', async (address) => {
       const fetchMock = vi.fn()
@@ -914,6 +948,59 @@ describe('OTel Budget Circuit-Breaker', () => {
       expect(new Set(reasons)).toEqual(new Set([KILL_CALLBACK_GENERIC_FAILURE]))
     })
 
+    // The docstring on invokeKillCallback used to claim the caller sees
+    // "exactly one bit — ok". It sees two: `attempted` separates a refusal that
+    // never left the process from a delivery that failed on the wire. This pins
+    // the contract the docstring now describes, including the deliberately
+    // accepted DNS oracle: attempted=false means only "no usable public address
+    // from this server", with the three DNS states collapsed into one answer.
+    it('exposes attempted as a second bit, and collapses the DNS states within it', async () => {
+      const dnsRefusals = [
+        // Resolves into private space.
+        await (async () => {
+          global.fetch = vi.fn() as unknown as typeof global.fetch
+          dnsLookup.mockResolvedValue([{ address: '10.1.2.3', family: 4 }])
+          return invokeKillCallback(killPolicy('https://a.example.com/kill'), killDecision)
+        })(),
+        // Does not resolve.
+        await (async () => {
+          global.fetch = vi.fn() as unknown as typeof global.fetch
+          dnsLookup.mockRejectedValue(new Error('ENOTFOUND'))
+          return invokeKillCallback(killPolicy('https://b.example.com/kill'), killDecision)
+        })(),
+        // Resolves to nothing.
+        await (async () => {
+          global.fetch = vi.fn() as unknown as typeof global.fetch
+          dnsLookup.mockResolvedValue([])
+          return invokeKillCallback(killPolicy('https://c.example.com/kill'), killDecision)
+        })(),
+      ]
+
+      // All three DNS states are one observation, and it is attempted=false.
+      for (const refusal of dnsRefusals) {
+        expect(refusal).toEqual({
+          attempted: false,
+          ok: false,
+          error: KILL_CALLBACK_GENERIC_FAILURE,
+        })
+      }
+
+      // A destination that passed the gate and then failed on the wire is
+      // attempted=true with the same error string — the reason does not
+      // distinguish them, but `attempted` does, and that is the whole leak.
+      dnsLookup.mockResolvedValue([{ address: '203.0.113.10', family: 4 }])
+      global.fetch = vi
+        .fn()
+        .mockRejectedValue(new TypeError('fetch failed')) as unknown as typeof global.fetch
+      expect(
+        await invokeKillCallback(killPolicy('https://d.example.com/kill'), killDecision)
+      ).toEqual({
+        attempted: true,
+        ok: false,
+        error: KILL_CALLBACK_GENERIC_FAILURE,
+      })
+    })
+
     it('does not leak the host or address into the reason string', async () => {
       dnsLookup.mockResolvedValue([{ address: '169.254.169.254', family: 4 }])
       const result = await invokeKillCallback(
@@ -969,6 +1056,27 @@ describe('OTel Budget Circuit-Breaker', () => {
       expect(validateKillCallbackUrl('http://10.0.0.5:8080/kill')).toContain(
         'not externally routable'
       )
+    })
+
+    it('does not let a dot-padded spelling claim an allowlist entry', () => {
+      process.env[KILL_CALLBACK_ALLOWLIST_ENV] = 'orchestrator.svc.internal,10.0.0.5'
+
+      // The waiver is the operator's, and it applies to the host the operator
+      // wrote down. A name carrying an empty label is not that host and is not
+      // resolvable either, so it is refused before the allowlist is consulted —
+      // rather than being normalised into the allowlisted spelling.
+      expect(
+        validateKillCallbackUrl('https://orchestrator.svc.internal../kill')
+      ).toContain('not externally routable')
+      expect(validateKillCallbackUrl('http://10.0.0.5../kill')).toContain(
+        'not externally routable'
+      )
+
+      // The exact host the operator opted in still works, trailing root dot
+      // included.
+      expect(
+        validateKillCallbackUrl('https://orchestrator.svc.internal./kill')
+      ).toBeNull()
     })
 
     it('does not let an unrelated host ride along on an allowlist entry', () => {
