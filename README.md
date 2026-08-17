@@ -551,7 +551,34 @@ RPC_URL=https://mainnet.base.org # Custom RPC (Alchemy/Infura recommended for pr
 SESSION_TTL_SECONDS=3600         # x402 session lifetime (default: 1 hour)
 FACTORY_ADDRESS=0x...            # For deploy_wallet and create_escrow
 NFT_CONTRACT_ADDRESS=0x...       # For deploy_wallet
+
+# Optional — otel_register_budget_policy circuit breaker
+# Comma-separated hosts whose private/loopback/link-local kill-callback URL is
+# explicitly permitted. Empty by default: a killCallbackUrl pointing into
+# private space is dropped (with a warning) and never POSTed to, though the
+# budget policy's spend cap is always registered and enforced regardless.
+# Set this only if your circuit-breaker webhook genuinely lives in-VPC.
+AGENTPAY_KILL_CALLBACK_ALLOWED_HOSTS=orchestrator.svc.internal
 ```
+
+**Kill-callback SSRF limits.** A `killCallbackUrl` must be http(s), must not
+embed credentials, and must not name a private, loopback, link-local or
+otherwise non-globally-routable address (RFC1918, CGNAT, multicast, reserved,
+IETF protocol assignments, benchmarking and the documentation ranges, plus the
+IPv6 equivalents and every IPv4-in-IPv6 transition form). Host names are
+resolved and re-checked against the same rules immediately before the callback
+fires. A single fixed 10s deadline covers DNS resolution and the POST together,
+so a resolver that never answers cannot hold span evaluation open.
+
+One gap is **not** closed: the connection is not pinned to the address that was
+validated, so a resolver that answers with a public address at check time and a
+private one at connect time (DNS rebinding) can still be reached. Closing it
+requires moving this call off global `fetch` onto `node:http`/`node:https` with
+a pinned `lookup`, which is tracked separately. If you need a hard guarantee
+today, front the webhook with a network-level egress allowlist. Undelivered
+callbacks report only `ok=false` with a single generic reason — the HTTP status
+and the specific failure are never returned to the caller, only logged
+server-side (origin only, never the callback path or query).
 
 ---
 
