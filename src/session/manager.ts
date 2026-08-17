@@ -136,24 +136,73 @@ export function recordSessionCall(sessionId: string): void {
   const session = store.get(sessionId);
   if (!session) return;
 
-  // Mutate callCount and lastUsedAt (the only mutable fields)
+  // Mutate callCount and lastUsedAt in place on the stored record.
+  // (endSession also mutates expiresAt, tokenExpiresAt, sessionToken and
+  // signature when a session is closed.)
   const mutable = session as { callCount: number; lastUsedAt: number };
   mutable.callCount += 1;
   mutable.lastUsedAt = Math.floor(Date.now() / 1000);
 }
 
 /**
- * Explicitly end a session (mark as expired by setting expiresAt to past).
+ * Explicitly end a session LOCALLY: force-expire the record and discard the
+ * stored token material (sessionToken + signature are overwritten) so the
+ * credential can no longer be read back out of this process.
+ *
+ * IMPORTANT — this is not revocation. The session token is a self-contained
+ * bearer credential signed at creation with its expiresAt baked into the
+ * signed payload; remote servers verify it offline (ecrecover) with no
+ * revocation registry to consult. Any copy of the token that already left
+ * this process (it is transmitted on every session fetch) remains
+ * technically valid to the remote endpoint until that baked-in expiry.
+ * Callers reporting on this operation must not claim otherwise — and the
+ * baked-in expiry is preserved in `tokenExpiresAt` precisely so they can
+ * report it truthfully after `expiresAt` has been forced to 0.
+ *
  * Returns true if the session was found and ended.
  */
 export function endSession(sessionId: string): boolean {
   const session = store.get(sessionId);
   if (!session) return false;
 
-  // Force-expire it
-  const mutable = session as { expiresAt: number };
+  // Force-expire it and scrub the local copy of the bearer credential.
+  const mutable = session as {
+    expiresAt: number;
+    tokenExpiresAt?: number;
+    sessionToken: string;
+    signature: string;
+  };
+  // Preserve when the issued token really lapses BEFORE zeroing expiresAt:
+  // ending the session does not move that moment, and it is the only local
+  // record of it. Written once, so ending an already-ended session cannot
+  // overwrite the truth with the 0 sentinel.
+  if (mutable.tokenExpiresAt === undefined) {
+    mutable.tokenExpiresAt = mutable.expiresAt;
+  }
   mutable.expiresAt = 0;
+  mutable.sessionToken = '';
+  mutable.signature = '';
   return true;
+}
+
+/**
+ * True if this session was explicitly ended locally (endSession) rather than
+ * simply reaching its natural expiry.
+ */
+export function wasEndedLocally(session: SessionRecord): boolean {
+  return session.tokenExpiresAt !== undefined;
+}
+
+/**
+ * When the ISSUED token stops being valid at the remote endpoint.
+ *
+ * For a live or naturally expired session this is just `expiresAt`. For an
+ * ended session `expiresAt` is the 0 sentinel that makes the record unusable,
+ * so the real expiry comes from `tokenExpiresAt`. Always use this for display:
+ * reporting the sentinel would claim the token lapsed in 1970.
+ */
+export function tokenExpiryOf(session: SessionRecord): number {
+  return session.tokenExpiresAt ?? session.expiresAt;
 }
 
 /**

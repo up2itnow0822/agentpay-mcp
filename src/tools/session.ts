@@ -31,6 +31,8 @@ import {
   isUrlCoveredBySession,
   buildSessionHeaders,
   decodeSessionToken,
+  wasEndedLocally,
+  tokenExpiryOf,
 } from '../session/manager.js';
 
 // ─── x402_session_start ────────────────────────────────────────────────────
@@ -58,8 +60,11 @@ export const X402SessionStartSchema = z.object({
     .max(86400 * 30)
     .optional()
     .describe(
-      'Session lifetime in seconds (default: SESSION_TTL_SECONDS env var or 3600). ' +
-      'Min: 60 seconds. Max: 30 days.'
+      'Session lifetime in seconds (default: SESSION_TTL_SECONDS env var or 3600 = 1 hour). ' +
+      'Min: 60 seconds. Max: 30 days (explicit opt-in). ' +
+      'Choose the shortest TTL that fits the task: session tokens are self-contained signed ' +
+      'bearer credentials that CANNOT be revoked once issued — x402_session_end only clears ' +
+      'local state, so a leaked token stays valid to the endpoint until this TTL elapses.'
     ),
   label: z
     .string()
@@ -115,7 +120,11 @@ export const x402SessionStartTool = {
       },
       ttl_seconds: {
         type: 'number',
-        description: 'Session TTL in seconds (default: 3600 / 1 hour). Max: 30 days.',
+        description:
+          'Session TTL in seconds (default: 3600 / 1 hour). Max: 30 days (explicit opt-in). ' +
+          'Prefer the shortest TTL that fits the task: the signed session token cannot be ' +
+          'revoked once issued (x402_session_end only clears local state), so a leaked token ' +
+          'stays valid to the endpoint until this TTL elapses.',
       },
       label: {
         type: 'string',
@@ -423,14 +432,20 @@ export async function handleX402SessionFetch(
     }
 
     if (lookup.expired) {
-      const expiredAt = new Date(lookup.session.expiresAt * 1000).toISOString();
+      // An ended session carries a 0 expiresAt sentinel; report the expiry
+      // baked into the issued token instead of claiming it lapsed in 1970.
+      const endedLocally = wasEndedLocally(lookup.session);
+      const tokenExpiresAt = new Date(tokenExpiryOf(lookup.session) * 1000).toISOString();
       return {
         content: [
           textContent(
             `⏰ **Session Expired**\n\n` +
             `  Session ID: ${input.session_id}\n` +
             `  Endpoint:   ${lookup.session.endpoint}\n` +
-            `  Expired at: ${expiredAt}\n\n` +
+            (endedLocally
+              ? `  Ended:      locally via x402_session_end\n` +
+                `  Expires:    ${tokenExpiresAt} (issued token expiry)\n\n`
+              : `  Expired at: ${tokenExpiresAt}\n\n`) +
             `Call x402_session_start to establish a new session for this endpoint.`
           ),
         ],
@@ -605,21 +620,29 @@ export async function handleX402SessionStatus(
       const { session, expired } = lookup;
       const ttlRemaining = Math.max(0, session.expiresAt - now);
       const decoded = decodeSessionToken(session.sessionToken);
+      // Ending a session force-expires the local record but cannot move the
+      // expiry baked into the issued token — report that one.
+      const endedLocally = wasEndedLocally(session);
+      const tokenExpiry = tokenExpiryOf(session);
+      const tokenStillValid = tokenExpiry > now;
 
-      let out = expired
-        ? `⏰ **Session Expired**\n\n`
-        : `🔐 **Session Details**\n\n`;
+      let out = endedLocally
+        ? `🛑 **Session Ended (locally)**\n\n`
+        : expired
+          ? `⏰ **Session Expired**\n\n`
+          : `🔐 **Session Details**\n\n`;
 
       out += `  Session ID:    ${session.sessionId}\n`;
       if (session.label) out += `  Label:         ${session.label}\n`;
-      out += `  Status:        ${expired ? '❌ Expired' : '✅ Active'}\n`;
+      out += `  Status:        ${endedLocally ? '🛑 Ended locally' : expired ? '❌ Expired' : '✅ Active'}\n`;
       out += `  Endpoint:      ${session.endpoint}\n`;
       out += `  Scope:         ${session.scope}\n`;
       out += `  Wallet:        ${session.walletAddress}\n\n`;
 
       out += `⏱️  **Timing**\n`;
       out += `  Created:       ${new Date(session.createdAt * 1000).toISOString()}\n`;
-      out += `  Expires:       ${new Date(session.expiresAt * 1000).toISOString()}\n`;
+      out += `  Expires:       ${new Date(tokenExpiry * 1000).toISOString()}` +
+        `${endedLocally ? ' (token expiry — unchanged by ending the session)' : ''}\n`;
       if (!expired) out += `  TTL Remaining: ${formatTtl(ttlRemaining)}\n`;
       out += `  Last Used:     ${session.lastUsedAt > 0 ? new Date(session.lastUsedAt * 1000).toISOString() : 'Never'}\n`;
       out += `  Call Count:    ${session.callCount}\n\n`;
@@ -634,6 +657,15 @@ export async function handleX402SessionStatus(
         out += `🔏 **Token Info**\n`;
         out += `  Protocol:      ${decoded.payload.version}\n`;
         out += `  Signature:     ${decoded.signature.slice(0, 20)}...${decoded.signature.slice(-8)}\n`;
+      } else if (endedLocally) {
+        out += `🔏 **Token**\n`;
+        out += `  Discarded — this session was ended and the stored token material\n`;
+        out += `  was scrubbed from this process.\n`;
+        out += tokenStillValid
+          ? `  ⚠️ Not revoked: the issued token cannot be revoked, so any copy that\n` +
+            `     already left this process stays technically valid to the endpoint\n` +
+            `     until ${new Date(tokenExpiry * 1000).toISOString()}.\n`
+          : `  Its own expiry has since passed, so a conforming endpoint rejects it.\n`;
       }
 
       return { content: [textContent(out)] };
@@ -698,9 +730,10 @@ export type X402SessionEndInput = z.infer<typeof X402SessionEndSchema>;
 export const x402SessionEndTool = {
   name: 'x402_session_end',
   description:
-    'Explicitly close an x402 V2 session before it expires naturally. ' +
-    'After calling this, x402_session_fetch will return an error for the closed session. ' +
-    'Useful for security hygiene or when you know a session is no longer needed.',
+    'Close an x402 V2 session locally before it expires naturally: this server discards its stored copy of the session token and x402_session_fetch will return an error for the closed session. ' +
+    'This is NOT server-side revocation — the signed bearer token cannot be revoked once issued, and any copy already sent to (or intercepted en route to) the remote endpoint remains technically valid there until the expiry baked into the token. ' +
+    'If you suspect the token leaked, treat it as live until that expiry and notify the endpoint operator. ' +
+    'Still useful hygiene: it stops further use from this process and scrubs the stored token material.',
   inputSchema: {
     type: 'object' as const,
     properties: {
@@ -729,28 +762,51 @@ export async function handleX402SessionEnd(
     }
 
     if (lookup.expired) {
-      return {
-        content: [
-          textContent(
-            `ℹ️ Session "${input.session_id}" was already expired.\n` +
-            `Endpoint: ${lookup.session.endpoint}`
-          ),
-        ],
-      };
+      const now = Math.floor(Date.now() / 1000);
+      const expiredSession = lookup.session;
+      const alreadyEnded = wasEndedLocally(expiredSession);
+      const tokenExpiry = tokenExpiryOf(expiredSession);
+      const tokenExpiresAtIso = new Date(tokenExpiry * 1000).toISOString();
+      const expiredEndpoint = expiredSession.endpoint;
+
+      // Scrub here too. An expired record lingers in the store until the next
+      // pruneExpired(), and until then the token material is still readable
+      // (e.g. x402_session_status token info), so ending must always clear it.
+      endSession(input.session_id);
+
+      let out = alreadyEnded
+        ? `ℹ️ Session "${input.session_id}" was already ended locally.\n\n`
+        : `ℹ️ Session "${input.session_id}" was already expired.\n\n`;
+      out += `  Endpoint:   ${expiredEndpoint}\n`;
+      out += `  Expires:    ${tokenExpiresAtIso} (issued token expiry)\n\n`;
+      out += `Local state cleared: this server holds no copy of the session token.\n\n`;
+      out += tokenStillValidNote(tokenExpiry > now, expiredEndpoint, tokenExpiresAtIso);
+
+      return { content: [textContent(out)] };
     }
 
     const { session } = lookup;
+    // Capture display fields BEFORE endSession: it force-expires the record
+    // and scrubs the stored token material in place (the expiry survives on
+    // the record as tokenExpiresAt so status can still report it).
+    const tokenExpiry = session.expiresAt;
+    const tokenExpiresAt = new Date(tokenExpiry * 1000).toISOString();
+    const endpoint = session.endpoint;
+    const callCount = session.callCount;
+    const tokenStillValid = tokenExpiry > Math.floor(Date.now() / 1000);
     endSession(input.session_id);
 
     return {
       content: [
         textContent(
-          `✅ **Session Closed**\n\n` +
+          `✅ **Session Closed (locally)**\n\n` +
           `  Session ID: ${session.sessionId}\n` +
-          `  Endpoint:   ${session.endpoint}\n` +
-          `  Calls made: ${session.callCount}\n\n` +
-          `The session has been closed and can no longer be used.\n` +
-          `Use x402_session_start to establish a new session when needed.`
+          `  Endpoint:   ${endpoint}\n` +
+          `  Calls made: ${callCount}\n\n` +
+          `Local state cleared: this server discarded its stored copy of the session\n` +
+          `token, and x402_session_fetch will refuse this session from now on.\n\n` +
+          tokenStillValidNote(tokenStillValid, endpoint, tokenExpiresAt) +
+          `\nUse x402_session_start to establish a new session when needed.`
         ),
       ],
     };
@@ -763,6 +819,36 @@ export async function handleX402SessionEnd(
 }
 
 // ─── Internal helpers ──────────────────────────────────────────────────────
+
+/**
+ * The honest closing note for an x402_session_end report.
+ *
+ * Ending a session is local-only: the issued token is a self-contained signed
+ * bearer credential with its expiry baked into the signed payload, and there
+ * is no revocation exchange, so a copy that already left this process stays
+ * valid to the endpoint until that expiry. Once the expiry has passed, say so
+ * instead of raising an alarm that no longer applies.
+ */
+function tokenStillValidNote(
+  stillValid: boolean,
+  endpoint: string,
+  expiresAtIso: string
+): string {
+  if (!stillValid) {
+    return (
+      `The token's own expiry has already passed, so a conforming endpoint\n` +
+      `rejects it from now on.\n`
+    );
+  }
+  return (
+    `⚠️ **Not revoked server-side.** The session token is a self-contained signed\n` +
+    `bearer credential and cannot be revoked once issued. Any copy that already\n` +
+    `left this process remains technically valid to ${endpoint}\n` +
+    `until it expires at ${expiresAtIso}.\n` +
+    `If you suspect the token leaked, treat it as live until then and notify the\n` +
+    `endpoint operator so they can block it server-side.\n`
+  );
+}
 
 /**
  * Format TTL seconds as a human-readable string.
