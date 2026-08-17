@@ -663,9 +663,11 @@ export async function handleX402SessionStatus(
       out += `  Call Count:    ${session.callCount}\n\n`;
 
       out += `💳 **Session Payment**\n`;
-      out += `  TX Hash:       ${session.paymentTxHash}\n`;
-      out += `  Amount:        ${session.paymentAmount} (base units)\n`;
-      out += `  Recipient:     ${session.paymentRecipient}\n`;
+      // 80 leaves headroom over a canonical 66-char tx hash rather than
+      // truncating at exactly the expected length.
+      out += `  TX Hash:       ${sanitizeUntrustedInline(session.paymentTxHash, 80)}\n`;
+      out += `  Amount:        ${sanitizeUntrustedInline(session.paymentAmount)} (base units)\n`;
+      out += `  Recipient:     ${sanitizeUntrustedInline(session.paymentRecipient)}\n`;
       out += `  Token:         ${session.paymentToken === '0x0000000000000000000000000000000000000000' ? 'ETH (native)' : session.paymentToken}\n\n`;
 
       if (decoded) {
@@ -715,7 +717,7 @@ export async function handleX402SessionStatus(
       out += `  Scope:    ${session.scope}\n`;
       out += `  TTL:      ${formatTtl(ttlRemaining)} ${ttlBar}\n`;
       out += `  Calls:    ${session.callCount}\n`;
-      out += `  Payment:  ${session.paymentAmount} base units → TX ${session.paymentTxHash.slice(0, 18)}...\n`;
+      out += `  Payment:  ${sanitizeUntrustedInline(session.paymentAmount)} base units → TX ${sanitizeUntrustedInline(session.paymentTxHash.slice(0, 18))}...\n`;
       out += '\n';
     }
 
