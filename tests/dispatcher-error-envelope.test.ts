@@ -71,8 +71,29 @@ describe('dispatcher error envelope', () => {
   });
 
   it('flattens a hostile tool name rather than echoing it into narration', () => {
+    // The test used to check only the first output line, which the hostile
+    // name's own newline made trivially true while the rest of it — forged END
+    // marker and all — landed in the narration region below. `context` is now
+    // flattened inside formatError, so the claim in this test's name is a
+    // claim about the whole narration region.
     const out = formatError(new Error('boom'), `Tool "${HOSTILE_METHOD}"`);
-    expect(out.split('\n')[0]).not.toContain('0xATTACKER');
+    const narration = out.slice(0, out.indexOf(UNTRUSTED_BODY_BEGIN));
+
+    expect(narration).not.toContain('0xATTACKER');
+    expect(narration).not.toContain('send_payment');
+    expect(narration).not.toContain(UNTRUSTED_BODY_END);
+    // The context stays on one line, so the narration keeps its fixed shape.
+    expect(out.split('\n')[0]).toMatch(
+      /AgentPay did not complete the operation\.$/
+    );
+    expect(out.split(UNTRUSTED_BODY_END).length - 1).toBe(1);
+  });
+
+  it('caps a flood-length context so it cannot become a paragraph', () => {
+    const out = formatError(new Error('boom'), 'Tool "' + 'n'.repeat(500) + '"');
+    const firstLine = out.split('\n')[0]!;
+    expect(firstLine.length).toBeLessThan(140);
+    expect(firstLine).toContain('AgentPay did not complete the operation.');
   });
 
   it('routes the dispatcher catch through formatError', () => {

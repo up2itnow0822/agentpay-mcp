@@ -9,6 +9,7 @@ import {
   formatError,
   formatHttpStatus,
   formatUntrustedBody,
+  hasInlineControlChars,
   sanitizeUntrustedInline,
   sanitizeUntrustedList,
   describeFinalUrl,
@@ -276,6 +277,74 @@ describe('sanitizeUntrustedInline', () => {
     const safe = sanitizeUntrustedInline('n'.repeat(500));
     expect(safe.length).toBe(64);
     expect(safe.endsWith('…')).toBe(true);
+  });
+});
+
+// ─── Regression: the control-character class vs. its own docstring ─────────
+
+/**
+ * The guard is documented as covering everything "that would let untrusted
+ * text span lines or reposition itself". The class it actually enforced was
+ * C0 + DEL + U+2028/U+2029, which left three whole families of such
+ * characters through — so the docstring described an invariant the code did
+ * not hold. These are the ones it missed.
+ */
+const REPOSITIONING_CHARS: Record<string, string> = {
+  'U+0085 NEL (a line terminator to Unicode-aware renderers)': '\u0085',
+  'U+0084 (C1 block)': '\u0084',
+  'U+200B ZERO WIDTH SPACE': '\u200b',
+  'U+FEFF BOM / ZWNBSP': '\ufeff',
+  'U+202A LRE (bidi embedding)': '\u202a',
+  'U+202D LRO (bidi override)': '\u202d',
+  'U+202E RLO (bidi override — reverses everything after it)': '\u202e',
+  'U+2066 LRI (bidi isolate)': '\u2066',
+  'U+2069 PDI (bidi isolate)': '\u2069',
+};
+
+/**
+ * Characters that look similar on paper but are deliberately allowed: they
+ * have ordinary uses in the values these guards run on (session labels,
+ * merchant names) and cannot restructure a line.
+ */
+const ALLOWED_INVISIBLES: Record<string, string> = {
+  'U+200C ZWNJ (orthographic in Persian/Indic scripts)': '\u200c',
+  'U+200D ZWJ (joins emoji sequences)': '\u200d',
+  'U+200E LRM (nudges neighbouring neutrals only)': '\u200e',
+  'U+200F RLM (nudges neighbouring neutrals only)': '\u200f',
+};
+
+describe('control characters that span lines or reposition text', () => {
+  for (const [name, ch] of Object.entries(REPOSITIONING_CHARS)) {
+    it(`flattens ${name} out of a narration value`, () => {
+      expect(sanitizeUntrustedInline(`a${ch}b`)).toBe('a b');
+    });
+
+    it(`rejects ${name} at the schema layer`, () => {
+      expect(hasInlineControlChars(`https://api.example.com/${ch}x`)).toBe(true);
+    });
+  }
+
+  for (const [name, ch] of Object.entries(ALLOWED_INVISIBLES)) {
+    it(`leaves ${name} alone`, () => {
+      expect(sanitizeUntrustedInline(`a${ch}b`)).toBe(`a${ch}b`);
+      expect(hasInlineControlChars(`a${ch}b`)).toBe(false);
+    });
+  }
+
+  it('stops an RLO from reversing the narration that follows the value', () => {
+    // Rendered, `Recipient: <RLO>...` turns the rest of the line — including
+    // AgentPay's own words — into right-to-left order, so a reader cannot
+    // trust that the line says what it appears to say.
+    const safe = sanitizeUntrustedInline('0xattacker\u202e');
+    expect(safe).not.toContain('\u202e');
+  });
+
+  it('keeps a ZWJ emoji session label readable', () => {
+    // The reason the allow-list above is not empty: a family emoji is one
+    // ZWJ-joined grapheme, and rejecting it would break a legitimate label.
+    const label = 'team \u{1F468}\u200d\u{1F469}\u200d\u{1F467} budget';
+    expect(hasInlineControlChars(label)).toBe(false);
+    expect(sanitizeUntrustedInline(label, 100)).toBe(label);
   });
 });
 

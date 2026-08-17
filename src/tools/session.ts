@@ -328,8 +328,12 @@ export async function handleX402SessionStart(
     out += `  TTL:           ${Math.ceil(ttlRemaining / 60)}m (expires ${expiresAt})\n\n`;
     out += `💳 **Session Payment**\n`;
     out += `  Amount:    ${paymentAmount.toString()} (base units)\n`;
-    out += `  Recipient: ${paymentRecipient}\n`;
-    out += `  TX Hash:   ${paymentTxHash}\n\n`;
+    // Both come from the SDK's payment log: `recipient` is the 402's own
+    // `payTo`, i.e. remote text, and `txHash` is whatever the write returned.
+    // They sit in the trusted narration region above the fence, so they are
+    // flattened and capped like every other untrusted value echoed there.
+    out += `  Recipient: ${sanitizeUntrustedInline(paymentRecipient, 64)}\n`;
+    out += `  TX Hash:   ${sanitizeUntrustedInline(paymentTxHash, 80)}\n\n`;
     out += `✅ **Next Steps**\n`;
     out += `  Use \`x402_session_fetch\` with session_id="${session.sessionId}" for all subsequent\n`;
     out += `  requests to ${sanitizeUntrustedUrl(input.endpoint)} — no further payments will be made during this session.\n`;

@@ -15,6 +15,7 @@ import {
   textContent,
   formatError,
   formatUntrustedBody,
+  sanitizeUntrustedInline,
   sanitizeUntrustedList,
   sanitizeUntrustedUrl,
   describeFinalUrl,
@@ -419,8 +420,12 @@ export async function handleX402Pay(
     if (paymentMade) {
       out += `\n💳 **Payment Made**\n`;
       out += `  Amount:    ${paymentAmount.toString()} (base units)\n`;
-      out += `  Recipient: ${paymentRecipient}\n`;
-      out += `  TX Hash:   ${paymentTxHash}\n`;
+      // Both come from the SDK's payment log: `recipient` is the 402's own
+      // `payTo`, i.e. remote text, and `txHash` is whatever the write returned.
+      // They sit in the trusted narration region above the fence, so they are
+      // flattened and capped like every other untrusted value echoed there.
+      out += `  Recipient: ${sanitizeUntrustedInline(paymentRecipient, 64)}\n`;
+      out += `  TX Hash:   ${sanitizeUntrustedInline(paymentTxHash, 80)}\n`;
       out += `\n💡 Tip: Use x402_session_start to pay once for a session and skip per-call payments.\n`;
     } else {
       out += `\n✅ No payment required\n`;
