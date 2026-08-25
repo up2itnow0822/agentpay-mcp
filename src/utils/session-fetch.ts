@@ -51,10 +51,16 @@ export function isSessionCredentialHeader(name: string): boolean {
 }
 
 /**
- * Convert a Fetch `HeadersInit` into a plain record so we can strip and
+ * Convert a Fetch headers init into a plain record so we can strip and
  * re-apply credential headers by name.
  */
-export function headersToRecord(headers: HeadersInit | undefined): Record<string, string> {
+function headerValueToString(value: string | readonly string[] | undefined): string {
+  if (typeof value === 'string') return value;
+  if (value === undefined) return '';
+  return value.join(', ');
+}
+
+export function headersToRecord(headers: RequestInit['headers']): Record<string, string> {
   if (!headers) return {};
   if (headers instanceof Headers) {
     const out: Record<string, string> = {};
@@ -64,9 +70,17 @@ export function headersToRecord(headers: HeadersInit | undefined): Record<string
     return out;
   }
   if (Array.isArray(headers)) {
-    return Object.fromEntries(headers);
+    const out: Record<string, string> = {};
+    for (const [key, value] of headers) {
+      out[key] = headerValueToString(value);
+    }
+    return out;
   }
-  return { ...headers };
+  const out: Record<string, string> = {};
+  for (const [key, value] of Object.entries(headers)) {
+    out[key] = headerValueToString(value);
+  }
+  return out;
 }
 
 /**
