@@ -36,6 +36,7 @@ import {
   resolveX402AssetDecimals,
 } from '../utils/payment-cap.js';
 import { enforceSpendPolicy } from './budget.js';
+import { fetchWithSessionCredentials } from '../utils/session-fetch.js';
 import {
   createSession,
   lookupSession,
@@ -494,32 +495,33 @@ export async function handleX402SessionFetch(
       };
     }
 
-    // Build request headers — inject session token automatically
+    // Build request headers — inject session token automatically.
+    // Session credentials are applied last and redirects are origin-bound
+    // (see fetchWithSessionCredentials).
     const sessionHeaders = buildSessionHeaders(session);
     const method = input.method ?? 'GET';
 
-    const mergedHeaders: Record<string, string> = {
+    const callerHeaders: Record<string, string> = {
       'Accept': 'application/json, text/plain, */*',
-      ...sessionHeaders,
       ...(input.headers ?? {}),
     };
 
     if (input.body && ['POST', 'PUT', 'PATCH'].includes(method)) {
-      if (!mergedHeaders['Content-Type']) {
-        mergedHeaders['Content-Type'] = 'application/json';
+      if (!callerHeaders['Content-Type']) {
+        callerHeaders['Content-Type'] = 'application/json';
       }
     }
 
     const requestInit: RequestInit = {
       method,
-      headers: mergedHeaders,
+      headers: callerHeaders,
       ...(input.body ? { body: input.body } : {}),
       signal: AbortSignal.timeout(timeoutMs),
     };
 
-    // Make request — plain fetch, NO x402 payment client
-    // The session token headers tell the server to bypass the payment flow
-    const response = await fetch(input.url, requestInit);
+    // Make request — plain fetch, NO x402 payment client.
+    // The session token headers tell the server to bypass the payment flow.
+    const response = await fetchWithSessionCredentials(input.url, requestInit, sessionHeaders);
     const responseText = await response.text();
 
     // Record the call in the session
