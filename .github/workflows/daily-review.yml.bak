@@ -51,10 +51,7 @@ permissions:
 jobs:
   review:
     name: Daily review
-    # Repo variable MAINTAINER_RUNNER overrides the runner (e.g. a self-hosted
-    # Docker runner label) — set it on private repos when hosted-runner billing
-    # is unavailable. Unset = GitHub-hosted ubuntu-latest.
-    runs-on: ${{ vars.MAINTAINER_RUNNER || 'ubuntu-latest' }}
+    runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
       - name: Check out repository (full history)

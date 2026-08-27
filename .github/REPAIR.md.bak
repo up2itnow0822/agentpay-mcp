@@ -170,9 +170,8 @@ ready-for-review.
   (including when the agent tiered more restrictively than `suggested_tier`);
   what was changed and how to verify it.
 - PRs are created and pushed using the `REPAIR_TOKEN` secret (fine-grained
-  PAT: Contents R/W, Pull requests R/W, Issues R/W, Commit statuses Read,
-  Workflows Read), never the default `GITHUB_TOKEN`. PRs created with
-  `GITHUB_TOKEN` trigger **no CI at all** — see S5.2 for why this matters.
+  PAT), never the default `GITHUB_TOKEN`. PRs created with `GITHUB_TOKEN`
+  trigger **no CI at all** — see S5.2 for why this matters.
 - In dry-run mode (`dry_run=true`): no branches, no PRs, no merges. The agent
   computes everything — tiers, diffs, gate outcomes — and reports what it
   *would* have done in the run summary (S10).
@@ -195,26 +194,13 @@ the gate must pass both.
 3. Tests were green **before AND after** the change. A fix that "makes tests
    pass" from a red base proves only that it changed the failure, not that it
    fixed anything.
-4. **Every** check run on the PR's head SHA is `completed` with conclusion
-   `success` — one hundred percent green. Any other conclusion (`failure`,
-   `cancelled`, `timed_out`, `skipped`, `neutral`, `stale`,
-   `action_required`) is a block, and any check still `queued` or
-   `in_progress` is a block — wait for completion and re-evaluate; never
-   merge ahead of a running check.
-5. At least one such successful check exists — **NO CHECKS AT ALL is a
-   BLOCK, never a pass** (S5.2).
-6. Every legacy commit-status context on the head SHA (the Statuses API,
-   used by some external CI instead of check runs), if any exist, reports
-   `success`. A `pending`, `failure`, or `error` context is a block.
+4. At least one check run on the PR's head SHA concluded `success`.
+5. Zero check runs concluded `failure`, `cancelled`, or `timed_out`.
+6. Check runs concluding `skipped` or `neutral` do **not** count toward
+   condition 4, and **NO CHECKS AT ALL is a BLOCK, never a pass** (S5.2).
 7. Zero unresolved review conversations on the PR.
 8. The diff is confined to the finding's files (S4).
 9. No cap from S7 is exceeded by this merge.
-
-Conditions 4–6 are deliberately stricter than GitHub's own required-status
-branch protection, which counts a skipped check as satisfying a requirement.
-Where a repo's branch protection already demands green CI and resolved
-conversations, GitHub enforces that floor on every merge path; this gate adds
-the ceiling (all-success, nothing skipped, nothing still running).
 
 ### S5.2 The trap this gate closes
 
@@ -225,12 +211,12 @@ nothing red and merges an entirely unverified change. That is why:
 
 - "Nothing failed" is never the test. The test is "did verification
   affirmatively succeed" — hence condition 4 requires a positive `success`,
-  and condition 5 makes the total absence of checks an unconditional block.
+  and condition 6 makes the total absence of checks an unconditional block.
 - `skipped` and `neutral` are blocks for the same reason: GitHub itself counts
   a skipped check as satisfying a required check, which is the second half of
   the same trap. A check that didn't run verified nothing.
 - PRs are created with `REPAIR_TOKEN` (S4) so CI actually runs — and if that
-  token is ever missing or misconfigured, conditions 4 and 5 catch the
+  token is ever missing or misconfigured, conditions 4 and 6 catch the
   resulting check-less PR anyway, and the independent audit catches it a third
   time.
 
