@@ -29,7 +29,9 @@
 #   CLAUDE_CODE_OAUTH_TOKEN  — from `claude setup-token` (subscription OAuth;
 #                              lasts ~1 year, re-run the command to renew)
 #   REPAIR_TOKEN             — fine-grained PAT: Contents R/W, Pull requests
-#                              R/W, Issues R/W, Workflows Read. Nothing else.
+#                              R/W, Issues R/W, Commit statuses Read (for the
+#                              legacy-status clause of the auto-merge gate),
+#                              Workflows Read. Nothing else.
 # =============================================================================
 
 name: Daily Repair
@@ -136,7 +138,7 @@ jobs:
               "" \
               "Repair will not fall back to the default GITHUB_TOKEN: PRs created with it trigger no CI at all, so the auto-merge gate would be judging silence and could merge unverified changes." \
               "" \
-              "Fix: create a fine-grained PAT (Contents R/W, Pull requests R/W, Issues R/W, Workflows Read — nothing else) and run:" \
+              "Fix: create a fine-grained PAT (Contents R/W, Pull requests R/W, Issues R/W, Commit statuses Read, Workflows Read — nothing else) and run:" \
               "    gh secret set REPAIR_TOKEN --repo ${GITHUB_REPOSITORY}" \
               "" \
               "Run: ${RUN_URL}")"
@@ -342,11 +344,15 @@ jobs:
           while IFS="$(printf '\t')" read -r NUM SHA; do
             [ -n "$NUM" ] || continue
             # --paginate emits one JSON object per page, concatenated; jq -s
-            # slurps them so the success count spans every page of check runs.
+            # slurps them so the counts span every page of check runs. The
+            # audit mirrors the merge gate: EVERY check run must be completed
+            # with conclusion "success", and zero check runs is itself a flag.
             RUNS_JSON="$(gh api --paginate "repos/${GITHUB_REPOSITORY}/commits/${SHA}/check-runs?per_page=100" || true)"
-            SUCCESS="$(printf '%s' "$RUNS_JSON" \
-              | jq -s '[.[].check_runs[]] | map(select(.conclusion == "success")) | length' || echo 0)"
-            if [ "${SUCCESS:-0}" -eq 0 ]; then
+            TOTAL="$(printf '%s' "$RUNS_JSON" \
+              | jq -s '[.[].check_runs[]] | length' || echo 0)"
+            NOT_SUCCESS="$(printf '%s' "$RUNS_JSON" \
+              | jq -s '[.[].check_runs[]] | map(select(.status != "completed" or .conclusion != "success")) | length' || echo 1)"
+            if [ "${TOTAL:-0}" -eq 0 ] || [ "${NOT_SUCCESS:-1}" -gt 0 ]; then
               FLAGGED="$FLAGGED #$NUM"
               if gh pr view "$NUM" --repo "$GITHUB_REPOSITORY" --json comments \
                    --jq '.comments[].body' | grep -q 'daily-repair-audit-flag'; then
@@ -354,7 +360,7 @@ jobs:
                 continue
               fi
               gh pr comment "$NUM" --repo "$GITHUB_REPOSITORY" --body \
-                "AUDIT FAILED: this automated-repair PR merged within the last 24 hours, but its merge commit has ZERO check runs with conclusion \"success\" — it merged unverified. Most likely cause: the PR was created with the default GITHUB_TOKEN (which triggers no CI) instead of REPAIR_TOKEN. Verify this change by hand or git revert it, then check that the REPAIR_TOKEN secret is set and valid. (marker: daily-repair-audit-flag)"
+                "AUDIT FAILED: this automated-repair PR merged within the last 24 hours, but its merge commit is not 100 percent green — either it has NO check runs at all, or at least one check run did not complete with conclusion \"success\" (failed, cancelled, timed out, skipped, neutral, stale, action_required, or still running) — it merged unverified. Most likely cause: the PR was created with the default GITHUB_TOKEN (which triggers no CI) instead of REPAIR_TOKEN. Verify this change by hand or git revert it, then check that the REPAIR_TOKEN secret is set and valid. (marker: daily-repair-audit-flag)"
             fi
           done < <(jq -r --arg cutoff "$CUTOFF" \
             '.[] | select(.mergedAt >= $cutoff and .mergeCommit != null)
@@ -363,11 +369,11 @@ jobs:
           if [ -n "$FLAGGED" ]; then
             TITLE="Daily Repair AUDIT — unverified merges in ${GITHUB_REPOSITORY##*/}"
             BODY="$(printf '%s\n' \
-              "The independent post-repair audit found automated-repair PR(s) merged in the last 24 hours whose merge commit has zero successful check runs:${FLAGGED}" \
+              "The independent post-repair audit found automated-repair PR(s) merged in the last 24 hours whose merge commit is not 100 percent green (no check runs at all, or at least one check run not completed with conclusion \"success\"):${FLAGGED}" \
               "" \
               "These merged unverified. Verify or git revert each one." \
               "" \
-              "Likely cause: REPAIR_TOKEN missing or invalid, so PRs were created with the default GITHUB_TOKEN and no CI ran. Check the secret (fine-grained PAT: Contents R/W, Pull requests R/W, Issues R/W, Workflows Read)." \
+              "Likely cause: REPAIR_TOKEN missing or invalid, so PRs were created with the default GITHUB_TOKEN and no CI ran. Check the secret (fine-grained PAT: Contents R/W, Pull requests R/W, Issues R/W, Commit statuses Read, Workflows Read)." \
               "" \
               "Run: ${RUN_URL}")"
             gh label create daily-review-failed --color B60205 \

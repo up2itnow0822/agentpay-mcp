@@ -170,8 +170,9 @@ ready-for-review.
   (including when the agent tiered more restrictively than `suggested_tier`);
   what was changed and how to verify it.
 - PRs are created and pushed using the `REPAIR_TOKEN` secret (fine-grained
-  PAT), never the default `GITHUB_TOKEN`. PRs created with `GITHUB_TOKEN`
-  trigger **no CI at all** — see S5.2 for why this matters.
+  PAT: Contents R/W, Pull requests R/W, Issues R/W, Commit statuses Read,
+  Workflows Read), never the default `GITHUB_TOKEN`. PRs created with
+  `GITHUB_TOKEN` trigger **no CI at all** — see S5.2 for why this matters.
 - In dry-run mode (`dry_run=true`): no branches, no PRs, no merges. The agent
   computes everything — tiers, diffs, gate outcomes — and reports what it
   *would* have done in the run summary (S10).
@@ -224,12 +225,12 @@ nothing red and merges an entirely unverified change. That is why:
 
 - "Nothing failed" is never the test. The test is "did verification
   affirmatively succeed" — hence condition 4 requires a positive `success`,
-  and condition 6 makes the total absence of checks an unconditional block.
+  and condition 5 makes the total absence of checks an unconditional block.
 - `skipped` and `neutral` are blocks for the same reason: GitHub itself counts
   a skipped check as satisfying a required check, which is the second half of
   the same trap. A check that didn't run verified nothing.
 - PRs are created with `REPAIR_TOKEN` (S4) so CI actually runs — and if that
-  token is ever missing or misconfigured, conditions 4 and 6 catch the
+  token is ever missing or misconfigured, conditions 4 and 5 catch the
   resulting check-less PR anyway, and the independent audit catches it a third
   time.
 
