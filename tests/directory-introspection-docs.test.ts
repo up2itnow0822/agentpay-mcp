@@ -1,5 +1,7 @@
 import { readFileSync } from 'node:fs';
-import { describe, expect, it } from 'vitest';
+import { execFileSync, spawnSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
+import { beforeAll, describe, expect, it } from 'vitest';
 
 const doc = readFileSync(new URL('../docs/directory-introspection-readiness.md', import.meta.url), 'utf8');
 const proxyDoc = readFileSync(new URL('../docs/x402-native-vs-stripe-proxy.md', import.meta.url), 'utf8');
@@ -8,8 +10,18 @@ const packageJson = JSON.parse(readFileSync(new URL('../package.json', import.me
 const indexSource = readFileSync(new URL('../src/index.ts', import.meta.url), 'utf8');
 const smithery = readFileSync(new URL('../smithery.yaml', import.meta.url), 'utf8');
 const glama = readFileSync(new URL('../glama.json', import.meta.url), 'utf8');
+const projectRoot = fileURLToPath(new URL('..', import.meta.url));
+const tscBin = fileURLToPath(new URL('../node_modules/typescript/bin/tsc', import.meta.url));
+const cliEntry = fileURLToPath(new URL('../dist/index.js', import.meta.url));
 
-describe('directory introspection readiness docs', () => {
+describe.sequential('directory introspection readiness docs', () => {
+  beforeAll(() => {
+    execFileSync(process.execPath, [tscBin], {
+      cwd: projectRoot,
+      stdio: 'pipe',
+    });
+  }, 120_000);
+
   it('documents the catalog install paths and MCP identity', () => {
     for (const required of [
       'agentpay-mcp',
@@ -66,7 +78,27 @@ describe('directory introspection readiness docs', () => {
   });
 
   it('keeps runtime MCP version aligned with package metadata', () => {
-    expect(indexSource).toContain(`version: '${packageJson.version}'`);
-    expect(indexSource).toContain(`AgentPay MCP v${packageJson.version} started.`);
+    expect(indexSource).toContain('const PACKAGE_VERSION = packageJson.version;');
+    expect(indexSource).toContain('version: PACKAGE_VERSION');
+    expect(indexSource).toContain('AgentPay MCP v${PACKAGE_VERSION} started.');
+  });
+
+  it('prints CLI metadata without starting the MCP server', () => {
+    const version = spawnSync(process.execPath, [cliEntry, '--version'], {
+      cwd: projectRoot,
+      encoding: 'utf8',
+    });
+    const help = spawnSync(process.execPath, [cliEntry, '--help'], {
+      cwd: projectRoot,
+      encoding: 'utf8',
+    });
+
+    expect(version.status).toBe(0);
+    expect(help.status).toBe(0);
+    expect(version.stdout.trim()).toBe(packageJson.version);
+    expect(help.stdout).toContain('Usage:');
+    expect(help.stdout).toContain('--version');
+    expect(`${version.stdout}\n${help.stdout}`).not.toContain('started.');
+    expect(`${version.stderr}\n${help.stderr}`).not.toContain('started.');
   });
 });
