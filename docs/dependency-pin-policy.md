@@ -1,17 +1,26 @@
 # Payment-critical dependency pin policy
 
-AgentPay MCP treats crypto verifier and signing dependencies as payment-critical infrastructure. A floating semver range is not acceptable when a fresh install can change the code path that parses a 402 challenge, derives an account, signs a payment, verifies a receipt, or maps a chain.
+AgentPay MCP treats crypto verifier and signing dependencies as payment-critical
+infrastructure. A floating semver range is not acceptable when a fresh install
+can change the code path that parses a 402 challenge, derives an account, signs
+a payment, verifies a receipt, or maps a chain.
 
 ## Current pin
 
-- `viem`: pinned exactly to `2.52.2`
-- `package.json` dependency: `"viem": "2.52.2"`
-- root npm override: `"viem": "2.52.2"`
-- reason: `viem` `2.48.8` exposed a broken `@noble/curves` import path in the x402 payment ecosystem, which is why AgentPay previously held `2.48.7` exactly. `2.52.2` moves the exact, smoke-tested pin forward past that breakage and ships a newer transitive tree than `2.48.7` (`ws` `8.20.1` vs `8.18.3`, `ox` `0.14.29` vs `0.14.20`). Pins age: when the security gate flags a transitive advisory against the current pin (for example, `ws` advisories fixed only in later `viem` releases), bump the pin through the upgrade process below rather than relaxing it to a range.
+- `viem`: pinned exactly to `2.56.0`
+- `package.json` dependency: `"viem": "2.56.0"`
+- root npm override: `"viem": "2.56.0"`
+- reason: `viem` `2.48.8` exposed a broken `@noble/curves` import path in the
+  x402 payment ecosystem, which is why AgentPay previously held `2.48.7`
+  exactly. The `2.56.0` pin includes `ws` `8.21.0`, which clears the
+  memory-exhaustion advisory affecting the prior `2.52.2` pin. Pins age: when
+  the security gate flags a transitive advisory, bump the pin through the
+  upgrade process below rather than relaxing it to a range.
 
 ## Libraries covered by this policy
 
-Pin exactly, or document an explicit hard override, for any package that touches:
+Pin exactly, or document an explicit hard override, for any package that
+touches:
 
 - wallet/account derivation
 - signature creation or verification
@@ -20,22 +29,30 @@ Pin exactly, or document an explicit hard override, for any package that touches
 - chain metadata used to decide whether a payment can be signed
 - crypto hash, curve, address, or ABI encoding paths
 
-Today that includes `viem` and its crypto import surface. If AgentPay adds a direct dependency on `@noble/*`, `@scure/*`, `ox`, an x402 SDK package, or a facilitator client, that dependency must be reviewed under this policy before release.
+Today that includes `viem` and its crypto import surface. If AgentPay adds a
+direct dependency on `@noble/*`, `@scure/*`, `ox`, an x402 SDK package, or a
+facilitator client, that dependency must be reviewed under this policy before
+release.
 
 ## Release gate
 
-Before publishing a package that changes x402 payment paths or crypto dependencies, run:
+Before publishing a package that changes x402 payment paths or crypto
+dependencies, run:
 
 ```bash
 npm run build
 npm run smoke:clean-install
 ```
 
-The clean-install smoke creates a fresh temporary consumer project, installs the packed AgentPay MCP tarball, imports `viem`, `viem/accounts`, `viem/chains`, AgentPay's packaged `x402_pay` tool, and AgentPay's wallet client utility, then confirms the resolved `viem` version is exactly `2.52.2`.
+The clean-install smoke creates a fresh temporary consumer project, installs the
+packed AgentPay MCP tarball, imports `viem`, `viem/accounts`, `viem/chains`,
+AgentPay's packaged `x402_pay` tool, and AgentPay's wallet client utility, then
+confirms the resolved `viem` version is exactly `2.56.0`.
 
 A release must fail if:
 
-- the root package uses `^`, `~`, `>=`, `latest`, or any non-exact range for `viem`
+- the root package uses `^`, `~`, `>=`, `latest`, or any non-exact range for
+  `viem`
 - the root override does not match the dependency pin
 - a clean install resolves the x402 verifier path to a different `viem` version
 - packaged AgentPay x402 imports fail in a fresh consumer project
@@ -48,6 +65,9 @@ A release must fail if:
 3. Refresh `package-lock.json`.
 4. Run typecheck, tests, build, pack dry-run, and clean-install smoke.
 5. Preserve proof under `ops/proofs/` before publishing.
-6. Publish only after the proof shows the same exact dependency version in a clean consumer install.
+6. Publish only after the proof shows the same exact dependency version in a
+   clean consumer install.
 
-Do not relax this policy for convenience. Payment libraries can break buyer agents without changing AgentPay source code, so deterministic installs are part of the product contract.
+Do not relax this policy for convenience. Payment libraries can break buyer
+agents without changing AgentPay source code, so deterministic installs are part
+of the product contract.
