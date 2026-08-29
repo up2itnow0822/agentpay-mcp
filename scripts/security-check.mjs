@@ -19,7 +19,7 @@ if (result.status === 0) {
 }
 
 const environmentFailurePattern =
-  /audit endpoint returned an error|EAI_AGAIN|ECONNRESET|ECONNREFUSED|ETIMEDOUT|ENOTFOUND|E403|E401|429|5\d\d/i
+  /audit endpoint returned an error|\b(?:EAI_AGAIN|ECONNRESET|ECONNREFUSED|ETIMEDOUT|ENOTFOUND|E401|E403|E429)\b|\b(?:HTTP|status(?: code)?)\s*[:=]?\s*(?:401|403|429|5\d\d)\b/i
 const hasEnvironmentFailure = environmentFailurePattern.test(combined)
 
 if (hasEnvironmentFailure) {

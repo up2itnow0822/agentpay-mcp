@@ -7,7 +7,7 @@ import { spawnSync } from 'node:child_process';
 
 const repoRoot = dirname(dirname(fileURLToPath(import.meta.url)));
 const packageJson = JSON.parse(readFileSync(join(repoRoot, 'package.json'), 'utf8'));
-const expectedViem = '2.52.2';
+const expectedViem = '2.56.0';
 
 function assert(condition, message) {
   if (!condition) {
@@ -71,12 +71,12 @@ try {
   run('npm', ['install', '--ignore-scripts', '--no-audit', '--no-fund'], { cwd: smokeAppDir });
 
   const smoke = `
-    const fs = require('fs');
+    const { spawnSync } = require('child_process');
     const viemPkg = require('viem/package.json');
     const agentpayPkg = require('agentpay-mcp/package.json');
-    const agentpayDist = fs.readFileSync(require.resolve('agentpay-mcp'), 'utf8');
     if (viemPkg.version !== '${expectedViem}') throw new Error('resolved viem ' + viemPkg.version);
-    if (!agentpayDist.includes('AgentPay MCP v' + agentpayPkg.version + ' started.')) throw new Error('packed dist banner does not match package version ' + agentpayPkg.version);
+    const version = spawnSync(process.execPath, [require.resolve('agentpay-mcp'), '--version'], { encoding: 'utf8' });
+    if (version.status !== 0 || version.stdout.trim() !== agentpayPkg.version) throw new Error('packed CLI version does not match package version ' + agentpayPkg.version);
     const { createWalletClient, http, parseEther, formatUnits } = require('viem');
     const { privateKeyToAccount } = require('viem/accounts');
     const { base, baseSepolia } = require('viem/chains');

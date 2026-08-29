@@ -60,16 +60,17 @@
   },
   "author": "AgentNexus",
   "engines": {
-    "node": ">=18.0.0"
+    "node": ">=18.14.1"
   },
   "dependencies": {
+    "@hono/node-server": "1.19.17",
     "@modelcontextprotocol/sdk": "^1.0.4",
     "agentwallet-sdk": "^6.2.1",
-    "viem": "2.52.2",
+    "viem": "2.56.0",
     "zod": "^3.22.4"
   },
   "overrides": {
-    "viem": "2.52.2"
+    "viem": "2.56.0"
   },
   "devDependencies": {
     "@types/node": "^20.11.0",

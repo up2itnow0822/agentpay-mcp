@@ -7,7 +7,7 @@ const readme = readFileSync(new URL('../README.md', import.meta.url), 'utf8');
 const policy = readFileSync(new URL('../docs/dependency-pin-policy.md', import.meta.url), 'utf8');
 const smoke = readFileSync(new URL('../scripts/clean-install-x402-smoke.mjs', import.meta.url), 'utf8');
 
-const expectedViem = '2.52.2';
+const expectedViem = '2.56.0';
 
 describe('payment-critical dependency pin policy', () => {
   it('pins viem exactly in package metadata and lockfile', () => {
@@ -22,7 +22,7 @@ describe('payment-critical dependency pin policy', () => {
   it('documents the release gate for payment-critical crypto libraries', () => {
     for (const required of [
       'Payment-critical dependency pin policy',
-      '`viem`: pinned exactly to `2.52.2`',
+      '`viem`: pinned exactly to `2.56.0`',
       'x402 payment-required parsing',
       'receipt, transaction, or payment envelope validation',
       'npm run smoke:clean-install',
@@ -33,7 +33,7 @@ describe('payment-critical dependency pin policy', () => {
     }
 
     expect(readme).toContain('docs/dependency-pin-policy.md');
-    expect(readme).toContain('AgentPay pins `viem` exactly at `2.52.2`');
+    expect(readme).toContain('AgentPay pins `viem` exactly at `2.56.0`');
   });
 
   it('smoke script imports the x402 verifier path from a fresh packed install', () => {
