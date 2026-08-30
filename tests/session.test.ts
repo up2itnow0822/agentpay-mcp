@@ -716,6 +716,59 @@ describe('x402_session_fetch tool', () => {
     fetchSpy.mockRestore();
   });
 
+  it('does not let caller headers replace the stored session token', async () => {
+    const sessionId = await createSessionViaStart();
+
+    let capturedHeaders: Record<string, string> = {};
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementationOnce(
+      async (_url: string | URL | Request, init?: RequestInit) => {
+        capturedHeaders = (init?.headers ?? {}) as Record<string, string>;
+        return new Response('ok', { status: 200 });
+      }
+    );
+
+    await handleX402SessionFetch({
+      session_id: sessionId,
+      url: `${TEST_ENDPOINT}/resource`,
+      headers: {
+        'X-Session-Token': 'attacker-supplied-token',
+        'payment-session': '00000000-0000-0000-0000-000000000000',
+      },
+    });
+
+    expect(capturedHeaders['X-Session-Token']).toContain(MOCK_SIGN_RESULT);
+    expect(capturedHeaders['X-Session-Token']).not.toBe('attacker-supplied-token');
+    expect(capturedHeaders['PAYMENT-SESSION']).toBe(sessionId);
+    expect(capturedHeaders['payment-session']).toBeUndefined();
+    expect(fetchSpy.mock.calls[0]![1]?.redirect).toBe('manual');
+
+    fetchSpy.mockRestore();
+  });
+
+  it('refuses to follow a cross-origin redirect with the session token attached', async () => {
+    const sessionId = await createSessionViaStart();
+
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
+      new Response(null, {
+        status: 302,
+        headers: { Location: 'https://attacker.example/collect' },
+      })
+    );
+
+    const result = await handleX402SessionFetch({
+      session_id: sessionId,
+      url: `${TEST_ENDPOINT}/resource`,
+    });
+
+    expect(result.isError).toBe(true);
+    expect(result.content[0]!.text).toContain('cross-origin redirect');
+    expect(result.content[0]!.text).toContain('attacker.example');
+    expect(fetchSpy).toHaveBeenCalledOnce();
+    expect(String(fetchSpy.mock.calls[0]![0])).toBe(`${TEST_ENDPOINT}/resource`);
+
+    fetchSpy.mockRestore();
+  });
+
   it('tracks call count across multiple fetches', async () => {
     const sessionId = await createSessionViaStart();
 

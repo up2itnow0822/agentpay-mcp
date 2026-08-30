@@ -481,6 +481,79 @@ describe('x402_pay tool', () => {
     }
   });
 
+  it('keeps the stored session token when caller headers try to override it', async () => {
+    _clearAllSessions();
+    const session = await createSession({
+      endpoint: 'https://session.example.com/v1',
+      scope: 'prefix',
+      ttlSeconds: 3600,
+      paymentTxHash: '0xsessiontx',
+      paymentAmount: 1_000_000n,
+      paymentToken: '0x0000000000000000000000000000000000000000',
+      paymentRecipient: '0xfeedfacefeedfacefeedfacefeedfacefeedface',
+      walletAddress: '0x1234567890123456789012345678901234567890',
+      signMessage: async () => '0xsig',
+    });
+
+    let capturedHeaders: Record<string, string> = {};
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementationOnce(
+      async (_url: string | URL | Request, init?: RequestInit) => {
+        capturedHeaders = (init?.headers ?? {}) as Record<string, string>;
+        return new Response('{"ok":true}', { status: 200 });
+      }
+    );
+
+    try {
+      const result = await handleX402Pay({
+        url: 'https://session.example.com/v1/data',
+        headers: { 'X-Session-Token': '', 'PAYMENT-SESSION': 'forged' },
+      });
+
+      expect(result.content[0]!.text).toContain('Session Used');
+      expect(capturedHeaders['X-Session-Token']).toBe(session.sessionToken);
+      expect(capturedHeaders['PAYMENT-SESSION']).toBe(session.sessionId);
+      expect(fetchSpy.mock.calls[0]![1]?.redirect).toBe('manual');
+      expect(mockX402Fetch).not.toHaveBeenCalled();
+    } finally {
+      fetchSpy.mockRestore();
+      _clearAllSessions();
+    }
+  });
+
+  it('does not fall through to a second payment after a cross-origin session redirect', async () => {
+    _clearAllSessions();
+    await createSession({
+      endpoint: 'https://session.example.com/v1',
+      scope: 'prefix',
+      ttlSeconds: 3600,
+      paymentTxHash: '0xsessiontx',
+      paymentAmount: 1_000_000n,
+      paymentToken: '0x0000000000000000000000000000000000000000',
+      paymentRecipient: '0xfeedfacefeedfacefeedfacefeedfacefeedface',
+      walletAddress: '0x1234567890123456789012345678901234567890',
+      signMessage: async () => '0xsig',
+    });
+
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
+      new Response(null, {
+        status: 302,
+        headers: { Location: 'https://attacker.example/402' },
+      })
+    );
+
+    try {
+      const result = await handleX402Pay({ url: 'https://session.example.com/v1/data' });
+
+      expect(result.isError).toBe(true);
+      expect(result.content[0]!.text).toContain('cross-origin redirect');
+      expect(mockX402Fetch).not.toHaveBeenCalled();
+      expect(fetchSpy).toHaveBeenCalledOnce();
+    } finally {
+      fetchSpy.mockRestore();
+      _clearAllSessions();
+    }
+  });
+
   it('caps how many offered networks/schemes a 402 can list', async () => {
     // Without a cap, a hostile 402 can flood the narration region with an
     // unbounded number of server-controlled (if individually short) values.
