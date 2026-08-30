@@ -10,6 +10,7 @@ import type { Address } from 'viem'
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type AnyWallet = any
 import { getWallet } from '../utils/client.js'
+import { assertConfiguredChain } from '../utils/wallet-chain.js'
 import { textContent, formatError } from '../utils/format.js'
 import { enforceSpendPolicy } from './budget.js'
 
@@ -22,7 +23,7 @@ export const SwapTokensSchema = z.object({
   chainId: z
     .number()
     .int()
-    .describe('Chain ID where the swap will execute (e.g. 8453 for Base Mainnet)'),
+    .describe('Chain ID of the configured wallet (must match CHAIN_ID, e.g. 8453)'),
   slippageBps: z
     .number()
     .int()
@@ -48,7 +49,10 @@ export const swapTokensTool = {
       fromSymbol: { type: 'string', description: 'Symbol of token to sell (e.g. "USDC")' },
       toSymbol: { type: 'string', description: 'Symbol of token to buy (e.g. "WETH")' },
       amount: { type: 'string', description: 'Amount to sell in human-readable units' },
-      chainId: { type: 'number', description: 'Chain ID (8453=Base, 42161=Arbitrum, 10=Optimism, 137=Polygon)' },
+      chainId: {
+        type: 'number',
+        description: 'Chain ID of the configured wallet (must match CHAIN_ID; 8453=Base Mainnet)',
+      },
       slippageBps: { type: 'number', description: 'Slippage in basis points (default: 50)' },
     },
     required: ['fromSymbol', 'toSymbol', 'amount', 'chainId'],
@@ -63,8 +67,9 @@ export async function handleSwapTokens(
   try {
     const wallet = getWallet()
     const registry = getGlobalRegistry()
+    const chainId = assertConfiguredChain(input.chainId)
 
-    const fromToken = registry.getToken(input.fromSymbol.toUpperCase(), input.chainId)
+    const fromToken = registry.getToken(input.fromSymbol.toUpperCase(), chainId)
     if (!fromToken) {
       throw new Error(
         `Token "${input.fromSymbol}" not found for chain ${input.chainId}. ` +
@@ -72,7 +77,7 @@ export async function handleSwapTokens(
       )
     }
 
-    const toToken = registry.getToken(input.toSymbol.toUpperCase(), input.chainId)
+    const toToken = registry.getToken(input.toSymbol.toUpperCase(), chainId)
     if (!toToken) {
       throw new Error(
         `Token "${input.toSymbol}" not found for chain ${input.chainId}. ` +
@@ -145,7 +150,7 @@ export async function handleSwapTokens(
                   gasEstimate: result.quote.gasEstimate?.toString(),
                 }
               : null,
-            chainId: input.chainId,
+            chainId,
           })
         ),
       ],

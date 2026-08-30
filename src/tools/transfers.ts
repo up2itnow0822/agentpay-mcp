@@ -9,6 +9,7 @@ import type { Address } from 'viem'
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type AnyCtx = any
 import { getWallet, getConfig } from '../utils/client.js'
+import { assertConfiguredChain } from '../utils/wallet-chain.js'
 import { textContent, formatError } from '../utils/format.js'
 import { enforceSpendPolicy } from './budget.js'
 
@@ -16,7 +17,10 @@ import { enforceSpendPolicy } from './budget.js'
 
 export const SendTokenSchema = z.object({
   tokenSymbol: z.string().describe('Token symbol, e.g. "USDC"'),
-  chainId: z.number().int().describe('Chain ID where the token lives, e.g. 8453'),
+  chainId: z
+    .number()
+    .int()
+    .describe('Chain ID of the configured wallet (must match CHAIN_ID, e.g. 8453)'),
   recipientAddress: z.string().describe('Recipient wallet address (0x-prefixed)'),
   amount: z
     .string()
@@ -36,7 +40,10 @@ export const sendTokenTool = {
     type: 'object' as const,
     properties: {
       tokenSymbol: { type: 'string', description: 'Token symbol (e.g. "USDC", "WETH")' },
-      chainId: { type: 'number', description: 'Chain ID (e.g. 8453 for Base Mainnet)' },
+      chainId: {
+        type: 'number',
+        description: 'Chain ID of the configured wallet (must match CHAIN_ID, e.g. 8453)',
+      },
       recipientAddress: { type: 'string', description: 'Recipient address (0x-prefixed)' },
       amount: { type: 'string', description: 'Amount in human-readable units (e.g. "10.5")' },
     },
@@ -50,8 +57,9 @@ export async function handleSendToken(
   try {
     const wallet = getWallet()
     const registry = getGlobalRegistry()
+    const chainId = assertConfiguredChain(input.chainId)
 
-    const token = registry.getToken(input.tokenSymbol.toUpperCase(), input.chainId)
+    const token = registry.getToken(input.tokenSymbol.toUpperCase(), chainId)
     if (!token) {
       throw new Error(
         `Token "${input.tokenSymbol}" not found for chain ${input.chainId}. ` +
@@ -98,7 +106,7 @@ export async function handleSendToken(
             to: input.recipientAddress,
             amount: input.amount,
             rawAmount: rawAmount.toString(),
-            chainId: input.chainId,
+            chainId,
           })
         ),
       ],
@@ -118,7 +126,7 @@ export const GetBalancesSchema = z.object({
     .number()
     .int()
     .optional()
-    .describe('Chain ID to query balances on. Defaults to the configured wallet chain.'),
+    .describe('Chain ID to query. Must match the configured wallet chain when provided.'),
 })
 
 export type GetBalancesInput = z.infer<typeof GetBalancesSchema>
@@ -133,7 +141,7 @@ export const getBalancesTool = {
     properties: {
       chainId: {
         type: 'number',
-        description: 'Chain ID (defaults to the configured wallet chain)',
+        description: 'Chain ID (must match the configured wallet chain; defaults to CHAIN_ID)',
       },
     },
     required: [],
@@ -146,7 +154,9 @@ export async function handleGetBalances(
   try {
     const wallet = getWallet()
     const config = getConfig()
-    const chainId = input.chainId ?? config.chainId
+    const chainId = input.chainId === undefined
+      ? config.chainId
+      : assertConfiguredChain(input.chainId)
 
     const ctx: AnyCtx = {
       publicClient: wallet.publicClient,
