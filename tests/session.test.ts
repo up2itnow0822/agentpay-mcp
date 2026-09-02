@@ -1479,6 +1479,71 @@ describe('Session manager (direct unit tests)', () => {
     expect(found).toBeUndefined();
   });
 
+  it('findSessionForUrl prefers the longest overlapping prefix regardless of insert order', async () => {
+    const shared = {
+      scope: 'prefix' as const,
+      walletAddress: '0xwallet',
+      paymentTxHash: '0xtx',
+      paymentAmount: 100n,
+      paymentToken: '0x0000000000000000000000000000000000000000',
+      paymentRecipient: '0xrecip',
+      signMessage: makeSignFn(),
+    };
+
+    await createSession({ ...shared, endpoint: 'https://api.example.com/v1' });
+    await createSession({ ...shared, endpoint: 'https://api.example.com/v1/premium' });
+
+    const found = findSessionForUrl('https://api.example.com/v1/premium/data');
+    expect(found).toBeDefined();
+    expect(found!.endpoint).toBe('https://api.example.com/v1/premium');
+  });
+
+  it('findSessionForUrl still prefers the longest prefix when the broad session is created last', async () => {
+    const shared = {
+      scope: 'prefix' as const,
+      walletAddress: '0xwallet',
+      paymentTxHash: '0xtx',
+      paymentAmount: 100n,
+      paymentToken: '0x0000000000000000000000000000000000000000',
+      paymentRecipient: '0xrecip',
+      signMessage: makeSignFn(),
+    };
+
+    await createSession({ ...shared, endpoint: 'https://api.example.com/v1/premium' });
+    await createSession({ ...shared, endpoint: 'https://api.example.com/v1' });
+
+    const found = findSessionForUrl('https://api.example.com/v1/premium/data');
+    expect(found).toBeDefined();
+    expect(found!.endpoint).toBe('https://api.example.com/v1/premium');
+  });
+
+  it('findSessionForUrl prefers an exact match over a covering prefix', async () => {
+    const shared = {
+      walletAddress: '0xwallet',
+      paymentTxHash: '0xtx',
+      paymentAmount: 100n,
+      paymentToken: '0x0000000000000000000000000000000000000000',
+      paymentRecipient: '0xrecip',
+      signMessage: makeSignFn(),
+    };
+
+    await createSession({
+      ...shared,
+      endpoint: 'https://api.example.com/v1',
+      scope: 'prefix',
+    });
+    await createSession({
+      ...shared,
+      endpoint: 'https://api.example.com/v1/users',
+      scope: 'exact',
+    });
+
+    const found = findSessionForUrl('https://api.example.com/v1/users');
+    expect(found).toBeDefined();
+    expect(found!.scope).toBe('exact');
+    expect(found!.endpoint).toBe('https://api.example.com/v1/users');
+  });
+
   it('findSessionForUrl does not match on expired sessions', async () => {
     await createSession({
       endpoint: 'https://api.example.com/v1',
