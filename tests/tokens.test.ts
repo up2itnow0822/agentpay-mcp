@@ -23,6 +23,7 @@ import {
   handleLookupToken,
   handleAddCustomToken,
   handleListChainTokens,
+  decideCustomTokenRegistration,
 } from '../src/tools/tokens.js'
 
 describe('lookup_token', () => {
@@ -95,7 +96,9 @@ describe('add_custom_token', () => {
       isNative: false,
     }
     mockAddToken.mockImplementation(() => {})
-    mockGetToken.mockReturnValue(tokenEntry)
+    mockGetToken
+      .mockReturnValueOnce(undefined)
+      .mockReturnValue(tokenEntry)
 
     const result = await handleAddCustomToken({
       symbol: 'MYTOKEN',
@@ -108,6 +111,7 @@ describe('add_custom_token', () => {
     expect(result.isError).toBeUndefined()
     const data = JSON.parse(result.content[0].text)
     expect(data.success).toBe(true)
+    expect(data.idempotent).toBe(false)
     expect(mockAddToken).toHaveBeenCalledWith({
       symbol: 'MYTOKEN',
       address: '0xabcdef1234567890abcdef1234567890abcdef12',
@@ -119,13 +123,15 @@ describe('add_custom_token', () => {
 
   it('defaults name to symbol if not provided', async () => {
     mockAddToken.mockImplementation(() => {})
-    mockGetToken.mockReturnValue({
-      symbol: 'NONAME',
-      address: '0xabcdef1234567890abcdef1234567890abcdef12',
-      decimals: 8,
-      chainId: 1,
-      name: 'NONAME',
-    })
+    mockGetToken
+      .mockReturnValueOnce(undefined)
+      .mockReturnValue({
+        symbol: 'NONAME',
+        address: '0xabcdef1234567890abcdef1234567890abcdef12',
+        decimals: 8,
+        chainId: 1,
+        name: 'NONAME',
+      })
 
     await handleAddCustomToken({
       symbol: 'NONAME',
@@ -139,7 +145,75 @@ describe('add_custom_token', () => {
     )
   })
 
+  it('refuses to overwrite USDC decimals (would overpay on send_token)', async () => {
+    mockGetToken.mockReturnValue({
+      symbol: 'USDC',
+      address: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913',
+      decimals: 6,
+      chainId: 8453,
+      name: 'USD Coin',
+    })
+
+    const result = await handleAddCustomToken({
+      symbol: 'USDC',
+      address: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913',
+      decimals: 18,
+      chainId: 8453,
+    })
+
+    expect(result.isError).toBe(true)
+    expect(result.content[0].text).toContain('add_custom_token failed')
+    expect(result.content[0].text).toContain('already registered')
+    expect(result.content[0].text).toContain('6 decimals')
+    expect(mockAddToken).not.toHaveBeenCalled()
+  })
+
+  it('refuses to overwrite a built-in address with a different contract', async () => {
+    mockGetToken.mockReturnValue({
+      symbol: 'USDC',
+      address: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913',
+      decimals: 6,
+      chainId: 8453,
+      name: 'USD Coin',
+    })
+
+    const result = await handleAddCustomToken({
+      symbol: 'usdc',
+      address: '0x0000000000000000000000000000000000000001',
+      decimals: 6,
+      chainId: 8453,
+    })
+
+    expect(result.isError).toBe(true)
+    expect(mockAddToken).not.toHaveBeenCalled()
+  })
+
+  it('is idempotent when the same address and decimals are re-registered', async () => {
+    const tokenEntry = {
+      symbol: 'USDC',
+      address: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913',
+      decimals: 6,
+      chainId: 8453,
+      name: 'USD Coin',
+    }
+    mockGetToken.mockReturnValue(tokenEntry)
+
+    const result = await handleAddCustomToken({
+      symbol: 'usdc',
+      address: '0x833589fcd6edb6e08f4c7c32d4f71b54bda02913',
+      decimals: 6,
+      chainId: 8453,
+    })
+
+    expect(result.isError).toBeUndefined()
+    const data = JSON.parse(result.content[0].text)
+    expect(data.success).toBe(true)
+    expect(data.idempotent).toBe(true)
+    expect(mockAddToken).not.toHaveBeenCalled()
+  })
+
   it('returns error if addToken throws', async () => {
+    mockGetToken.mockReturnValue(undefined)
     mockAddToken.mockImplementation(() => { throw new Error('Duplicate token') })
 
     const result = await handleAddCustomToken({
@@ -151,6 +225,43 @@ describe('add_custom_token', () => {
 
     expect(result.isError).toBe(true)
     expect(result.content[0].text).toContain('add_custom_token failed')
+  })
+})
+
+describe('decideCustomTokenRegistration', () => {
+  const usdc = {
+    symbol: 'USDC',
+    address: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913',
+    decimals: 6,
+    chainId: 8453,
+  }
+
+  it('allows first registration of an unknown symbol', () => {
+    expect(decideCustomTokenRegistration(undefined, usdc)).toBe('register')
+  })
+
+  it('treats identical re-registration as idempotent (checksum-insensitive)', () => {
+    expect(
+      decideCustomTokenRegistration(usdc, {
+        ...usdc,
+        address: usdc.address.toLowerCase(),
+      })
+    ).toBe('idempotent')
+  })
+
+  it('throws when decimals would change for an existing symbol', () => {
+    expect(() =>
+      decideCustomTokenRegistration(usdc, { ...usdc, decimals: 18 })
+    ).toThrow(/already registered/)
+  })
+
+  it('throws when address would change for an existing symbol', () => {
+    expect(() =>
+      decideCustomTokenRegistration(usdc, {
+        ...usdc,
+        address: '0x0000000000000000000000000000000000000001',
+      })
+    ).toThrow(/already registered/)
   })
 })
 
