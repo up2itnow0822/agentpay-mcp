@@ -481,6 +481,59 @@ describe('x402_pay tool', () => {
     }
   });
 
+  it('keeps session credentials when caller headers try to blank them', async () => {
+    // A live session plus caller headers that overwrite X-Session-Token used
+    // to make the session probe 402, then x402_pay fell through and paid again.
+    _clearAllSessions();
+    const session = await createSession({
+      endpoint: 'https://session.example.com/v1',
+      scope: 'prefix',
+      ttlSeconds: 3600,
+      paymentTxHash: '0xsessiontx',
+      paymentAmount: 1_000_000n,
+      paymentToken: '0x0000000000000000000000000000000000000000',
+      paymentRecipient: '0xfeedfacefeedfacefeedfacefeedfacefeedface',
+      walletAddress: '0x1234567890123456789012345678901234567890',
+      signMessage: async () => '0xsig',
+    });
+
+    const fetchSpy = vi
+      .spyOn(globalThis, 'fetch')
+      .mockImplementation(async (_url: string | URL | Request, init?: RequestInit) => {
+        const headers = (init?.headers ?? {}) as Record<string, string>;
+        const sessionToken = headers['X-Session-Token'];
+        if (!sessionToken) {
+          return new Response('payment required', { status: 402 });
+        }
+        return new Response('{"ok":true}', { status: 200 });
+      });
+
+    try {
+      const result = await handleX402Pay({
+        url: 'https://session.example.com/v1/data',
+        headers: {
+          'X-Session-Token': '',
+          'PAYMENT-SESSION': 'forged-session',
+          'X-Trace-Id': 'trace-1',
+        },
+      });
+
+      expect(result.isError).toBeFalsy();
+      expect(result.content[0]!.text).toContain('Session Used');
+      expect(result.content[0]!.text).toContain('no payment');
+      expect(mockCreateX402Client).not.toHaveBeenCalled();
+      expect(fetchSpy).toHaveBeenCalledTimes(1);
+
+      const sentHeaders = (fetchSpy.mock.calls[0]![1]?.headers ?? {}) as Record<string, string>;
+      expect(sentHeaders['X-Trace-Id']).toBe('trace-1');
+      expect(sentHeaders['X-Session-Token']).toBe(session.sessionToken);
+      expect(sentHeaders['PAYMENT-SESSION']).toBe(session.sessionId);
+    } finally {
+      fetchSpy.mockRestore();
+      _clearAllSessions();
+    }
+  });
+
   it('caps how many offered networks/schemes a 402 can list', async () => {
     // Without a cap, a hostile 402 can flood the narration region with an
     // unbounded number of server-controlled (if individually short) values.

@@ -35,6 +35,7 @@ import {
   resolveX402AssetDecimals,
 } from '../utils/payment-cap.js';
 import { findSessionForUrl, buildSessionHeaders } from './session.js';
+import { mergeSessionAwareHeaders } from '../session/manager.js';
 import { recordSessionCall } from '../session/manager.js';
 import { enforceSpendPolicy } from './budget.js';
 
@@ -255,11 +256,7 @@ export async function handleX402Pay(
       if (activeSession) {
         const sessionHeaders = buildSessionHeaders(activeSession);
         const method = input.method ?? 'GET';
-        const mergedHeaders: Record<string, string> = {
-          'Accept': 'application/json, text/plain, */*',
-          ...sessionHeaders,
-          ...(input.headers ?? {}),
-        };
+        const mergedHeaders = mergeSessionAwareHeaders(input.headers, sessionHeaders);
 
         if (input.body && ['POST', 'PUT', 'PATCH'].includes(method)) {
           if (!mergedHeaders['Content-Type']) {

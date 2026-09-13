@@ -81,6 +81,7 @@ import {
   findSessionForUrl,
   isUrlCoveredBySession,
   buildSessionHeaders,
+  mergeSessionAwareHeaders,
   decodeSessionToken,
   listActiveSessions,
 } from '../src/session/manager.js';
@@ -712,6 +713,35 @@ describe('x402_session_fetch tool', () => {
 
     expect(capturedHeaders['X-Custom-Header']).toBe('my-value');
     expect(capturedHeaders['X-Session-Token']).toBeDefined();
+
+    fetchSpy.mockRestore();
+  });
+
+  it('does not let caller headers overwrite session credentials', async () => {
+    const sessionId = await createSessionViaStart();
+
+    let capturedHeaders: Record<string, string> = {};
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementationOnce(
+      async (_url: string | URL | Request, init?: RequestInit) => {
+        capturedHeaders = (init?.headers ?? {}) as Record<string, string>;
+        return new Response('ok', { status: 200 });
+      }
+    );
+
+    await handleX402SessionFetch({
+      session_id: sessionId,
+      url: `${TEST_ENDPOINT}/resource`,
+      headers: {
+        'X-Session-Token': '',
+        'PAYMENT-SESSION': 'forged',
+        'X-Trace-Id': 'trace-1',
+      },
+    });
+
+    expect(capturedHeaders['X-Trace-Id']).toBe('trace-1');
+    expect(capturedHeaders['X-Session-Token']).toBeDefined();
+    expect(capturedHeaders['X-Session-Token']).not.toBe('');
+    expect(capturedHeaders['PAYMENT-SESSION']).toBe(sessionId);
 
     fetchSpy.mockRestore();
   });
@@ -1549,6 +1579,33 @@ describe('Session manager (direct unit tests)', () => {
     const again = lookupSession(session.sessionId);
     if (!again.found) throw new Error('session should still resolve');
     expect(again.session.tokenExpiresAt).toBe(issuedExpiry);
+  });
+
+  it('mergeSessionAwareHeaders keeps session credentials over caller overrides', () => {
+    const sessionHeaders = {
+      'X-Session-Token': 'real-token',
+      'X-Session-Wallet': '0xabc',
+      'PAYMENT-SESSION': 'session-id',
+    };
+
+    const merged = mergeSessionAwareHeaders(
+      {
+        'X-Custom-Header': 'keep-me',
+        'X-Session-Token': '',
+        'x-session-wallet': '0xattacker',
+        'payment-session': 'forged-id',
+        Accept: 'application/xml',
+      },
+      sessionHeaders
+    );
+
+    expect(merged['X-Custom-Header']).toBe('keep-me');
+    expect(merged.Accept).toBe('application/xml');
+    expect(merged['X-Session-Token']).toBe('real-token');
+    expect(merged['X-Session-Wallet']).toBe('0xabc');
+    expect(merged['PAYMENT-SESSION']).toBe('session-id');
+    expect(merged['x-session-wallet']).toBeUndefined();
+    expect(merged['payment-session']).toBeUndefined();
   });
 
   it('buildSessionHeaders includes all required x402 V2 headers', async () => {

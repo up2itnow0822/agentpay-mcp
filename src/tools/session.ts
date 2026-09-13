@@ -45,6 +45,7 @@ import {
   findSessionForUrl,
   isUrlCoveredBySession,
   buildSessionHeaders,
+  mergeSessionAwareHeaders,
   decodeSessionToken,
   wasEndedLocally,
   tokenExpiryOf,
@@ -498,11 +499,7 @@ export async function handleX402SessionFetch(
     const sessionHeaders = buildSessionHeaders(session);
     const method = input.method ?? 'GET';
 
-    const mergedHeaders: Record<string, string> = {
-      'Accept': 'application/json, text/plain, */*',
-      ...sessionHeaders,
-      ...(input.headers ?? {}),
-    };
+    const mergedHeaders = mergeSessionAwareHeaders(input.headers, sessionHeaders);
 
     if (input.body && ['POST', 'PUT', 'PATCH'].includes(method)) {
       if (!mergedHeaders['Content-Type']) {
@@ -900,4 +897,4 @@ function ttlProgressBar(remaining: number, total: number): string {
 }
 
 // Re-export session manager utilities for use by x402_pay auto-session feature
-export { findSessionForUrl, buildSessionHeaders };
+export { findSessionForUrl, buildSessionHeaders, mergeSessionAwareHeaders };

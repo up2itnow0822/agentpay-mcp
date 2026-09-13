@@ -319,6 +319,34 @@ export function buildSessionHeaders(session: SessionRecord): Record<string, stri
 }
 
 /**
+ * Merge caller-supplied headers with session credentials.
+ *
+ * Session auth headers always win, including case-insensitive aliases
+ * (`x-session-token`, `payment-session`). Otherwise a caller — or a
+ * prompt-injected header list — can blank `X-Session-Token` / `PAYMENT-SESSION`,
+ * the session probe returns 402, and `x402_pay` falls through into a second
+ * on-chain payment for a session that is still valid locally.
+ */
+export function mergeSessionAwareHeaders(
+  callerHeaders: Record<string, string> | undefined,
+  sessionHeaders: Record<string, string>,
+): Record<string, string> {
+  const protectedNames = new Set(
+    Object.keys(sessionHeaders).map((name) => name.toLowerCase())
+  );
+  const merged: Record<string, string> = {
+    Accept: 'application/json, text/plain, */*',
+  };
+
+  for (const [name, value] of Object.entries(callerHeaders ?? {})) {
+    if (protectedNames.has(name.toLowerCase())) continue;
+    merged[name] = value;
+  }
+
+  return { ...merged, ...sessionHeaders };
+}
+
+/**
  * Decode a session token string into its payload and signature.
  * Useful for display / debugging purposes.
  */
