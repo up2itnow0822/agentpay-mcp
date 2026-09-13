@@ -14,6 +14,10 @@ vi.mock('agentwallet-sdk', () => ({
 // ─── Mock client utils ─────────────────────────────────────────────────────
 
 vi.mock('../src/utils/client.js', () => ({
+  getConfig: vi.fn(() => ({
+    chainId: 8453,
+    walletAddress: '0x1234567890123456789012345678901234567890',
+  })),
   getWallet: vi.fn(() => ({
     address: '0x1234567890123456789012345678901234567890',
     publicClient: {},
@@ -63,6 +67,22 @@ describe('bridge_usdc', () => {
     expect(data.amount).toBe('100')
     expect(data.rawAmount).toBe('100000000')
     expect(mockBridge).toHaveBeenCalledWith(100000000n, 'polygon')
+  })
+
+  it('refuses bridge_usdc when fromChain is not the wallet chain', async () => {
+    const mockBridge = vi.fn()
+    mockCreateBridge.mockReturnValue({ bridge: mockBridge } as any)
+
+    const result = await handleBridgeUsdc({
+      fromChain: 'ethereum',
+      toChain: 'polygon',
+      amount: '100',
+    })
+
+    expect(result.isError).toBe(true)
+    expect(result.content[0].text).toContain('does not match the configured wallet chain')
+    expect(mockCreateBridge).not.toHaveBeenCalled()
+    expect(mockBridge).not.toHaveBeenCalled()
   })
 
   it('returns error when fromChain equals toChain', async () => {

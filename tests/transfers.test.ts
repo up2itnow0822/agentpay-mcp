@@ -75,6 +75,30 @@ describe('send_token', () => {
     )
   })
 
+  it('refuses send_token when chainId is not the wallet chain', async () => {
+    const getToken = vi.fn().mockReturnValue({
+      symbol: 'WETH',
+      // Optimism and Base share this WETH address — the pre-fix bug would
+      // transfer Base WETH while reporting chainId 10.
+      address: '0x4200000000000000000000000000000000000006',
+      decimals: 18,
+      chainId: 10,
+    })
+    mockGetGlobalRegistry.mockReturnValue({ getToken } as any)
+
+    const result = await handleSendToken({
+      tokenSymbol: 'WETH',
+      chainId: 10,
+      recipientAddress: '0xrecipient00000000000000000000000000000001',
+      amount: '1',
+    })
+
+    expect(result.isError).toBe(true)
+    expect(result.content[0].text).toContain('does not match the configured wallet chain')
+    expect(getToken).not.toHaveBeenCalled()
+    expect(mockAgentTransferToken).not.toHaveBeenCalled()
+  })
+
   it('returns error when token not found in registry', async () => {
     mockGetGlobalRegistry.mockReturnValue({
       getToken: vi.fn().mockReturnValue(undefined),
@@ -138,14 +162,22 @@ describe('get_balances', () => {
     expect(data.balances[1].rawBalance).toBe('500000000000000000')
   })
 
-  it('uses provided chainId when specified', async () => {
+  it('uses the configured wallet chain when chainId matches', async () => {
     mockGetBalances.mockResolvedValue([] as any)
 
-    await handleGetBalances({ chainId: 42161 })
+    await handleGetBalances({ chainId: 8453 })
 
     expect(mockGetBalances).toHaveBeenCalledWith(
-      expect.objectContaining({ chainId: 42161 })
+      expect.objectContaining({ chainId: 8453 })
     )
+  })
+
+  it('refuses a chainId that does not match the configured wallet chain', async () => {
+    const result = await handleGetBalances({ chainId: 10 })
+
+    expect(result.isError).toBe(true)
+    expect(result.content[0].text).toContain('does not match the configured wallet chain')
+    expect(mockGetBalances).not.toHaveBeenCalled()
   })
 
   it('returns error when SDK call fails', async () => {
