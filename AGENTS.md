@@ -19,6 +19,9 @@
   consistent.
 - Treat `dist/`, coverage, dependency folders, and generated repair artifacts
   as outputs unless a closer contract says otherwise.
+- `main` is protected by a GitHub ruleset: changes land only through a pull
+  request with the `build` check green and every review thread resolved.
+  No direct pushes, force-pushes, or branch deletion.
 
 ## Work Guidance
 
