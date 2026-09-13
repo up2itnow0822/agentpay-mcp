@@ -115,6 +115,7 @@ export const x402SessionStartTool = {
   name: 'x402_session_start',
   description:
     'Use when a paid endpoint supports a reusable x402 session or entitlement. Makes one capped payment, stores a non-custodial signed session token, and returns a session_id for x402_session_fetch. ' +
+    'If an active local session already covers the endpoint, the existing session_id is returned and no new payment is signed. ' +
     'Do not use for providers without session semantics, unknown networks, missing spend caps, or calls where the buyer cannot store and audit the returned mcp-session-id/session_id.',
   inputSchema: {
     type: 'object' as const,
@@ -174,7 +175,6 @@ export async function handleX402SessionStart(
   input: X402SessionStartInput
 ): Promise<{ content: Array<{ type: 'text'; text: string }>; isError?: boolean }> {
   try {
-    const wallet = getWallet();
     const config = getConfig();
     const timeoutMs = input.timeout_ms ?? 30000;
 
@@ -184,6 +184,36 @@ export async function handleX402SessionStart(
         throw new Error(`Invalid max_payment_eth: "${input.max_payment_eth}"`);
       }
     }
+
+    // Agents retry x402_session_start after timeouts, lost session_id, or
+    // duplicate tool calls. An active local session already paid for this
+    // URL — reuse it instead of signing a second on-chain payment.
+    const activeSession = findSessionForUrl(input.endpoint);
+    if (activeSession) {
+      const ttlRemaining = Math.max(0, activeSession.expiresAt - Math.floor(Date.now() / 1000));
+      const expiresAt = new Date(activeSession.expiresAt * 1000).toISOString();
+
+      let out = `🔐 **Active Session Already Covers This Endpoint**\n\n`;
+      out += `  Session ID:    ${activeSession.sessionId}\n`;
+      out += `  Endpoint:      ${sanitizeUntrustedUrl(activeSession.endpoint)}\n`;
+      out += `  Scope:         ${activeSession.scope}\n`;
+      if (activeSession.label) {
+        out += `  Label:         ${sanitizeUntrustedInline(activeSession.label, 100)}\n`;
+      }
+      out += `  Network:       ${chainName(config.chainId)}\n`;
+      out += `  TTL:           ${Math.ceil(ttlRemaining / 60)}m (expires ${expiresAt})\n`;
+      out += `  Calls:         ${activeSession.callCount}\n\n`;
+      out += `💳 **No New Payment**\n`;
+      out += `  An existing local session already covers this URL, so no second payment was signed.\n`;
+      out += `  Original TX:   ${sanitizeUntrustedInline(activeSession.paymentTxHash, 80)}\n\n`;
+      out += `✅ **Next Steps**\n`;
+      out += `  Use \`x402_session_fetch\` with session_id="${activeSession.sessionId}" for covered requests.\n`;
+      out += `  To open a new paid session, call \`x402_session_end\` first.\n`;
+
+      return { content: [textContent(out)] };
+    }
+
+    const wallet = getWallet();
 
     // Track payment
     let paymentMade = false;
