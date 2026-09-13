@@ -481,6 +481,55 @@ describe('x402_pay tool', () => {
     }
   });
 
+  it('attaches the most specific prefix session so a path-aware 402 does not re-pay', async () => {
+    _clearAllSessions();
+    const shared = {
+      scope: 'prefix' as const,
+      ttlSeconds: 3600,
+      paymentTxHash: '0xsessiontx',
+      paymentAmount: 1_000_000n,
+      paymentToken: '0x0000000000000000000000000000000000000000',
+      paymentRecipient: '0xfeedfacefeedfacefeedfacefeedfacefeedface',
+      walletAddress: '0x1234567890123456789012345678901234567890',
+      signMessage: async () => '0xsig',
+    };
+    const broad = await createSession({
+      ...shared,
+      endpoint: 'https://api.example.com/v1',
+    });
+    const specific = await createSession({
+      ...shared,
+      endpoint: 'https://api.example.com/v1/premium',
+    });
+
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (_url, init) => {
+      const headers = new Headers(init?.headers);
+      const sessionId = headers.get('PAYMENT-SESSION');
+      if (sessionId === specific.sessionId) {
+        return new Response('{"ok":true}', { status: 200, statusText: 'OK' });
+      }
+      if (sessionId === broad.sessionId) {
+        return new Response('Payment Required', { status: 402, statusText: 'Payment Required' });
+      }
+      throw new Error(`unexpected session header: ${sessionId}`);
+    });
+
+    try {
+      const result = await handleX402Pay({
+        url: 'https://api.example.com/v1/premium/data',
+      });
+
+      expect(result.isError).toBeFalsy();
+      expect(result.content[0]!.text).toContain('Session Used');
+      expect(result.content[0]!.text).toContain(specific.sessionId);
+      expect(result.content[0]!.text).not.toContain('Payment Made');
+      expect(mockX402Fetch).not.toHaveBeenCalled();
+    } finally {
+      fetchSpy.mockRestore();
+      _clearAllSessions();
+    }
+  });
+
   it('caps how many offered networks/schemes a 402 can list', async () => {
     // Without a cap, a hostile 402 can flood the narration region with an
     // unbounded number of server-controlled (if individually short) values.

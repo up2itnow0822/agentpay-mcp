@@ -223,7 +223,8 @@ export function listAllSessions(): SessionRecord[] {
 
 /**
  * Find the best matching active session for a given URL.
- * Prefers exact-scope matches over prefix-scope.
+ * Prefers exact-scope matches over prefix-scope. Among overlapping
+ * prefix sessions, prefers the longest (most specific) endpoint path.
  * Used to auto-attach a session to x402_pay when available.
  */
 export function findSessionForUrl(url: string): SessionRecord | undefined {
@@ -236,11 +237,21 @@ export function findSessionForUrl(url: string): SessionRecord | undefined {
   const exact = active.find((s) => s.scope === 'exact' && s.endpoint === url);
   if (exact) return exact;
 
-  // Try prefix match
-  const prefix = active.find((s) => s.scope === 'prefix' && isUrlCoveredBySession(url, s));
-  if (prefix) return prefix;
+  const prefixMatches = active.filter(
+    (s) => s.scope === 'prefix' && isUrlCoveredBySession(url, s)
+  );
+  if (prefixMatches.length === 0) return undefined;
 
-  return undefined;
+  return prefixMatches.reduce((best, current) => {
+    const bestPathLen = endpointPathLength(best.endpoint);
+    const currentPathLen = endpointPathLength(current.endpoint);
+    if (currentPathLen !== bestPathLen) {
+      return currentPathLen > bestPathLen ? current : best;
+    }
+    // Same path length: prefer the more recently created session so a
+    // newly paid, equally-specific session is not shadowed by an older one.
+    return current.createdAt >= best.createdAt ? current : best;
+  });
 }
 
 /**
@@ -356,6 +367,18 @@ export function _clearAllSessions(): void {
 }
 
 // ─── Internal helpers ──────────────────────────────────────────────────────
+
+/**
+ * Pathname length used to rank overlapping prefix sessions.
+ * Longer paths are more specific (`/v1/premium` beats `/v1`).
+ */
+function endpointPathLength(endpoint: string): number {
+  try {
+    return new URL(endpoint).pathname.length;
+  } catch {
+    return 0;
+  }
+}
 
 /**
  * Produce a deterministic canonical JSON representation.
