@@ -769,6 +769,30 @@ describe('x402_session_fetch tool', () => {
     fetchSpy.mockRestore();
   });
 
+  it('does not send the session token to a same-origin path outside the paid prefix', async () => {
+    const sessionId = await createSessionViaStart();
+
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
+      new Response(null, {
+        status: 302,
+        headers: { Location: '/v10/admin' },
+      })
+    );
+
+    const result = await handleX402SessionFetch({
+      session_id: sessionId,
+      url: `${TEST_ENDPOINT}/resource`,
+    });
+
+    expect(result.isError).toBe(true);
+    expect(result.content[0]!.text).toContain('paid session scope');
+    expect(result.content[0]!.text).toContain('/v10/admin');
+    expect(fetchSpy).toHaveBeenCalledOnce();
+    expect(String(fetchSpy.mock.calls[0]![0])).toBe(`${TEST_ENDPOINT}/resource`);
+
+    fetchSpy.mockRestore();
+  });
+
   it('tracks call count across multiple fetches', async () => {
     const sessionId = await createSessionViaStart();
 

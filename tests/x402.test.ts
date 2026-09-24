@@ -554,6 +554,45 @@ describe('x402_pay tool', () => {
     }
   });
 
+  it('does not pay again when a same-origin redirect leaves the paid session prefix', async () => {
+    _clearAllSessions();
+    await createSession({
+      endpoint: 'https://session.example.com/v1',
+      scope: 'prefix',
+      ttlSeconds: 3600,
+      paymentTxHash: '0xsessiontx',
+      paymentAmount: 1_000_000n,
+      paymentToken: '0x0000000000000000000000000000000000000000',
+      paymentRecipient: '0xfeedfacefeedfacefeedfacefeedfacefeedface',
+      walletAddress: '0x1234567890123456789012345678901234567890',
+      signMessage: async () => '0xsig',
+    });
+
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (url) => {
+      if (String(url) === 'https://session.example.com/v1/data') {
+        return new Response(null, {
+          status: 302,
+          headers: { Location: '/v10/admin' },
+        });
+      }
+      return new Response('paywall', { status: 402 });
+    });
+
+    try {
+      const result = await handleX402Pay({ url: 'https://session.example.com/v1/data' });
+
+      expect(result.isError).toBe(true);
+      expect(result.content[0]!.text).toContain('paid session scope');
+      expect(result.content[0]!.text).toContain('/v10/admin');
+      expect(mockX402Fetch).not.toHaveBeenCalled();
+      expect(fetchSpy).toHaveBeenCalledOnce();
+      expect(String(fetchSpy.mock.calls[0]![0])).toBe('https://session.example.com/v1/data');
+    } finally {
+      fetchSpy.mockRestore();
+      _clearAllSessions();
+    }
+  });
+
   it('caps how many offered networks/schemes a 402 can list', async () => {
     // Without a cap, a hostile 402 can flood the narration region with an
     // unbounded number of server-controlled (if individually short) values.

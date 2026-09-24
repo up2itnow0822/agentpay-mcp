@@ -274,9 +274,13 @@ export async function handleX402Pay(
           signal: AbortSignal.timeout(timeoutMs),
         };
 
-        // Session headers win and cross-origin redirects are refused so a
-        // caller override or 302 cannot 402-and-repay (or leak the token).
-        const response = await fetchWithSessionCredentials(input.url, requestInit, sessionHeaders);
+        // Session headers win. Cross-origin redirects and same-origin redirects
+        // outside the paid scope are refused so a 302 cannot leak the token or
+        // turn into a second on-chain payment.
+        const response = await fetchWithSessionCredentials(input.url, requestInit, sessionHeaders, {
+          endpoint: activeSession.endpoint,
+          scope: activeSession.scope,
+        });
 
         // If server accepted the session (2xx/3xx), record it and return
         if (response.status !== 402) {

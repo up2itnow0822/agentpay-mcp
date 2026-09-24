@@ -1,7 +1,9 @@
 /**
  * Tests for session-credential fetch: header override immunity and
- * origin-bound redirect following.
+ * scope-bound redirect following.
  */
+import http from 'node:http';
+import type { AddressInfo } from 'node:net';
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import {
   CrossOriginSessionRedirectError,
@@ -9,6 +11,7 @@ import {
   headersToRecord,
   isSessionCredentialHeader,
   mergeSessionHeaders,
+  SessionScopeRedirectError,
 } from '../src/utils/session-fetch.js';
 import {
   PAYMENT_SESSION_HEADER,
@@ -20,6 +23,12 @@ const SESSION_HEADERS = {
   [SESSION_TOKEN_HEADER]: 'payload.signature',
   [SESSION_WALLET_HEADER]: '0xabc',
   [PAYMENT_SESSION_HEADER]: 'session-id',
+};
+
+/** Prefix session covering https://api.example.com/v1 and its descendants. */
+const PAID_SESSION = {
+  endpoint: 'https://api.example.com/v1',
+  scope: 'prefix' as const,
 };
 
 afterEach(() => {
@@ -92,7 +101,8 @@ describe('fetchWithSessionCredentials', () => {
           'X-Session-Token': 'caller-override',
         },
       },
-      SESSION_HEADERS
+      SESSION_HEADERS,
+      PAID_SESSION
     );
 
     expect(fetchSpy).toHaveBeenCalledOnce();
@@ -119,7 +129,8 @@ describe('fetchWithSessionCredentials', () => {
     const response = await fetchWithSessionCredentials(
       'https://api.example.com/v1',
       { method: 'GET', headers: {} },
-      SESSION_HEADERS
+      SESSION_HEADERS,
+      PAID_SESSION
     );
 
     expect(response.status).toBe(200);
@@ -143,7 +154,8 @@ describe('fetchWithSessionCredentials', () => {
       fetchWithSessionCredentials(
         'https://api.example.com/v1/data',
         { method: 'GET', headers: {} },
-        SESSION_HEADERS
+        SESSION_HEADERS,
+        PAID_SESSION
       )
     ).rejects.toBeInstanceOf(CrossOriginSessionRedirectError);
 
@@ -165,10 +177,96 @@ describe('fetchWithSessionCredentials', () => {
     await fetchWithSessionCredentials(
       'https://api.example.com/v1/submit',
       { method: 'POST', headers: {}, body: '{"paid":true}' },
-      SESSION_HEADERS
+      SESSION_HEADERS,
+      PAID_SESSION
     );
 
     expect(fetchSpy.mock.calls[1]![1]?.method).toBe('GET');
     expect(fetchSpy.mock.calls[1]![1]?.body).toBeUndefined();
+  });
+
+  it('refuses a same-origin redirect outside the paid prefix and does not fetch it', async () => {
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
+      new Response(null, {
+        status: 302,
+        headers: { Location: '/v10/admin' },
+      })
+    );
+
+    await expect(
+      fetchWithSessionCredentials(
+        'https://api.example.com/v1/item',
+        { method: 'GET', headers: {} },
+        SESSION_HEADERS,
+        PAID_SESSION
+      )
+    ).rejects.toBeInstanceOf(SessionScopeRedirectError);
+
+    expect(fetchSpy).toHaveBeenCalledOnce();
+    expect(String(fetchSpy.mock.calls[0]![0])).toBe('https://api.example.com/v1/item');
+  });
+});
+
+describe('fetchWithSessionCredentials against a local server', () => {
+  async function listen(
+    handler: (_req: http.IncomingMessage, _res: http.ServerResponse) => void
+  ): Promise<{ origin: string; close: () => Promise<void> }> {
+    const server = http.createServer(handler);
+    await new Promise<void>((resolve) => {
+      server.listen(0, '127.0.0.1', () => resolve());
+    });
+    const address = server.address() as AddressInfo;
+    return {
+      origin: `http://127.0.0.1:${address.port}`,
+      close: () =>
+        new Promise((resolve, reject) => {
+          server.close((error) => (error ? reject(error) : resolve()));
+        }),
+    };
+  }
+
+  it('sends the token on an in-scope redirect and withholds it from /v10', async () => {
+    const hits: Array<{ url: string | undefined; token: string | string[] | undefined }> = [];
+    const server = await listen((req, res) => {
+      hits.push({ url: req.url, token: req.headers['x-session-token'] });
+      if (req.url === '/v1/item') {
+        res.writeHead(302, { Location: '/v1/item/canonical' });
+        res.end();
+        return;
+      }
+      if (req.url === '/v1/escape') {
+        res.writeHead(302, { Location: '/v10/admin' });
+        res.end();
+        return;
+      }
+      res.writeHead(200, { 'Content-Type': 'text/plain' });
+      res.end('canonical-body');
+    });
+
+    try {
+      const covered = await fetchWithSessionCredentials(
+        `${server.origin}/v1/item`,
+        { method: 'GET' },
+        SESSION_HEADERS,
+        { endpoint: `${server.origin}/v1`, scope: 'prefix' }
+      );
+      expect(covered.status).toBe(200);
+      expect(await covered.text()).toBe('canonical-body');
+
+      await expect(
+        fetchWithSessionCredentials(
+          `${server.origin}/v1/escape`,
+          { method: 'GET' },
+          SESSION_HEADERS,
+          { endpoint: `${server.origin}/v1`, scope: 'prefix' }
+        )
+      ).rejects.toBeInstanceOf(SessionScopeRedirectError);
+    } finally {
+      await server.close();
+    }
+
+    expect(hits.map((hit) => hit.url)).toEqual(['/v1/item', '/v1/item/canonical', '/v1/escape']);
+    expect(hits.every((hit) => hit.token === 'payload.signature')).toBe(true);
+    expect(hits.some((hit) => hit.url === '/v10/admin')).toBe(false);
   });
 });
