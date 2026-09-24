@@ -11,16 +11,24 @@
  *   2. Redirects are not followed automatically. Node/undici `fetch` defaults
  *      to `redirect: 'follow'` and only strips `Authorization` on a
  *      cross-origin hop — custom entitlement headers are forwarded. Same-origin
- *      hops are followed manually so a 302 to another path on the paid host
- *      still works; a different origin is refused so the bearer token never
- *      leaves the host that was paid for.
+ *      hops are followed only when the next URL is still inside the paid
+ *      session scope. A different origin, or a same-origin path the payment
+ *      does not cover (`/v10` when the session is `/v1`), is refused so the
+ *      bearer token never leaves the resource that was paid for.
  */
 
 import {
+  isUrlCoveredBySession,
   PAYMENT_SESSION_HEADER,
   SESSION_TOKEN_HEADER,
   SESSION_WALLET_HEADER,
 } from '../session/manager.js';
+
+/** Paid session boundary used to decide whether a redirect may carry the token. */
+export type SessionCredentialScope = {
+  endpoint: string;
+  scope: 'prefix' | 'exact';
+};
 
 /** Header names that must never be caller-overridable or cross-origin forwarded. */
 export const SESSION_CREDENTIAL_HEADERS = [
@@ -42,6 +50,20 @@ export class CrossOriginSessionRedirectError extends Error {
         'paid session token to a host that was not covered by the session.'
     );
     this.name = 'CrossOriginSessionRedirectError';
+  }
+}
+
+export class SessionScopeRedirectError extends Error {
+  constructor(
+    readonly fromUrl: string,
+    readonly toUrl: string
+  ) {
+    super(
+      `Refusing to follow a redirect from ${fromUrl} to ${toUrl} ` +
+        'because the target is outside the paid session scope. ' +
+        'Following it would send the session token to a path the payment does not cover.'
+    );
+    this.name = 'SessionScopeRedirectError';
   }
 }
 
@@ -111,13 +133,15 @@ function isRedirectStatus(status: number): boolean {
  * Fetch `url` with session credentials attached.
  *
  * Session headers are applied last. Redirects are resolved only while the
- * next hop stays on the same origin; a cross-origin Location is an error
- * (and is not fetched).
+ * next hop stays on the same origin and inside `session`. A cross-origin
+ * Location, or a same-origin Location outside the paid scope, is an error
+ * and is not fetched.
  */
 export async function fetchWithSessionCredentials(
   url: string,
   init: RequestInit,
-  sessionHeaders: Record<string, string>
+  sessionHeaders: Record<string, string>,
+  session: SessionCredentialScope
 ): Promise<Response> {
   const headers = mergeSessionHeaders(headersToRecord(init.headers), sessionHeaders);
   let currentUrl = url;
@@ -146,6 +170,13 @@ export async function fetchWithSessionCredentials(
 
     if (next.origin !== current.origin) {
       throw new CrossOriginSessionRedirectError(current.origin, next.origin);
+    }
+
+    // Origin equality is not the paid boundary: a prefix session for /v1 must
+    // not attach the bearer token to /v10, or to any other uncovered path, on
+    // the same host.
+    if (!isUrlCoveredBySession(next.href, session)) {
+      throw new SessionScopeRedirectError(current.href, next.href);
     }
 
     // 303 (and historical 301/302 on non-GET) switch to GET without a body.

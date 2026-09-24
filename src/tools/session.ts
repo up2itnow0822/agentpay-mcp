@@ -496,8 +496,8 @@ export async function handleX402SessionFetch(
     }
 
     // Build request headers — inject session token automatically.
-    // Session credentials are applied last and redirects are origin-bound
-    // (see fetchWithSessionCredentials).
+    // Session credentials are applied last. Redirects stay inside this
+    // session's paid scope (see fetchWithSessionCredentials).
     const sessionHeaders = buildSessionHeaders(session);
     const method = input.method ?? 'GET';
 
@@ -521,7 +521,10 @@ export async function handleX402SessionFetch(
 
     // Make request — plain fetch, NO x402 payment client.
     // The session token headers tell the server to bypass the payment flow.
-    const response = await fetchWithSessionCredentials(input.url, requestInit, sessionHeaders);
+    const response = await fetchWithSessionCredentials(input.url, requestInit, sessionHeaders, {
+      endpoint: session.endpoint,
+      scope: session.scope,
+    });
     const responseText = await response.text();
 
     // Record the call in the session
