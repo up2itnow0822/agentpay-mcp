@@ -35,6 +35,7 @@ import {
   resolveX402AssetDecimals,
 } from '../utils/payment-cap.js';
 import { findSessionForUrl, buildSessionHeaders } from './session.js';
+import { fetchWithSessionCredentials } from '../utils/session-fetch.js';
 import { recordSessionCall } from '../session/manager.js';
 import { enforceSpendPolicy } from './budget.js';
 
@@ -255,26 +256,27 @@ export async function handleX402Pay(
       if (activeSession) {
         const sessionHeaders = buildSessionHeaders(activeSession);
         const method = input.method ?? 'GET';
-        const mergedHeaders: Record<string, string> = {
+        const callerHeaders: Record<string, string> = {
           'Accept': 'application/json, text/plain, */*',
-          ...sessionHeaders,
           ...(input.headers ?? {}),
         };
 
         if (input.body && ['POST', 'PUT', 'PATCH'].includes(method)) {
-          if (!mergedHeaders['Content-Type']) {
-            mergedHeaders['Content-Type'] = 'application/json';
+          if (!callerHeaders['Content-Type']) {
+            callerHeaders['Content-Type'] = 'application/json';
           }
         }
 
         const requestInit: RequestInit = {
           method,
-          headers: mergedHeaders,
+          headers: callerHeaders,
           ...(input.body ? { body: input.body } : {}),
           signal: AbortSignal.timeout(timeoutMs),
         };
 
-        const response = await fetch(input.url, requestInit);
+        // Session headers win and cross-origin redirects are refused so a
+        // caller override or 302 cannot 402-and-repay (or leak the token).
+        const response = await fetchWithSessionCredentials(input.url, requestInit, sessionHeaders);
 
         // If server accepted the session (2xx/3xx), record it and return
         if (response.status !== 402) {
