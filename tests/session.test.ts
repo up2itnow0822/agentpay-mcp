@@ -491,6 +491,62 @@ describe('x402_session_start tool', () => {
     expect(result.content[0]!.text).toContain('x402_session_fetch');
   });
 
+  it('does not pay again when an active session already covers the endpoint', async () => {
+    // Agents routinely retry x402_session_start after a timeout, crash, or
+    // lost session_id. A second start for a still-valid local session must
+    // reuse that record instead of signing another on-chain payment.
+    setupX402PaymentMock();
+    const first = await handleX402SessionStart({
+      endpoint: TEST_ENDPOINT,
+      label: 'Premium API session',
+    });
+    expect(first.isError).toBeFalsy();
+    const firstId = first.content[0]!.text.match(/Session ID:\s+([0-9a-f-]{36})/)![1];
+
+    const second = await handleX402SessionStart({ endpoint: TEST_ENDPOINT });
+
+    expect(second.isError).toBeFalsy();
+    const text = second.content[0]!.text;
+    expect(text).toContain(firstId);
+    expect(text).toMatch(/already|existing|active session/i);
+    expect(text).not.toContain('Session Established');
+    expect(listActiveSessions()).toHaveLength(1);
+    // First start created the client; the retry must not open another payment.
+    expect(mockCreateX402Client).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not pay again when a prefix session already covers a subpath start', async () => {
+    setupX402PaymentMock();
+    const first = await handleX402SessionStart({
+      endpoint: TEST_ENDPOINT,
+      scope: 'prefix',
+    });
+    const firstId = first.content[0]!.text.match(/Session ID:\s+([0-9a-f-]{36})/)![1];
+
+    const second = await handleX402SessionStart({
+      endpoint: `${TEST_ENDPOINT}/users`,
+    });
+
+    expect(second.isError).toBeFalsy();
+    expect(second.content[0]!.text).toContain(firstId);
+    expect(listActiveSessions()).toHaveLength(1);
+    expect(mockCreateX402Client).toHaveBeenCalledTimes(1);
+  });
+
+  it('pays again after the matching session is ended locally', async () => {
+    const sessionId = await createSessionViaStart();
+    await handleX402SessionEnd({ session_id: sessionId });
+
+    setupX402PaymentMock();
+    const restarted = await handleX402SessionStart({ endpoint: TEST_ENDPOINT });
+
+    expect(restarted.isError).toBeFalsy();
+    expect(restarted.content[0]!.text).toContain('Session Established');
+    const restartedId = restarted.content[0]!.text.match(/Session ID:\s+([0-9a-f-]{36})/)![1];
+    expect(restartedId).not.toBe(sessionId);
+    expect(listActiveSessions()).toHaveLength(1);
+  });
+
   it('includes initial response body in output', async () => {
     setupX402PaymentMock({ body: '{"welcome":"message"}' });
 
