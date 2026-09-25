@@ -35,6 +35,8 @@ import {
   withRetry,
   sleep,
   printWalletStatus,
+  PaymentAwareError,
+  settledPaymentAmount,
 } from './shared/x402-client.js';
 import { PolicyGuard, PolicyError } from './shared/spending-policy.js';
 import { FileCache } from './shared/cache.js';
@@ -373,13 +375,27 @@ const stepExecutors: Record<string, StepExecutor> = {
       };
     }
 
-    const result = await withRetry(
-      () =>
-        fetchWithPayment(ctx.wallet!, endpointUrl, {
-          maxPaymentUsd: step.estimatedCostUsd * 1.5,
-        }),
-      { maxAttempts: 2, initialDelayMs: 2000, maxDelayMs: 8000 }
-    );
+    let result;
+    try {
+      result = await withRetry(
+        () =>
+          fetchWithPayment(ctx.wallet!, endpointUrl, {
+            maxPaymentUsd: step.estimatedCostUsd * 1.5,
+            callbacks: {
+              onPaymentComplete: (amt) => {
+                step.actualCostUsd = amt;
+              },
+            },
+          }),
+        { maxAttempts: 2, initialDelayMs: 2000, maxDelayMs: 8000 }
+      );
+    } catch (err) {
+      const settled = settledPaymentAmount(err);
+      if (settled !== null) {
+        step.actualCostUsd = settled;
+      }
+      throw err;
+    }
 
     const data = JSON.parse(result.body);
     step.actualCostUsd = result.amountPaidUsd;
@@ -488,10 +504,17 @@ async function runStep(
     const fallbackNote = step.usedFallback ? ' (fallback data)' : '';
     printSuccess(`${step.name}: done in ${step.durationMs}ms${fallbackNote}`);
   } catch (err) {
+    if (!step.isFree && step.actualCostUsd > 0) {
+      ctx.policy.record(step.actualCostUsd, step.name, true);
+    }
     step.status = 'failed';
     step.error = err instanceof Error ? err.message : String(err);
     step.durationMs = Date.now() - startMs;
-    printError(`${step.name}: ${step.error}`);
+    printError(
+      err instanceof PaymentAwareError
+        ? `${step.name}: payment settled but fetch failed; not retrying: ${step.error}`
+        : `${step.name}: ${step.error}`
+    );
 
     // Try to continue with next step — non-fatal failures
     printWarning('Continuing with remaining steps...');

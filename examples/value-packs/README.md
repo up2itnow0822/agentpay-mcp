@@ -352,7 +352,8 @@ if (estimatedTotal > MAX_COST_USD) {
 // Show plan, get approval
 const approved = await requestPlanApproval({ steps: plan.steps, totalCostUsd, dailyCapUsd });
 
-// Execute with retry + fallback
+// Execute with retry + fallback. withRetry will not re-enter fetchWithPayment
+// after payment has been initiated (a timeout after settlement is not a new buy).
 const result = await withRetry(
   () => fetchWithPayment(wallet, url, { maxPaymentUsd: step.estimatedCostUsd * 1.5 }),
   { maxAttempts: 3, initialDelayMs: 1000, maxDelayMs: 8000,
