@@ -38,6 +38,8 @@ import {
   withRetry,
   printWalletStatus,
   sleep,
+  PaymentAwareError,
+  settledPaymentAmount,
 } from './shared/x402-client.js';
 import { PolicyGuard, PolicyError } from './shared/spending-policy.js';
 import { FileCache } from './shared/cache.js';
@@ -617,7 +619,15 @@ async function main(): Promise<void> {
           sections.push(section);
           printSuccess(`${gap.title}: fetched ($${section.costUsd.toFixed(4)})`);
         } catch (err) {
-          printError(`Failed: ${err instanceof Error ? err.message : String(err)}`);
+          const settled = settledPaymentAmount(err);
+          if (settled !== null) {
+            policy.record(settled, gap.paidSourceName, true);
+          }
+          printError(
+            err instanceof PaymentAwareError
+              ? `Payment settled but fetch failed; not retrying: ${err.message}`
+              : `Failed: ${err instanceof Error ? err.message : String(err)}`
+          );
           // Don't push a failed section — gap remains unfilled
         }
       }

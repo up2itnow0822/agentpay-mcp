@@ -17,6 +17,17 @@ import { base, baseSepolia } from 'viem/chains';
 import { createWallet } from 'agentwallet-sdk';
 import { parsePaymentAmountUsd } from './spending-policy.js';
 import { printInfo, printSuccess, printWarning, printError } from './ui.js';
+import { wrapPaymentFailure } from './payment-retry.js';
+
+export {
+  PaymentAwareError,
+  isPaymentAwareError,
+  settledPaymentAmount,
+  wrapPaymentFailure,
+  withRetry,
+  sleep,
+} from './payment-retry.js';
+export type { RetryOptions, PaymentAttemptState } from './payment-retry.js';
 
 // ─── Types ─────────────────────────────────────────────────────────────────
 
@@ -162,6 +173,7 @@ export async function fetchWithPayment(
   } = {}
 ): Promise<FetchResult> {
   const timeoutMs = opts.timeoutMs ?? 30000;
+  let paymentInitiated = false;
   let paymentMade = false;
   let amountPaidUsd = 0;
   let txHash: string | undefined;
@@ -175,6 +187,7 @@ export async function fetchWithPayment(
     maxRetries: 1,
     globalPerRequestMax: maxPaymentWei,
     onBeforePayment: (req: { amount: string | number | bigint }, _url: string) => {
+      paymentInitiated = true;
       const amountWei = BigInt(req.amount);
       // Approximate USD from wei (ETH price rough estimate); for USDC it's direct
       const estimatedUsd = Number(amountWei) / 1e6; // USDC path
@@ -198,22 +211,31 @@ export async function fetchWithPayment(
     ...(opts.headers ?? {}),
   };
 
-  const response = await x402Client.fetch(url, {
-    method: opts.method ?? 'GET',
-    headers,
-    ...(opts.body ? { body: opts.body } : {}),
-    signal: AbortSignal.timeout(timeoutMs),
-  });
+  try {
+    const response = await x402Client.fetch(url, {
+      method: opts.method ?? 'GET',
+      headers,
+      ...(opts.body ? { body: opts.body } : {}),
+      signal: AbortSignal.timeout(timeoutMs),
+    });
 
-  const body = await response.text();
+    const body = await response.text();
 
-  return {
-    status: response.status,
-    body,
-    paymentMade,
-    amountPaidUsd,
-    txHash,
-  };
+    return {
+      status: response.status,
+      body,
+      paymentMade,
+      amountPaidUsd,
+      txHash,
+    };
+  } catch (err) {
+    wrapPaymentFailure(err, {
+      paymentInitiated,
+      paymentMade,
+      amountPaidUsd,
+      txHash,
+    });
+  }
 }
 
 // ─── Free fetch ────────────────────────────────────────────────────────────
@@ -299,49 +321,6 @@ function extractHeaderField(header: string, field: string): string | null {
   const regex = new RegExp(`${field}=([^,\\s]+)`);
   const match = header.match(regex);
   return match?.[1] ?? null;
-}
-
-// ─── Retry with backoff ────────────────────────────────────────────────────
-
-export interface RetryOptions {
-  maxAttempts: number;
-  initialDelayMs: number;
-  maxDelayMs: number;
-  onRetry?: (attempt: number, error: Error) => void;
-}
-
-/**
- * Retry an async operation with exponential backoff.
- */
-export async function withRetry<T>(
-  fn: () => Promise<T>,
-  opts: RetryOptions
-): Promise<T> {
-  let lastError: Error = new Error('Unknown error');
-  let delay = opts.initialDelayMs;
-
-  for (let attempt = 1; attempt <= opts.maxAttempts; attempt++) {
-    try {
-      return await fn();
-    } catch (err) {
-      lastError = err instanceof Error ? err : new Error(String(err));
-
-      if (attempt === opts.maxAttempts) break;
-
-      if (opts.onRetry) opts.onRetry(attempt, lastError);
-
-      await sleep(delay);
-      delay = Math.min(delay * 2, opts.maxDelayMs);
-    }
-  }
-
-  throw lastError;
-}
-
-// ─── Helpers ──────────────────────────────────────────────────────────────
-
-export function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 // ─── Environment config ────────────────────────────────────────────────────

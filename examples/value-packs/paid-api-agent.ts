@@ -29,6 +29,8 @@ import {
   isMockMode,
   withRetry,
   printWalletStatus,
+  PaymentAwareError,
+  settledPaymentAmount,
 } from './shared/x402-client.js';
 
 import { PolicyGuard, PolicyError } from './shared/spending-policy.js';
@@ -297,7 +299,8 @@ async function collectData(
       printInfo('Auto-approved:', `$${costUsd.toFixed(4)} (below $${APPROVAL_THRESHOLD_USD} threshold)`);
     }
 
-    // Execute payment and fetch
+    // Execute payment and fetch. Record spend at settlement, not only on HTTP success.
+    let recordedAtPayment = false;
     try {
       const result = await withRetry(
         () =>
@@ -308,6 +311,10 @@ async function collectData(
                 printInfo('Paying:', `$${amt.toFixed(4)} for ${url}`);
               },
               onPaymentComplete: (amt, tx) => {
+                if (!recordedAtPayment) {
+                  policy.record(amt, ep.url, true);
+                  recordedAtPayment = true;
+                }
                 printSuccess(`Payment confirmed: $${amt.toFixed(4)} (tx: ${tx.slice(0, 10)}...)`);
               },
             },
@@ -323,7 +330,10 @@ async function collectData(
       );
 
       const actualCost = result.amountPaidUsd > 0 ? result.amountPaidUsd : costUsd;
-      policy.record(actualCost, ep.url, true);
+      if (!recordedAtPayment) {
+        policy.record(actualCost, ep.url, true);
+        recordedAtPayment = true;
+      }
 
       const parsed = ep.parser(result.body);
       cache.set(cacheKey, parsed, { source: ep.url });
@@ -331,9 +341,19 @@ async function collectData(
       printSuccess(`Data received — ${Object.keys(parsed).length} field(s), cost: ${formatCost(actualCost)}`);
       results.push({ endpoint: ep, data: parsed, error: null, costUsd: actualCost, fromCache: false, skipped: false });
     } catch (fetchErr) {
+      const settled = settledPaymentAmount(fetchErr);
+      if (settled !== null && !recordedAtPayment) {
+        policy.record(settled, ep.url, true);
+        recordedAtPayment = true;
+      }
       const msg = fetchErr instanceof Error ? fetchErr.message : String(fetchErr);
-      printError(`Payment/fetch failed: ${msg}`);
-      results.push({ endpoint: ep, data: null, error: msg, costUsd: 0, fromCache: false, skipped: false });
+      const costOnFailure = settled ?? 0;
+      printError(
+        fetchErr instanceof PaymentAwareError
+          ? `Payment settled but fetch failed; not retrying: ${msg}`
+          : `Payment/fetch failed: ${msg}`
+      );
+      results.push({ endpoint: ep, data: null, error: msg, costUsd: costOnFailure, fromCache: false, skipped: false });
     }
   }
 
