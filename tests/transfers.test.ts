@@ -134,8 +134,14 @@ describe('get_balances', () => {
     const data = JSON.parse(result.content[0].text)
     expect(data.chainId).toBe(8453)
     expect(data.count).toBe(2)
+    expect(data.walletAddress).toBe('0x1234567890123456789012345678901234567890')
     expect(data.balances[0].rawBalance).toBe('1000000')
     expect(data.balances[1].rawBalance).toBe('500000000000000000')
+    expect(mockGetBalances).toHaveBeenCalledWith(
+      expect.objectContaining({
+        account: '0x1234567890123456789012345678901234567890',
+      })
+    )
   })
 
   it('uses provided chainId when specified', async () => {
