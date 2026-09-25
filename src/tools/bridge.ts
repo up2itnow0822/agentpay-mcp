@@ -8,6 +8,7 @@ import { createBridge } from 'agentwallet-sdk'
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type AnyWalletClient = any
 import { getWallet } from '../utils/client.js'
+import { assertConfiguredBridgeSource } from '../utils/wallet-chain.js'
 import { textContent, formatError } from '../utils/format.js'
 import { enforceSpendPolicy } from './budget.js'
 import { parseAmountStrict } from '../utils/amount.js'
@@ -77,6 +78,11 @@ export async function handleBridgeUsdc(
     if (input.fromChain === input.toChain) {
       throw new Error('fromChain and toChain must be different')
     }
+
+    // WalletClient is bound to CHAIN_ID. createBridge() still takes a free
+    // fromChain and would approve/burn that chain's USDC + TokenMessenger
+    // while broadcasting on the configured network.
+    assertConfiguredBridgeSource(input.fromChain)
 
     // Parse USDC amount (6 decimals) — strict string parsing, no float rounding
     const USDC_DECIMALS = 6
