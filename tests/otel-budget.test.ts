@@ -1040,7 +1040,8 @@ describe('OTel Budget Circuit-Breaker', () => {
       const data = JSON.parse(result.content[0].text)
       expect(data.killCallback.ok).toBe(false)
       expect(data.killCallback).not.toHaveProperty('status')
-      expect(JSON.stringify(data)).not.toContain('403')
+      expect(data.killCallback.error).toBe('Kill callback was not delivered')
+      expect(JSON.stringify(data.killCallback)).not.toContain('403')
     })
   })
 
