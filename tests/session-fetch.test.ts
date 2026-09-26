@@ -10,6 +10,7 @@ import {
   fetchWithSessionCredentials,
   headersToRecord,
   isSessionCredentialHeader,
+  MalformedRedirectLocationError,
   mergeSessionHeaders,
   SessionScopeRedirectError,
 } from '../src/utils/session-fetch.js';
@@ -204,6 +205,74 @@ describe('fetchWithSessionCredentials', () => {
 
     expect(fetchSpy).toHaveBeenCalledOnce();
     expect(String(fetchSpy.mock.calls[0]![0])).toBe('https://api.example.com/v1/item');
+  });
+
+  it('preserves PUT method and body across a same-origin 302', async () => {
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (url) => {
+      if (String(url) === 'https://api.example.com/v1/item') {
+        return new Response('redirect-body', {
+          status: 302,
+          headers: { Location: '/v1/item/canonical' },
+        });
+      }
+      return new Response('final', { status: 200 });
+    });
+
+    await fetchWithSessionCredentials(
+      'https://api.example.com/v1/item',
+      { method: 'PUT', headers: {}, body: '{"paid":true}' },
+      SESSION_HEADERS,
+      PAID_SESSION
+    );
+
+    expect(fetchSpy.mock.calls[1]![1]?.method).toBe('PUT');
+    expect(fetchSpy.mock.calls[1]![1]?.body).toBe('{"paid":true}');
+  });
+
+  it('still rewrites POST to GET on a same-origin 302', async () => {
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (url) => {
+      if (String(url) === 'https://api.example.com/v1/submit') {
+        return new Response(null, {
+          status: 302,
+          headers: { Location: '/v1/result' },
+        });
+      }
+      return new Response('ok', { status: 200 });
+    });
+
+    await fetchWithSessionCredentials(
+      'https://api.example.com/v1/submit',
+      { method: 'POST', headers: {}, body: '{"paid":true}' },
+      SESSION_HEADERS,
+      PAID_SESSION
+    );
+
+    expect(fetchSpy.mock.calls[1]![1]?.method).toBe('GET');
+    expect(fetchSpy.mock.calls[1]![1]?.body).toBeUndefined();
+  });
+
+  it('rejects a malformed redirect Location instead of returning the raw 3xx', async () => {
+    const cancel = vi.fn(async () => undefined);
+    const bad = new Response(null, {
+      status: 302,
+      headers: { Location: 'https://[bad' },
+    });
+    Object.defineProperty(bad, 'body', {
+      value: { cancel },
+      configurable: true,
+    });
+    vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(bad);
+
+    await expect(
+      fetchWithSessionCredentials(
+        'https://api.example.com/v1/data',
+        { method: 'GET', headers: {} },
+        SESSION_HEADERS,
+        PAID_SESSION
+      )
+    ).rejects.toBeInstanceOf(MalformedRedirectLocationError);
+
+    expect(cancel).toHaveBeenCalled();
   });
 });
 

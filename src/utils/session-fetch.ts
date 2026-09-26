@@ -67,6 +67,21 @@ export class SessionScopeRedirectError extends Error {
   }
 }
 
+export class MalformedRedirectLocationError extends Error {
+  constructor(
+    readonly fromUrl: string,
+    readonly location: string
+  ) {
+    super(
+      `Refusing to treat a malformed redirect Location as a successful session response ` +
+        `(from ${fromUrl}, Location=${JSON.stringify(location)}). ` +
+        'The previous automatic fetch path rejected invalid redirects; returning the raw ' +
+        '3xx would make callers record an apparent Session Used.'
+    );
+    this.name = 'MalformedRedirectLocationError';
+  }
+}
+
 export function isSessionCredentialHeader(name: string): boolean {
   const lower = name.toLowerCase();
   return SESSION_CREDENTIAL_HEADERS.some((header) => header.toLowerCase() === lower);
@@ -125,6 +140,24 @@ export function mergeSessionHeaders(
   return { ...merged, ...sessionHeaders };
 }
 
+
+/** Best-effort cancel of an unread/streaming body so undici frees the socket. */
+async function cancelResponseBody(response: Response): Promise<void> {
+  try {
+    if (response.body && typeof response.body.cancel === 'function') {
+      await response.body.cancel();
+      return;
+    }
+  } catch {
+    // ignore cancel races
+  }
+  try {
+    await response.arrayBuffer();
+  } catch {
+    // ignore already-consumed / aborted bodies
+  }
+}
+
 function isRedirectStatus(status: number): boolean {
   return status === 301 || status === 302 || status === 303 || status === 307 || status === 308;
 }
@@ -156,6 +189,7 @@ export async function fetchWithSessionCredentials(
 
     const location = response.headers.get('location');
     if (!location) {
+      // No Location to follow; hand the raw 3xx back (same as fetch).
       return response;
     }
 
@@ -165,10 +199,14 @@ export async function fetchWithSessionCredentials(
       next = new URL(location, currentUrl);
       current = new URL(currentUrl);
     } catch {
-      return response;
+      // Cancel the unread redirect body before throwing so undici does not
+      // retain the socket until GC (Codex P2 on #50).
+      await cancelResponseBody(response);
+      throw new MalformedRedirectLocationError(currentUrl, location);
     }
 
     if (next.origin !== current.origin) {
+      await cancelResponseBody(response);
       throw new CrossOriginSessionRedirectError(current.origin, next.origin);
     }
 
@@ -176,19 +214,24 @@ export async function fetchWithSessionCredentials(
     // not attach the bearer token to /v10, or to any other uncovered path, on
     // the same host.
     if (!isUrlCoveredBySession(next.href, session)) {
+      await cancelResponseBody(response);
       throw new SessionScopeRedirectError(current.href, next.href);
     }
 
-    // 303 (and historical 301/302 on non-GET) switch to GET without a body.
+    // Spec-aligned method rewrite: only POST+301/302 (and any-method 303)
+    // switch to GET without a body. PUT/PATCH/DELETE on 301/302 must keep
+    // method and body (Codex P2 on #50).
     const method = (currentInit.method ?? 'GET').toUpperCase();
     if (
       response.status === 303 ||
-      ((response.status === 301 || response.status === 302) && method !== 'GET' && method !== 'HEAD')
+      ((response.status === 301 || response.status === 302) && method === 'POST')
     ) {
       const { body: _droppedBody, ...withoutBody } = currentInit;
       currentInit = { ...withoutBody, method: 'GET' };
     }
 
+    // Drop the intermediate body before the next hop so connections are released.
+    await cancelResponseBody(response);
     currentUrl = next.href;
   }
 
