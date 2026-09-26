@@ -1,0 +1,111 @@
+name: build
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+      - master
+
+concurrency:
+  group: build-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        if: hashFiles('package.json') != ''
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      - name: Detect toolchain and build
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          has_npm_script() {
+            local script="$1"
+            node -e "const p=require('./package.json'); process.exit(p.scripts && p.scripts['$script'] ? 0 : 1)"
+          }
+
+          if [ -f package.json ]; then
+            echo "Detected Node.js $(node -v)"
+            if [ -f pnpm-lock.yaml ]; then
+              corepack enable
+              pnpm install --frozen-lockfile || pnpm install
+              RUN="pnpm run"
+            elif [ -f yarn.lock ]; then
+              corepack enable
+              yarn install --frozen-lockfile || yarn install
+              RUN="yarn"
+            else
+              if [ -f package-lock.json ]; then npm ci || npm install; else npm install; fi
+              RUN="npm run"
+            fi
+
+            if [ -f hardhat.config.js ] || [ -f hardhat.config.ts ] || [ -f hardhat.config.cjs ]; then
+              echo "Hardhat project — compile"
+              npx hardhat compile
+              exit 0
+            fi
+            if [ -f foundry.toml ]; then
+              curl -L https://foundry.paradigm.xyz | bash
+              export PATH="$HOME/.foundry/bin:$PATH"
+              foundryup
+              forge build
+              exit 0
+            fi
+            if has_npm_script build; then
+              $RUN build
+              exit 0
+            fi
+            if has_npm_script typecheck; then
+              $RUN typecheck
+              exit 0
+            fi
+            if has_npm_script lint; then
+              $RUN lint
+              exit 0
+            fi
+            echo "No build/typecheck/lint script; install succeeded"
+            exit 0
+          fi
+
+          if [ -f pyproject.toml ] || [ -f setup.py ] || [ -f requirements.txt ] || [ -f Pipfile ]; then
+            echo "Detected Python"
+            python -m pip install --upgrade pip
+            if [ -f requirements.txt ]; then pip install -r requirements.txt || true; fi
+            if [ -f requirements-dev.txt ]; then pip install -r requirements-dev.txt || true; fi
+            if [ -f pyproject.toml ]; then
+              pip install -e ".[dev]" 2>/dev/null || pip install -e . 2>/dev/null || true
+            fi
+            python -m compileall -q .
+            exit 0
+          fi
+
+          if [ -f Cargo.toml ]; then
+            cargo check --all-targets
+            exit 0
+          fi
+
+          if [ -f go.mod ]; then
+            go test ./...
+            exit 0
+          fi
+
+          if [ -f Makefile ] && grep -qE '^(build|test|check):' Makefile; then
+            if grep -qE '^build:' Makefile; then make build
+            elif grep -qE '^check:' Makefile; then make check
+            else make test; fi
+            exit 0
+          fi
+
+          echo "No standard toolchain detected; verifying repository contents"
+          test -n "$(ls -A)"
