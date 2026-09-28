@@ -223,7 +223,9 @@ export function listAllSessions(): SessionRecord[] {
 
 /**
  * Find the best matching active session for a given URL.
- * Prefers exact-scope matches over prefix-scope.
+ * Prefers exact-scope matches over prefix-scope. Among overlapping
+ * prefix sessions, prefers the longest (most specific) endpoint path,
+ * then the narrower required-query constraint, then recency.
  * Used to auto-attach a session to x402_pay when available.
  */
 export function findSessionForUrl(url: string): SessionRecord | undefined {
@@ -236,11 +238,29 @@ export function findSessionForUrl(url: string): SessionRecord | undefined {
   const exact = active.find((s) => s.scope === 'exact' && s.endpoint === url);
   if (exact) return exact;
 
-  // Try prefix match
-  const prefix = active.find((s) => s.scope === 'prefix' && isUrlCoveredBySession(url, s));
-  if (prefix) return prefix;
+  const prefixMatches = active.filter(
+    (s) => s.scope === 'prefix' && isUrlCoveredBySession(url, s)
+  );
+  if (prefixMatches.length === 0) return undefined;
 
-  return undefined;
+  return prefixMatches.reduce((best, current) => {
+    const bestPathLen = endpointPathLength(best.endpoint);
+    const currentPathLen = endpointPathLength(current.endpoint);
+    if (currentPathLen !== bestPathLen) {
+      return currentPathLen > bestPathLen ? current : best;
+    }
+    // Same path: a query-constrained session is narrower than a broad
+    // token. Prefer it so a server that 402s the broad entitlement cannot
+    // fall through to a second on-chain payment.
+    const bestQueryCount = endpointQueryConstraintCount(best.endpoint);
+    const currentQueryCount = endpointQueryConstraintCount(current.endpoint);
+    if (currentQueryCount !== bestQueryCount) {
+      return currentQueryCount > bestQueryCount ? current : best;
+    }
+    // Equal specificity: prefer the more recently created session so a
+    // newly paid, equally-specific session is not shadowed by an older one.
+    return current.createdAt >= best.createdAt ? current : best;
+  });
 }
 
 /**
@@ -356,6 +376,32 @@ export function _clearAllSessions(): void {
 }
 
 // ─── Internal helpers ──────────────────────────────────────────────────────
+
+/**
+ * Pathname length used to rank overlapping prefix sessions.
+ * Longer paths are more specific (`/v1/premium` beats `/v1`).
+ */
+function endpointPathLength(endpoint: string): number {
+  try {
+    return new URL(endpoint).pathname.length;
+  } catch {
+    return 0;
+  }
+}
+
+/**
+ * Required query-parameter count used to rank overlapping prefix sessions
+ * that share a pathname. More pinned parameters are more specific
+ * (`/v1?tier=premium` beats `/v1`). Duplicate keys count separately so a
+ * multiset pin stays narrower than a single-value pin of the same key.
+ */
+function endpointQueryConstraintCount(endpoint: string): number {
+  try {
+    return [...new URL(endpoint).searchParams].length;
+  } catch {
+    return 0;
+  }
+}
 
 /**
  * Produce a deterministic canonical JSON representation.
