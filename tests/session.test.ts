@@ -1650,6 +1650,57 @@ describe('Session manager (direct unit tests)', () => {
     expect(found!.endpoint).toBe('https://api.example.com/v1/premium');
   });
 
+  it('findSessionForUrl prefers a query-constrained prefix over a newer broad token', async () => {
+    const shared = {
+      scope: 'prefix' as const,
+      walletAddress: '0xwallet',
+      paymentTxHash: '0xtx',
+      paymentAmount: 100n,
+      paymentToken: '0x0000000000000000000000000000000000000000',
+      paymentRecipient: '0xrecip',
+      signMessage: makeSignFn(),
+    };
+
+    await createSession({
+      ...shared,
+      endpoint: 'https://api.example.com/v1?tier=premium',
+    });
+    await createSession({ ...shared, endpoint: 'https://api.example.com/v1' });
+
+    const found = findSessionForUrl('https://api.example.com/v1?tier=premium');
+    expect(found).toBeDefined();
+    expect(found!.endpoint).toBe('https://api.example.com/v1?tier=premium');
+  });
+
+  it('findSessionForUrl prefers the narrower query constraint before recency', async () => {
+    const shared = {
+      scope: 'prefix' as const,
+      walletAddress: '0xwallet',
+      paymentTxHash: '0xtx',
+      paymentAmount: 100n,
+      paymentToken: '0x0000000000000000000000000000000000000000',
+      paymentRecipient: '0xrecip',
+      signMessage: makeSignFn(),
+    };
+
+    await createSession({
+      ...shared,
+      endpoint: 'https://api.example.com/v1?tier=premium&region=us',
+    });
+    await createSession({
+      ...shared,
+      endpoint: 'https://api.example.com/v1?tier=premium',
+    });
+
+    const found = findSessionForUrl(
+      'https://api.example.com/v1?tier=premium&region=us'
+    );
+    expect(found).toBeDefined();
+    expect(found!.endpoint).toBe(
+      'https://api.example.com/v1?tier=premium&region=us'
+    );
+  });
+
   it('findSessionForUrl prefers an exact match over a covering prefix', async () => {
     const shared = {
       walletAddress: '0xwallet',
