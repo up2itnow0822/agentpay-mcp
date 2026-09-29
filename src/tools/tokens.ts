@@ -74,8 +74,9 @@ export const addCustomTokenTool = {
   description:
     'Register a custom ERC-20 token in the global token registry so it can be used ' +
     'by send_token, get_balances, and swap_tokens. Refuses to overwrite an existing ' +
-    'symbol+chain entry (including built-ins such as USDC) because a wrong decimals ' +
-    'value would silently overpay on later transfers and swaps.',
+    'symbol+chain entry or to alias an already-registered contract with different ' +
+    'decimals (including built-ins such as USDC) because a wrong decimals value ' +
+    'would silently overpay on later transfers and swaps.',
   inputSchema: {
     type: 'object' as const,
     properties: {
@@ -105,27 +106,71 @@ export type CustomTokenIdentity = {
  * USDC). Spend-policy scaling treats 1 whole token as 1 unit either way, so
  * a poisoned decimals value is not caught by budget checks. Refuse any
  * address or decimals change for an existing symbol+chain. Identical
- * re-registration is idempotent.
+ * re-registration is idempotent. A new symbol that reuses an existing
+ * contract address with different decimals is also refused: send_token
+ * of FAKEUSDC against USDC's address at 18 decimals overpays by 10^12.
+ * Same-decimals aliases of an already-registered address are allowed.
  */
 export function decideCustomTokenRegistration(
-  existing: CustomTokenIdentity | undefined,
-  incoming: CustomTokenIdentity
+  existingBySymbol: CustomTokenIdentity | undefined,
+  incoming: CustomTokenIdentity,
+  existingByAddress?: CustomTokenIdentity
 ): 'register' | 'idempotent' {
-  if (!existing) return 'register'
+  if (existingBySymbol) {
+    const sameAddress =
+      existingBySymbol.address.toLowerCase() === incoming.address.toLowerCase()
+    const sameDecimals = existingBySymbol.decimals === incoming.decimals
+    if (sameAddress && sameDecimals) return 'idempotent'
 
-  const sameAddress = existing.address.toLowerCase() === incoming.address.toLowerCase()
-  const sameDecimals = existing.decimals === incoming.decimals
-  if (sameAddress && sameDecimals) return 'idempotent'
+    const symbol = incoming.symbol.toUpperCase()
+    throw new Error(
+      `Token "${symbol}" is already registered on chain ${incoming.chainId} ` +
+        `at ${existingBySymbol.address} with ${existingBySymbol.decimals} decimals. ` +
+        `add_custom_token refuses to overwrite address or decimals because ` +
+        `send_token and swap_tokens convert human amounts using registry decimals ` +
+        `(changing USDC from 6 to 18 would overpay by 10^12). ` +
+        `Restart the server to clear in-process custom entries.`
+    )
+  }
 
-  const symbol = incoming.symbol.toUpperCase()
-  throw new Error(
-    `Token "${symbol}" is already registered on chain ${incoming.chainId} ` +
-      `at ${existing.address} with ${existing.decimals} decimals. ` +
-      `add_custom_token refuses to overwrite address or decimals because ` +
-      `send_token and swap_tokens convert human amounts using registry decimals ` +
-      `(changing USDC from 6 to 18 would overpay by 10^12). ` +
-      `Use a different symbol, or restart the server to clear in-process custom entries.`
-  )
+  if (existingByAddress) {
+    const sameDecimals = existingByAddress.decimals === incoming.decimals
+    if (sameDecimals) return 'register'
+
+    const existingSymbol = existingByAddress.symbol.toUpperCase()
+    const incomingSymbol = incoming.symbol.toUpperCase()
+    throw new Error(
+      `Address ${existingByAddress.address} is already registered on chain ` +
+        `${incoming.chainId} as "${existingSymbol}" with ` +
+        `${existingByAddress.decimals} decimals. ` +
+        `add_custom_token refuses to register "${incomingSymbol}" against ` +
+        `the same contract with ${incoming.decimals} decimals because ` +
+        `send_token and swap_tokens convert human amounts using registry decimals ` +
+        `(a FAKEUSDC alias of USDC at 18 decimals would overpay by 10^12). ` +
+        `A different symbol does not bypass the decimals lock.`
+    )
+  }
+
+  return 'register'
+}
+
+function asIdentity(
+  token:
+    | {
+        symbol: string
+        address: string
+        decimals: number
+        chainId: number
+      }
+    | undefined
+): CustomTokenIdentity | undefined {
+  if (!token) return undefined
+  return {
+    symbol: token.symbol,
+    address: token.address,
+    decimals: token.decimals,
+    chainId: token.chainId,
+  }
 }
 
 export async function handleAddCustomToken(
@@ -141,16 +186,20 @@ export async function handleAddCustomToken(
       chainId: input.chainId,
     }
     const existing = registry.getToken(symbol, input.chainId)
+    const listed = registry.listTokens(input.chainId)
+    const tokensOnChain = Array.isArray(listed) ? listed : []
+    const existingByAddressToken = tokensOnChain.find(
+      (token) => token.address.toLowerCase() === incoming.address.toLowerCase()
+    )
+    const existingByAddress =
+      existingByAddressToken &&
+      existingByAddressToken.symbol.toUpperCase() !== symbol
+        ? asIdentity(existingByAddressToken)
+        : undefined
     const decision = decideCustomTokenRegistration(
-      existing
-        ? {
-            symbol: existing.symbol,
-            address: existing.address,
-            decimals: existing.decimals,
-            chainId: existing.chainId,
-          }
-        : undefined,
-      incoming
+      asIdentity(existing),
+      incoming,
+      existingByAddress
     )
 
     if (decision === 'register') {

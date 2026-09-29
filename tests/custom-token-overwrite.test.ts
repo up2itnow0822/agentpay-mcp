@@ -40,4 +40,33 @@ describe('registry overwrite overpay (real TokenRegistry + parseAmount)', () => 
     expect(correctRaw).toBe(10_000_000n)
     expect(poisonedRaw / correctRaw).toBe(10n ** 12n)
   })
+
+  it('listTokens exposes Base USDC so an alias can be matched by address', () => {
+    const registry = new TokenRegistry()
+    const listed = registry.listTokens(BASE)
+    const usdc = listed.find(
+      (token) => token.address.toLowerCase() === USDC_BASE.toLowerCase()
+    )
+    expect(usdc).toBeDefined()
+    expect(usdc!.symbol.toUpperCase()).toBe('USDC')
+    expect(usdc!.decimals).toBe(6)
+  })
+
+  it('a FAKEUSDC alias at 18 decimals would overpay by 10^12 on the same contract', () => {
+    const registry = new TokenRegistry()
+    registry.addToken({
+      symbol: 'FAKEUSDC',
+      address: USDC_BASE as `0x${string}`,
+      decimals: 18,
+      chainId: BASE,
+      name: 'Fake USDC',
+    })
+    const alias = registry.getToken('FAKEUSDC', BASE)
+    expect(alias).toBeDefined()
+    expect(alias!.address.toLowerCase()).toBe(USDC_BASE.toLowerCase())
+    expect(alias!.decimals).toBe(18)
+    const correctRaw = parseAmount('10', 6)
+    const poisonedRaw = parseAmount('10', alias!.decimals)
+    expect(poisonedRaw / correctRaw).toBe(10n ** 12n)
+  })
 })

@@ -84,6 +84,7 @@ describe('lookup_token', () => {
 describe('add_custom_token', () => {
   beforeEach(() => {
     vi.clearAllMocks()
+    mockListTokens.mockReturnValue([])
   })
 
   it('adds token and returns success', async () => {
@@ -212,6 +213,65 @@ describe('add_custom_token', () => {
     expect(mockAddToken).not.toHaveBeenCalled()
   })
 
+  it('refuses a FAKEUSDC alias that poisons USDC decimals', async () => {
+    const usdc = {
+      symbol: 'USDC',
+      address: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913',
+      decimals: 6,
+      chainId: 8453,
+      name: 'USD Coin',
+    }
+    mockGetToken.mockReturnValue(undefined)
+    mockListTokens.mockReturnValue([usdc])
+
+    const result = await handleAddCustomToken({
+      symbol: 'FAKEUSDC',
+      address: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913',
+      decimals: 18,
+      chainId: 8453,
+    })
+
+    expect(result.isError).toBe(true)
+    expect(result.content[0].text).toContain('add_custom_token failed')
+    expect(result.content[0].text).toContain('already registered')
+    expect(result.content[0].text).toContain('A different symbol does not bypass the decimals lock')
+    expect(mockAddToken).not.toHaveBeenCalled()
+  })
+
+  it('allows a same-decimals alias of an already-registered address', async () => {
+    const usdc = {
+      symbol: 'USDC',
+      address: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913',
+      decimals: 6,
+      chainId: 8453,
+      name: 'USD Coin',
+    }
+    const alias = {
+      symbol: 'USDCBASE',
+      address: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913',
+      decimals: 6,
+      chainId: 8453,
+      name: 'USD Coin',
+    }
+    mockGetToken
+      .mockReturnValueOnce(undefined)
+      .mockReturnValue(alias)
+    mockListTokens.mockReturnValue([usdc])
+
+    const result = await handleAddCustomToken({
+      symbol: 'USDCBASE',
+      address: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913',
+      decimals: 6,
+      chainId: 8453,
+    })
+
+    expect(result.isError).toBeUndefined()
+    const data = JSON.parse(result.content[0].text)
+    expect(data.success).toBe(true)
+    expect(data.idempotent).toBe(false)
+    expect(mockAddToken).toHaveBeenCalled()
+  })
+
   it('returns error if addToken throws', async () => {
     mockGetToken.mockReturnValue(undefined)
     mockAddToken.mockImplementation(() => { throw new Error('Duplicate token') })
@@ -262,6 +322,26 @@ describe('decideCustomTokenRegistration', () => {
         address: '0x0000000000000000000000000000000000000001',
       })
     ).toThrow(/already registered/)
+  })
+
+  it('throws when a new symbol aliases an existing address with different decimals', () => {
+    expect(() =>
+      decideCustomTokenRegistration(
+        undefined,
+        { ...usdc, symbol: 'FAKEUSDC', decimals: 18 },
+        usdc
+      )
+    ).toThrow(/A different symbol does not bypass the decimals lock/)
+  })
+
+  it('allows a new symbol alias when the address decimals already match', () => {
+    expect(
+      decideCustomTokenRegistration(
+        undefined,
+        { ...usdc, symbol: 'USDCBASE' },
+        usdc
+      )
+    ).toBe('register')
   })
 })
 
