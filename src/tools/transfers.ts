@@ -147,11 +147,14 @@ export async function handleGetBalances(
     const wallet = getWallet()
     const config = getConfig()
     const chainId = input.chainId ?? config.chainId
+    // Funds live on AgentAccountV2 (wallet.address). The viem walletClient
+    // account is only the EOA signer and typically holds no tokens.
+    const walletAddress = wallet.address ?? config.walletAddress
 
     const ctx: AnyCtx = {
       publicClient: wallet.publicClient,
       walletClient: wallet.walletClient,
-      account: wallet.walletClient.account!.address,
+      account: walletAddress,
       chainId,
     }
 
@@ -168,7 +171,7 @@ export async function handleGetBalances(
       content: [
         textContent(
           JSON.stringify({
-            walletAddress: wallet.walletClient.account!.address,
+            walletAddress,
             chainId,
             count: serialized.length,
             balances: serialized,
