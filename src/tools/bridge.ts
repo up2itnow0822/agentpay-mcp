@@ -9,6 +9,7 @@ import { createBridge } from 'agentwallet-sdk'
 type AnyWalletClient = any
 import { getWallet } from '../utils/client.js'
 import { textContent, formatError } from '../utils/format.js'
+import { assertConfiguredBridgeSource } from '../utils/wallet-chain.js'
 import { enforceSpendPolicy } from './budget.js'
 import { parseAmountStrict } from '../utils/amount.js'
 
@@ -77,6 +78,8 @@ export async function handleBridgeUsdc(
     if (input.fromChain === input.toChain) {
       throw new Error('fromChain and toChain must be different')
     }
+
+    assertConfiguredBridgeSource(input.fromChain, 'bridge_usdc')
 
     // Parse USDC amount (6 decimals) — strict string parsing, no float rounding
     const USDC_DECIMALS = 6

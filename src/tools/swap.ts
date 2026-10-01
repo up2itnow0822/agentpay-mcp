@@ -11,6 +11,7 @@ import type { Address } from 'viem'
 type AnyWallet = any
 import { getWallet } from '../utils/client.js'
 import { textContent, formatError } from '../utils/format.js'
+import { assertConfiguredChain } from '../utils/wallet-chain.js'
 import { enforceSpendPolicy } from './budget.js'
 
 // ─── Schema ────────────────────────────────────────────────────────────────
@@ -61,6 +62,7 @@ export async function handleSwapTokens(
   input: SwapTokensInput
 ): Promise<{ content: Array<{ type: 'text'; text: string }>; isError?: boolean }> {
   try {
+    assertConfiguredChain(input.chainId, 'swap_tokens')
     const wallet = getWallet()
     const registry = getGlobalRegistry()
 

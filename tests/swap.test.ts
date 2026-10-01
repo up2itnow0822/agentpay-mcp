@@ -18,6 +18,10 @@ vi.mock('agentwallet-sdk', () => ({
 // ─── Mock client utils ─────────────────────────────────────────────────────
 
 vi.mock('../src/utils/client.js', () => ({
+  getConfig: vi.fn(() => ({
+    chainId: 8453,
+    walletAddress: '0x1234567890123456789012345678901234567890',
+  })),
   getWallet: vi.fn(() => ({
     address: '0x1234567890123456789012345678901234567890',
     publicClient: {},
@@ -268,5 +272,25 @@ describe('swap_tokens', () => {
     expect(result.isError).toBeUndefined()
     expect(check).toHaveBeenCalledOnce()
     expect(mockSwap).toHaveBeenCalledOnce()
+  })
+
+  it('refuses a chainId the wallet cannot sign before looking up tokens', async () => {
+    const getToken = vi.fn().mockReturnValue(WETH)
+    mockGetGlobalRegistry.mockReturnValue({ getToken } as any)
+    const mockSwap = vi.fn()
+    mockAttachSwap.mockReturnValue({ swap: mockSwap } as any)
+
+    const result = await handleSwapTokens({
+      fromSymbol: 'WETH',
+      toSymbol: 'USDC',
+      amount: '1',
+      chainId: 10,
+    })
+
+    expect(result.isError).toBe(true)
+    expect(result.content[0].text).toContain('swap_tokens failed')
+    expect(result.content[0].text).toContain('refusing chainId 10')
+    expect(getToken).not.toHaveBeenCalled()
+    expect(mockSwap).not.toHaveBeenCalled()
   })
 })
