@@ -114,6 +114,30 @@ describe('send_token', () => {
     expect(result.content[0].text).toContain('send_token failed')
     expect(result.content[0].text).toContain('Spend limit exceeded')
   })
+
+  it('refuses a chainId the wallet cannot sign before looking up the token', async () => {
+    mockGetGlobalRegistry.mockReturnValue({
+      getToken: vi.fn().mockReturnValue({
+        symbol: 'WETH',
+        address: '0x4200000000000000000000000000000000000006',
+        decimals: 18,
+        chainId: 10,
+      }),
+    } as any)
+
+    const result = await handleSendToken({
+      tokenSymbol: 'WETH',
+      chainId: 10,
+      recipientAddress: '0xrecipient00000000000000000000000000000001',
+      amount: '1',
+    })
+
+    expect(result.isError).toBe(true)
+    expect(result.content[0].text).toContain('send_token failed')
+    expect(result.content[0].text).toContain('refusing chainId 10')
+    expect(mockGetGlobalRegistry().getToken).not.toHaveBeenCalled()
+    expect(mockAgentTransferToken).not.toHaveBeenCalled()
+  })
 })
 
 describe('get_balances', () => {
@@ -149,14 +173,26 @@ describe('get_balances', () => {
     )
   })
 
-  it('uses provided chainId when specified', async () => {
+  it('allows a matching chainId and queries the configured wallet chain', async () => {
     mockGetBalances.mockResolvedValue([] as any)
 
-    await handleGetBalances({ chainId: 42161 })
+    const result = await handleGetBalances({ chainId: 8453 })
 
+    expect(result.isError).toBeUndefined()
     expect(mockGetBalances).toHaveBeenCalledWith(
-      expect.objectContaining({ chainId: 42161 })
+      expect.objectContaining({ chainId: 8453 })
     )
+  })
+
+  it('refuses a chainId the wallet public client cannot query', async () => {
+    mockGetBalances.mockResolvedValue([] as any)
+
+    const result = await handleGetBalances({ chainId: 42161 })
+
+    expect(result.isError).toBe(true)
+    expect(result.content[0].text).toContain('get_balances failed')
+    expect(result.content[0].text).toContain('refusing chainId 42161')
+    expect(mockGetBalances).not.toHaveBeenCalled()
   })
 
   it('returns error when SDK call fails', async () => {

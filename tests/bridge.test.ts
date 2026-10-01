@@ -14,6 +14,10 @@ vi.mock('agentwallet-sdk', () => ({
 // ─── Mock client utils ─────────────────────────────────────────────────────
 
 vi.mock('../src/utils/client.js', () => ({
+  getConfig: vi.fn(() => ({
+    chainId: 8453,
+    walletAddress: '0x1234567890123456789012345678901234567890',
+  })),
   getWallet: vi.fn(() => ({
     address: '0x1234567890123456789012345678901234567890',
     publicClient: {},
@@ -274,5 +278,18 @@ describe('bridge_usdc', () => {
     expect(result.isError).toBeUndefined()
     expect(check).toHaveBeenCalledOnce()
     expect(mockBridge).toHaveBeenCalledWith(100000000n, 'polygon')
+  })
+
+  it('refuses a CCTP source the wallet cannot sign before creating the bridge', async () => {
+    const result = await handleBridgeUsdc({
+      fromChain: 'optimism',
+      toChain: 'base',
+      amount: '100',
+    })
+
+    expect(result.isError).toBe(true)
+    expect(result.content[0].text).toContain('bridge_usdc failed')
+    expect(result.content[0].text).toContain('refusing fromChain "optimism"')
+    expect(mockCreateBridge).not.toHaveBeenCalled()
   })
 })

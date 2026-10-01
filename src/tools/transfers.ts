@@ -10,6 +10,7 @@ import type { Address } from 'viem'
 type AnyCtx = any
 import { getWallet, getConfig } from '../utils/client.js'
 import { textContent, formatError } from '../utils/format.js'
+import { assertConfiguredChain } from '../utils/wallet-chain.js'
 import { enforceSpendPolicy } from './budget.js'
 
 // ─── send_token ────────────────────────────────────────────────────────────
@@ -48,6 +49,7 @@ export async function handleSendToken(
   input: SendTokenInput
 ): Promise<{ content: Array<{ type: 'text'; text: string }>; isError?: boolean }> {
   try {
+    assertConfiguredChain(input.chainId, 'send_token')
     const wallet = getWallet()
     const registry = getGlobalRegistry()
 
@@ -144,9 +146,12 @@ export async function handleGetBalances(
   input: GetBalancesInput
 ): Promise<{ content: Array<{ type: 'text'; text: string }>; isError?: boolean }> {
   try {
+    if (input.chainId !== undefined) {
+      assertConfiguredChain(input.chainId, 'get_balances')
+    }
     const wallet = getWallet()
     const config = getConfig()
-    const chainId = input.chainId ?? config.chainId
+    const chainId = config.chainId
     // Funds live on AgentAccountV2 (wallet.address). The viem walletClient
     // account is only the EOA signer and typically holds no tokens.
     const walletAddress = wallet.address ?? config.walletAddress
