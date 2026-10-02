@@ -3,7 +3,9 @@
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import {
+  DefiniteSpendFailure,
   SEND_TOKEN_INTENT_TTL_MS,
+  UnresolvedSpendIntentError,
   _resetSpendIntentStore,
   sendTokenIntentKey,
   withSpendIntent,
@@ -42,6 +44,21 @@ describe('sendTokenIntentKey', () => {
       })
     ).not.toBe(sendTokenIntentKey(base))
   })
+
+  it('distinguishes equal payloads when idempotency keys differ', () => {
+    const base = {
+      chainId: 8453,
+      tokenAddress: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913',
+      recipientAddress: '0xrecipient00000000000000000000000000000001',
+      rawAmount: 10_000_000n,
+    }
+    expect(sendTokenIntentKey({ ...base, idempotencyKey: 'invoice-1' })).not.toBe(
+      sendTokenIntentKey({ ...base, idempotencyKey: 'invoice-2' })
+    )
+    expect(sendTokenIntentKey({ ...base, idempotencyKey: 'invoice-1' })).not.toBe(
+      sendTokenIntentKey(base)
+    )
+  })
 })
 
 describe('withSpendIntent', () => {
@@ -65,12 +82,22 @@ describe('withSpendIntent', () => {
     expect(run).toHaveBeenCalledTimes(1)
   })
 
-  it('does not cache a failed attempt', async () => {
+  it('fail-closes after an unresolved broadcast instead of sending again', async () => {
     const run = vi
       .fn()
       .mockRejectedValueOnce(new Error('rpc timeout'))
       .mockResolvedValueOnce('0xtxhash')
     await expect(withSpendIntent('k1', run)).rejects.toThrow('rpc timeout')
+    await expect(withSpendIntent('k1', run)).rejects.toBeInstanceOf(UnresolvedSpendIntentError)
+    expect(run).toHaveBeenCalledTimes(1)
+  })
+
+  it('retries a definite pre-broadcast failure', async () => {
+    const run = vi
+      .fn()
+      .mockRejectedValueOnce(new DefiniteSpendFailure('spend policy rejected'))
+      .mockResolvedValueOnce('0xtxhash')
+    await expect(withSpendIntent('k1', run)).rejects.toThrow('spend policy rejected')
     const retry = await withSpendIntent('k1', run)
     expect(retry).toEqual({ value: '0xtxhash', replayed: false })
     expect(run).toHaveBeenCalledTimes(2)
@@ -92,6 +119,15 @@ describe('withSpendIntent', () => {
       { value: '0xtxhash', replayed: true },
     ])
     expect(run).toHaveBeenCalledTimes(1)
+  })
+
+  it('allows a new send after an unresolved intent TTL expires', async () => {
+    const run = vi.fn().mockRejectedValueOnce(new Error('rpc timeout')).mockResolvedValueOnce('0xsecond')
+    await expect(withSpendIntent('k1', run)).rejects.toThrow('rpc timeout')
+    vi.advanceTimersByTime(SEND_TOKEN_INTENT_TTL_MS + 1)
+    const retry = await withSpendIntent('k1', run)
+    expect(retry).toEqual({ value: '0xsecond', replayed: false })
+    expect(run).toHaveBeenCalledTimes(2)
   })
 
   it('allows a new send after the TTL expires', async () => {

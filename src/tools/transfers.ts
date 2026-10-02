@@ -11,7 +11,11 @@ type AnyCtx = any
 import { getWallet, getConfig } from '../utils/client.js'
 import { textContent, formatError } from '../utils/format.js'
 import { assertConfiguredChain } from '../utils/wallet-chain.js'
-import { sendTokenIntentKey, withSpendIntent } from '../utils/spend-intent.js'
+import {
+  DefiniteSpendFailure,
+  sendTokenIntentKey,
+  withSpendIntent,
+} from '../utils/spend-intent.js'
 import { enforceSpendPolicy } from './budget.js'
 
 // ─── send_token ────────────────────────────────────────────────────────────
@@ -23,6 +27,17 @@ export const SendTokenSchema = z.object({
   amount: z
     .string()
     .describe('Amount in human-readable units, e.g. "10.5" for 10.5 USDC'),
+  idempotencyKey: z
+    .string()
+    .trim()
+    .min(1)
+    .max(128)
+    .optional()
+    .describe(
+      'Caller-supplied idempotency key. Distinct keys allow two equal payments; ' +
+        'the same key replays the original transfer. MCP retries without a key ' +
+        'still collapse on the settled payload for five minutes.'
+    ),
 })
 
 export type SendTokenInput = z.infer<typeof SendTokenSchema>
@@ -33,7 +48,9 @@ export const sendTokenTool = {
     'Send any ERC-20 token from the Agent Wallet to a recipient. ' +
     'Resolves the token address and decimals from the global registry, ' +
     'then calls agentTransferToken through the AgentAccountV2 contract. ' +
-    'Subject to configured spend limits.',
+    'Subject to configured spend limits. Identical retries replay the original ' +
+    'tx; pass idempotencyKey to distinguish two equal invoices. An RPC drop ' +
+    'after broadcast fail-closes instead of sending a second transfer.',
   inputSchema: {
     type: 'object' as const,
     properties: {
@@ -41,6 +58,11 @@ export const sendTokenTool = {
       chainId: { type: 'number', description: 'Chain ID (e.g. 8453 for Base Mainnet)' },
       recipientAddress: { type: 'string', description: 'Recipient address (0x-prefixed)' },
       amount: { type: 'string', description: 'Amount in human-readable units (e.g. "10.5")' },
+      idempotencyKey: {
+        type: 'string',
+        description:
+          'Optional idempotency key (1-128 chars). Distinct keys allow two equal payments.',
+      },
     },
     required: ['tokenSymbol', 'chainId', 'recipientAddress', 'amount'],
   },
@@ -68,6 +90,7 @@ export async function handleSendToken(
       tokenAddress: token.address,
       recipientAddress: input.recipientAddress,
       rawAmount,
+      idempotencyKey: input.idempotencyKey,
     })
 
     const { value, replayed } = await withSpendIntent(intentKey, async () => {
@@ -79,13 +102,13 @@ export async function handleSendToken(
         decimals: token.decimals,
       })
       if (policyDecision.status === 'rejected') {
-        throw new Error(
+        throw new DefiniteSpendFailure(
           policyDecision.reason ??
             `Transfer blocked by spend policy for recipient ${input.recipientAddress}.`
         )
       }
       if (policyDecision.status === 'draft') {
-        throw new Error(
+        throw new DefiniteSpendFailure(
           `Transfer exceeds per-tx spend policy and was queued as draft` +
             `${policyDecision.draftId ? ` (${policyDecision.draftId})` : ''}. ` +
             (policyDecision.reason ?? 'Approve the draft before executing.')
