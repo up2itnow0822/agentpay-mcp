@@ -32,14 +32,35 @@ vi.mock('../src/utils/client.js', () => ({
 
 import { handleSendToken, handleGetBalances } from '../src/tools/transfers.js'
 import { getGlobalRegistry, agentTransferToken, getBalances } from 'agentwallet-sdk'
+import { _resetSpendIntentStore } from '../src/utils/spend-intent.js'
 
 const mockGetGlobalRegistry = vi.mocked(getGlobalRegistry)
 const mockAgentTransferToken = vi.mocked(agentTransferToken)
 const mockGetBalances = vi.mocked(getBalances)
 
+function mockUsdcRegistry() {
+  mockGetGlobalRegistry.mockReturnValue({
+    getToken: vi.fn().mockReturnValue({
+      symbol: 'USDC',
+      address: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913',
+      decimals: 6,
+      chainId: 8453,
+    }),
+  } as any)
+}
+
+const usdcSend = {
+  tokenSymbol: 'USDC',
+  chainId: 8453,
+  recipientAddress: '0xrecipient00000000000000000000000000000001',
+  amount: '10',
+}
+
 describe('send_token', () => {
   beforeEach(() => {
     vi.clearAllMocks()
+    mockAgentTransferToken.mockReset()
+    _resetSpendIntentStore()
   })
 
   it('sends token successfully', async () => {
@@ -137,6 +158,84 @@ describe('send_token', () => {
     expect(result.content[0].text).toContain('refusing chainId 10')
     expect(mockGetGlobalRegistry().getToken).not.toHaveBeenCalled()
     expect(mockAgentTransferToken).not.toHaveBeenCalled()
+  })
+
+  it('replays an identical send_token retry without a second transfer', async () => {
+    mockUsdcRegistry()
+    mockAgentTransferToken.mockResolvedValue('0xtxhash123' as any)
+
+    const first = await handleSendToken(usdcSend)
+    const retry = await handleSendToken(usdcSend)
+
+    expect(first.isError).toBeUndefined()
+    expect(retry.isError).toBeUndefined()
+    const firstData = JSON.parse(first.content[0].text)
+    const retryData = JSON.parse(retry.content[0].text)
+    expect(firstData.txHash).toBe('0xtxhash123')
+    expect(firstData.idempotentRetry).toBeUndefined()
+    expect(retryData.txHash).toBe('0xtxhash123')
+    expect(retryData.idempotentRetry).toBe(true)
+    expect(mockAgentTransferToken).toHaveBeenCalledTimes(1)
+  })
+
+  it('broadcasts a second transfer when the recipient differs', async () => {
+    mockUsdcRegistry()
+    mockAgentTransferToken
+      .mockResolvedValueOnce('0xtxhash1' as any)
+      .mockResolvedValueOnce('0xtxhash2' as any)
+
+    const first = await handleSendToken(usdcSend)
+    const second = await handleSendToken({
+      ...usdcSend,
+      recipientAddress: '0xrecipient00000000000000000000000000000002',
+    })
+
+    expect(JSON.parse(first.content[0].text).txHash).toBe('0xtxhash1')
+    expect(JSON.parse(second.content[0].text).txHash).toBe('0xtxhash2')
+    expect(JSON.parse(second.content[0].text).idempotentRetry).toBeUndefined()
+    expect(mockAgentTransferToken).toHaveBeenCalledTimes(2)
+  })
+
+  it('fail-closes an identical retry after an unresolved broadcast', async () => {
+    mockUsdcRegistry()
+    mockAgentTransferToken.mockRejectedValueOnce(new Error('rpc timeout'))
+
+    const failed = await handleSendToken(usdcSend)
+    const retry = await handleSendToken(usdcSend)
+
+    expect(failed.isError).toBe(true)
+    expect(failed.content[0].text).toContain('rpc timeout')
+    expect(retry.isError).toBe(true)
+    expect(retry.content[0].text).toContain('did not return a transaction hash')
+    expect(mockAgentTransferToken).toHaveBeenCalledTimes(1)
+  })
+
+  it('broadcasts two equal payments when idempotency keys differ', async () => {
+    mockUsdcRegistry()
+    mockAgentTransferToken
+      .mockResolvedValueOnce('0xtxhash1' as any)
+      .mockResolvedValueOnce('0xtxhash2' as any)
+
+    const first = await handleSendToken({ ...usdcSend, idempotencyKey: 'invoice-1' })
+    const second = await handleSendToken({ ...usdcSend, idempotencyKey: 'invoice-2' })
+
+    expect(JSON.parse(first.content[0].text).txHash).toBe('0xtxhash1')
+    expect(JSON.parse(second.content[0].text).txHash).toBe('0xtxhash2')
+    expect(JSON.parse(second.content[0].text).idempotentRetry).toBeUndefined()
+    expect(mockAgentTransferToken).toHaveBeenCalledTimes(2)
+  })
+
+  it('replays when the caller retries the same idempotency key', async () => {
+    mockUsdcRegistry()
+    mockAgentTransferToken.mockResolvedValue('0xtxhash123' as any)
+
+    const first = await handleSendToken({ ...usdcSend, idempotencyKey: 'invoice-1' })
+    const retry = await handleSendToken({ ...usdcSend, idempotencyKey: 'invoice-1' })
+
+    expect(JSON.parse(first.content[0].text).idempotentRetry).toBeUndefined()
+    expect(JSON.parse(retry.content[0].text).txHash).toBe('0xtxhash123')
+    expect(JSON.parse(retry.content[0].text).idempotentRetry).toBe(true)
+    expect(mockAgentTransferToken).toHaveBeenCalledTimes(1)
   })
 })
 
