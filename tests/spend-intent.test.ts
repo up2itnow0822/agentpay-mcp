@@ -8,6 +8,8 @@ import {
   UnresolvedSpendIntentError,
   _resetSpendIntentStore,
   sendTokenIntentKey,
+  swapTokensIntentKey,
+  bridgeUsdcIntentKey,
   withSpendIntent,
 } from '../src/utils/spend-intent.js'
 
@@ -57,6 +59,64 @@ describe('sendTokenIntentKey', () => {
     )
     expect(sendTokenIntentKey({ ...base, idempotencyKey: 'invoice-1' })).not.toBe(
       sendTokenIntentKey(base)
+    )
+  })
+})
+
+describe('swapTokensIntentKey', () => {
+  const base = {
+    chainId: 8453,
+    fromTokenAddress: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913',
+    toTokenAddress: '0x4200000000000000000000000000000000000006',
+    rawAmountIn: 100_000_000n,
+  }
+
+  it('normalises token address case so checksum retries collide', () => {
+    expect(
+      swapTokensIntentKey({
+        ...base,
+        fromTokenAddress: base.fromTokenAddress.toLowerCase(),
+        toTokenAddress: base.toTokenAddress.toLowerCase(),
+      })
+    ).toBe(swapTokensIntentKey(base))
+  })
+
+  it('changes when pair, amount, chain, or slippage changes', () => {
+    expect(swapTokensIntentKey({ ...base, chainId: 10 })).not.toBe(swapTokensIntentKey(base))
+    expect(swapTokensIntentKey({ ...base, rawAmountIn: 50_000_000n })).not.toBe(
+      swapTokensIntentKey(base)
+    )
+    expect(
+      swapTokensIntentKey({
+        ...base,
+        toTokenAddress: '0x0000000000000000000000000000000000000001',
+      })
+    ).not.toBe(swapTokensIntentKey(base))
+    expect(swapTokensIntentKey({ ...base, slippageBps: 100 })).not.toBe(
+      swapTokensIntentKey(base)
+    )
+  })
+})
+
+describe('bridgeUsdcIntentKey', () => {
+  const base = {
+    fromChain: 'base',
+    toChain: 'polygon',
+    rawAmount: 100_000_000n,
+  }
+
+  it('normalises chain names so case retries collide', () => {
+    expect(
+      bridgeUsdcIntentKey({ ...base, fromChain: 'BASE', toChain: 'POLYGON' })
+    ).toBe(bridgeUsdcIntentKey(base))
+  })
+
+  it('changes when route or amount changes', () => {
+    expect(bridgeUsdcIntentKey({ ...base, toChain: 'arbitrum' })).not.toBe(
+      bridgeUsdcIntentKey(base)
+    )
+    expect(bridgeUsdcIntentKey({ ...base, rawAmount: 50_000_000n })).not.toBe(
+      bridgeUsdcIntentKey(base)
     )
   })
 })

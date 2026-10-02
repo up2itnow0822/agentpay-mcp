@@ -32,6 +32,7 @@ vi.mock('../src/utils/client.js', () => ({
 
 import { handleSwapTokens } from '../src/tools/swap.js'
 import { handleSetSpendPolicy, _resetPolicyStore } from '../src/tools/budget.js'
+import { _resetSpendIntentStore } from '../src/utils/spend-intent.js'
 import { getGlobalRegistry, attachSwap, SpendingPolicy } from 'agentwallet-sdk'
 
 const mockGetGlobalRegistry = vi.mocked(getGlobalRegistry)
@@ -52,10 +53,28 @@ const WETH = {
   chainId: 8453,
 }
 
+const usdcWethSwap = {
+  fromSymbol: 'USDC',
+  toSymbol: 'WETH',
+  amount: '100',
+  chainId: 8453,
+}
+
+function mockUsdcWethRegistry() {
+  mockGetGlobalRegistry.mockReturnValue({
+    getToken: vi.fn((symbol: string) => {
+      if (symbol === 'USDC') return USDC
+      if (symbol === 'WETH') return WETH
+      return undefined
+    }),
+  } as any)
+}
+
 describe('swap_tokens', () => {
   beforeEach(() => {
     vi.clearAllMocks()
     _resetPolicyStore()
+    _resetSpendIntentStore()
   })
 
   it('swaps USDC to WETH successfully', async () => {
@@ -292,5 +311,108 @@ describe('swap_tokens', () => {
     expect(result.content[0].text).toContain('refusing chainId 10')
     expect(getToken).not.toHaveBeenCalled()
     expect(mockSwap).not.toHaveBeenCalled()
+  })
+
+  it('replays an identical swap_tokens retry without a second swap', async () => {
+    mockUsdcWethRegistry()
+    const mockSwap = vi.fn().mockResolvedValue({
+      txHash: '0xswaptx123',
+      feeTxHash: null,
+      approvalRequired: true,
+      approvalTxHash: '0xapprovaltx',
+      quote: {
+        amountInNet: 100000000n,
+        amountOutMinimum: 50000000000000000n,
+        poolFeeTier: 500,
+        feeAmount: 0n,
+        gasEstimate: 150000n,
+      },
+    })
+    mockAttachSwap.mockReturnValue({ swap: mockSwap } as any)
+
+    const first = await handleSwapTokens(usdcWethSwap)
+    const retry = await handleSwapTokens(usdcWethSwap)
+
+    expect(first.isError).toBeUndefined()
+    expect(retry.isError).toBeUndefined()
+    const firstData = JSON.parse(first.content[0].text)
+    const retryData = JSON.parse(retry.content[0].text)
+    expect(firstData.txHash).toBe('0xswaptx123')
+    expect(firstData.idempotentRetry).toBeUndefined()
+    expect(retryData.txHash).toBe('0xswaptx123')
+    expect(retryData.idempotentRetry).toBe(true)
+    expect(mockSwap).toHaveBeenCalledTimes(1)
+  })
+
+  it('executes a second swap when the pair or amount differs', async () => {
+    mockUsdcWethRegistry()
+    const mockSwap = vi
+      .fn()
+      .mockResolvedValueOnce({ txHash: '0xswap1', quote: null })
+      .mockResolvedValueOnce({ txHash: '0xswap2', quote: null })
+    mockAttachSwap.mockReturnValue({ swap: mockSwap } as any)
+
+    const first = await handleSwapTokens(usdcWethSwap)
+    const second = await handleSwapTokens({ ...usdcWethSwap, amount: '50' })
+
+    expect(JSON.parse(first.content[0].text).txHash).toBe('0xswap1')
+    expect(JSON.parse(second.content[0].text).txHash).toBe('0xswap2')
+    expect(JSON.parse(second.content[0].text).idempotentRetry).toBeUndefined()
+    expect(mockSwap).toHaveBeenCalledTimes(2)
+  })
+
+  it('fail-closes an identical retry after an unresolved swap broadcast', async () => {
+    mockUsdcWethRegistry()
+    const mockSwap = vi.fn().mockRejectedValueOnce(new Error('rpc timeout'))
+    mockAttachSwap.mockReturnValue({ swap: mockSwap } as any)
+
+    const failed = await handleSwapTokens(usdcWethSwap)
+    const retry = await handleSwapTokens(usdcWethSwap)
+
+    expect(failed.isError).toBe(true)
+    expect(failed.content[0].text).toContain('rpc timeout')
+    expect(retry.isError).toBe(true)
+    expect(retry.content[0].text).toContain('did not return a transaction hash')
+    expect(mockSwap).toHaveBeenCalledTimes(1)
+  })
+
+  it('retries a spend-policy rejection instead of locking the swap intent', async () => {
+    const check = vi
+      .fn()
+      .mockResolvedValueOnce({
+        status: 'rejected',
+        reason: 'Rolling spend cap exceeded: spent 0, cap 5e19, attempted 1e20.',
+      })
+      .mockResolvedValueOnce({ status: 'approved' })
+    MockSpendingPolicy.mockImplementation(function () { return { check } } as any)
+
+    const mockSwap = vi.fn().mockResolvedValue({ txHash: '0xswapafterpolicy', quote: null })
+    mockUsdcWethRegistry()
+    mockAttachSwap.mockReturnValue({ swap: mockSwap } as any)
+
+    await handleSetSpendPolicy({ dailyLimitEth: '50' })
+
+    const blocked = await handleSwapTokens(usdcWethSwap)
+    const retried = await handleSwapTokens(usdcWethSwap)
+
+    expect(blocked.isError).toBe(true)
+    expect(blocked.content[0].text).toContain('Rolling spend cap exceeded')
+    expect(retried.isError).toBeUndefined()
+    expect(JSON.parse(retried.content[0].text).txHash).toBe('0xswapafterpolicy')
+    expect(mockSwap).toHaveBeenCalledTimes(1)
+  })
+
+  it('replays when the caller retries the same idempotency key', async () => {
+    mockUsdcWethRegistry()
+    const mockSwap = vi.fn().mockResolvedValue({ txHash: '0xswapkey', quote: null })
+    mockAttachSwap.mockReturnValue({ swap: mockSwap } as any)
+
+    const first = await handleSwapTokens({ ...usdcWethSwap, idempotencyKey: 'invoice-1' })
+    const retry = await handleSwapTokens({ ...usdcWethSwap, idempotencyKey: 'invoice-1' })
+
+    expect(JSON.parse(first.content[0].text).idempotentRetry).toBeUndefined()
+    expect(JSON.parse(retry.content[0].text).txHash).toBe('0xswapkey')
+    expect(JSON.parse(retry.content[0].text).idempotentRetry).toBe(true)
+    expect(mockSwap).toHaveBeenCalledTimes(1)
   })
 })

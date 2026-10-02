@@ -1,11 +1,11 @@
 /**
- * In-process spend-intent cache so an identical send_token retry does not
- * broadcast a second transfer.
+ * In-process spend-intent cache so an identical send_token, swap_tokens, or
+ * bridge_usdc retry does not broadcast a second settlement.
  *
- * The key is the settled payload (tool, chain, token address, recipient,
- * raw amount) plus an optional caller-supplied idempotency key. A matching
- * retry inside the TTL returns the original tx hash and skips both the
- * spend-policy check and the on-chain transfer.
+ * The key is the settled payload (tool + tool-specific fields) plus an
+ * optional caller-supplied idempotency key. A matching retry inside the TTL
+ * returns the original result and skips both the spend-policy check and the
+ * on-chain transfer.
  *
  * Failures that happen before broadcast (policy reject / draft) are definite
  * and may be retried. Any other rejection is treated as an unresolved
@@ -59,8 +59,41 @@ export function sendTokenIntentKey(input: {
     input.recipientAddress.toLowerCase(),
     input.rawAmount.toString(),
   ].join(':')
-  const explicit = input.idempotencyKey?.trim()
-  return explicit ? `${payload}#${explicit}` : payload
+  return withOptionalIdempotencyKey(payload, input.idempotencyKey)
+}
+
+export function swapTokensIntentKey(input: {
+  chainId: number
+  fromTokenAddress: string
+  toTokenAddress: string
+  rawAmountIn: bigint
+  slippageBps?: number
+  idempotencyKey?: string
+}): string {
+  const payload = [
+    'swap_tokens',
+    String(input.chainId),
+    input.fromTokenAddress.toLowerCase(),
+    input.toTokenAddress.toLowerCase(),
+    input.rawAmountIn.toString(),
+    input.slippageBps === undefined ? 'default' : String(input.slippageBps),
+  ].join(':')
+  return withOptionalIdempotencyKey(payload, input.idempotencyKey)
+}
+
+export function bridgeUsdcIntentKey(input: {
+  fromChain: string
+  toChain: string
+  rawAmount: bigint
+  idempotencyKey?: string
+}): string {
+  const payload = [
+    'bridge_usdc',
+    input.fromChain.toLowerCase(),
+    input.toChain.toLowerCase(),
+    input.rawAmount.toString(),
+  ].join(':')
+  return withOptionalIdempotencyKey(payload, input.idempotencyKey)
 }
 
 export function _resetSpendIntentStore(): void {
@@ -84,9 +117,14 @@ function pruneExpired(now = Date.now()): void {
 
 function unresolvedMessage(): string {
   return (
-    'A previous send_token for this intent did not return a transaction hash. ' +
+    'A previous attempt for this spend intent did not return a transaction hash. ' +
     'Refusing to broadcast again until the original transfer is reconciled or the 5-minute intent TTL expires.'
   )
+}
+
+function withOptionalIdempotencyKey(payload: string, idempotencyKey?: string): string {
+  const explicit = idempotencyKey?.trim()
+  return explicit ? `${payload}#${explicit}` : payload
 }
 
 export async function withSpendIntent<T>(
