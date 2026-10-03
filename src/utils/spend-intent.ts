@@ -10,11 +10,12 @@
  * A matching retry inside the TTL returns the original result and skips both
  * the spend-policy check and the on-chain transfer.
  *
- * Failures that happen before broadcast (policy reject / draft) are definite
- * and may be retried. Any other rejection is treated as an unresolved
- * broadcast: the next identical call fail-closes instead of sending again.
- * Unresolved locks do not expire on a timer — a later identical retry would
- * otherwise double-settle after an ambiguous burn, swap, or transfer.
+ * Failures that happen before broadcast (policy reject / draft, SDK quote
+ * fetch, SDK allowance read) are definite and may be retried. Any other
+ * rejection is treated as an unresolved broadcast: the next identical call
+ * fail-closes instead of sending again. Unresolved locks do not expire on a
+ * timer — a later identical retry would otherwise double-settle after an
+ * ambiguous burn, swap, or transfer.
  *
  * Keyed settled results stay for the process lifetime so the same
  * idempotencyKey replays after the keyless MCP-retry window. Keyless settled
@@ -57,6 +58,23 @@ export class DefiniteSpendFailure extends Error {
   constructor(message: string) {
     super(message)
     this.name = 'DefiniteSpendFailure'
+  }
+}
+
+/**
+ * Run a pre-broadcast SDK phase (quote fetch, allowance read). Failures here
+ * cannot have settled, so they stay retryable instead of locking the intent.
+ */
+export async function runDefinitePreBroadcast<T>(run: () => Promise<T>): Promise<T> {
+  try {
+    return await run()
+  } catch (error: unknown) {
+    if (error instanceof DefiniteSpendFailure) {
+      throw error
+    }
+    throw new DefiniteSpendFailure(
+      error instanceof Error ? error.message : String(error)
+    )
   }
 }
 

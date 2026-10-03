@@ -8,6 +8,7 @@ import {
   SpendIntentConflictError,
   UnresolvedSpendIntentError,
   _resetSpendIntentStore,
+  runDefinitePreBroadcast,
   sendTokenIntentIdentity,
   sendTokenIntentKey,
   swapTokensIntentKey,
@@ -182,6 +183,25 @@ describe('withSpendIntent', () => {
       .mockRejectedValueOnce(new DefiniteSpendFailure('spend policy rejected'))
       .mockResolvedValueOnce('0xtxhash')
     await expect(withSpendIntent('k1', run)).rejects.toThrow('spend policy rejected')
+    const retry = await withSpendIntent('k1', run)
+    expect(retry).toEqual({ value: '0xtxhash', replayed: false })
+    expect(run).toHaveBeenCalledTimes(2)
+  })
+
+  it('retries SDK quote and allowance failures wrapped as definite', async () => {
+    const run = vi
+      .fn()
+      .mockImplementationOnce(async () => {
+        await runDefinitePreBroadcast(async () => {
+          throw new Error('quote rpc timeout')
+        })
+        return '0xtxhash'
+      })
+      .mockImplementationOnce(async () => {
+        await runDefinitePreBroadcast(async () => 0n)
+        return '0xtxhash'
+      })
+    await expect(withSpendIntent('k1', run)).rejects.toBeInstanceOf(DefiniteSpendFailure)
     const retry = await withSpendIntent('k1', run)
     expect(retry).toEqual({ value: '0xtxhash', replayed: false })
     expect(run).toHaveBeenCalledTimes(2)

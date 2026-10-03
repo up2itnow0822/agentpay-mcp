@@ -70,6 +70,16 @@ function mockUsdcWethRegistry() {
   } as any)
 }
 
+function withQuote(swap: unknown, getQuote = vi.fn().mockResolvedValue({
+  amountInNet: 1n,
+  amountOutMinimum: 1n,
+  poolFeeTier: 500,
+  feeAmount: 0n,
+  gasEstimate: 100000n,
+})) {
+  return { swap, getQuote }
+}
+
 describe('swap_tokens', () => {
   beforeEach(() => {
     vi.clearAllMocks()
@@ -96,7 +106,7 @@ describe('swap_tokens', () => {
         .mockReturnValueOnce(USDC)
         .mockReturnValueOnce(WETH),
     } as any)
-    mockAttachSwap.mockReturnValue({ swap: mockSwap } as any)
+    mockAttachSwap.mockReturnValue(withQuote(mockSwap) as any)
 
     const result = await handleSwapTokens({
       fromSymbol: 'USDC',
@@ -128,7 +138,7 @@ describe('swap_tokens', () => {
     mockGetGlobalRegistry.mockReturnValue({
       getToken: vi.fn().mockReturnValueOnce(USDC).mockReturnValueOnce(WETH),
     } as any)
-    mockAttachSwap.mockReturnValue({ swap: mockSwap } as any)
+    mockAttachSwap.mockReturnValue(withQuote(mockSwap) as any)
 
     await handleSwapTokens({
       fromSymbol: 'USDC',
@@ -150,7 +160,7 @@ describe('swap_tokens', () => {
     mockGetGlobalRegistry.mockReturnValue({
       getToken: vi.fn().mockReturnValueOnce(undefined),
     } as any)
-    mockAttachSwap.mockReturnValue({ swap: vi.fn() } as any)
+    mockAttachSwap.mockReturnValue(withQuote(vi.fn()) as any)
 
     const result = await handleSwapTokens({
       fromSymbol: 'NOTFOUND',
@@ -168,7 +178,7 @@ describe('swap_tokens', () => {
     mockGetGlobalRegistry.mockReturnValue({
       getToken: vi.fn().mockReturnValueOnce(USDC).mockReturnValueOnce(undefined),
     } as any)
-    mockAttachSwap.mockReturnValue({ swap: vi.fn() } as any)
+    mockAttachSwap.mockReturnValue(withQuote(vi.fn()) as any)
 
     const result = await handleSwapTokens({
       fromSymbol: 'USDC',
@@ -186,7 +196,7 @@ describe('swap_tokens', () => {
     mockGetGlobalRegistry.mockReturnValue({
       getToken: vi.fn().mockReturnValueOnce(USDC).mockReturnValueOnce(WETH),
     } as any)
-    mockAttachSwap.mockReturnValue({ swap: mockSwap } as any)
+    mockAttachSwap.mockReturnValue(withQuote(mockSwap) as any)
 
     const result = await handleSwapTokens({
       fromSymbol: 'USDC',
@@ -214,7 +224,7 @@ describe('swap_tokens', () => {
     mockGetGlobalRegistry.mockReturnValue({
       getToken: vi.fn().mockReturnValueOnce(USDC).mockReturnValueOnce(WETH),
     } as any)
-    mockAttachSwap.mockReturnValue({ swap: mockSwap } as any)
+    mockAttachSwap.mockReturnValue(withQuote(mockSwap) as any)
 
     await handleSetSpendPolicy({
       allowedRecipients: ['0x0000000000000000000000000000000000000001'],
@@ -250,7 +260,7 @@ describe('swap_tokens', () => {
     mockGetGlobalRegistry.mockReturnValue({
       getToken: vi.fn().mockReturnValueOnce(USDC).mockReturnValueOnce(WETH),
     } as any)
-    mockAttachSwap.mockReturnValue({ swap: mockSwap } as any)
+    mockAttachSwap.mockReturnValue(withQuote(mockSwap) as any)
 
     await handleSetSpendPolicy({ dailyLimitEth: '50' })
 
@@ -277,7 +287,7 @@ describe('swap_tokens', () => {
     mockGetGlobalRegistry.mockReturnValue({
       getToken: vi.fn().mockReturnValueOnce(USDC).mockReturnValueOnce(WETH),
     } as any)
-    mockAttachSwap.mockReturnValue({ swap: mockSwap } as any)
+    mockAttachSwap.mockReturnValue(withQuote(mockSwap) as any)
 
     await handleSetSpendPolicy({ dailyLimitEth: '1000' })
 
@@ -297,7 +307,7 @@ describe('swap_tokens', () => {
     const getToken = vi.fn().mockReturnValue(WETH)
     mockGetGlobalRegistry.mockReturnValue({ getToken } as any)
     const mockSwap = vi.fn()
-    mockAttachSwap.mockReturnValue({ swap: mockSwap } as any)
+    mockAttachSwap.mockReturnValue(withQuote(mockSwap) as any)
 
     const result = await handleSwapTokens({
       fromSymbol: 'WETH',
@@ -328,7 +338,7 @@ describe('swap_tokens', () => {
         gasEstimate: 150000n,
       },
     })
-    mockAttachSwap.mockReturnValue({ swap: mockSwap } as any)
+    mockAttachSwap.mockReturnValue(withQuote(mockSwap) as any)
 
     const first = await handleSwapTokens(usdcWethSwap)
     const retry = await handleSwapTokens(usdcWethSwap)
@@ -350,7 +360,7 @@ describe('swap_tokens', () => {
       .fn()
       .mockResolvedValueOnce({ txHash: '0xswap1', quote: null })
       .mockResolvedValueOnce({ txHash: '0xswap2', quote: null })
-    mockAttachSwap.mockReturnValue({ swap: mockSwap } as any)
+    mockAttachSwap.mockReturnValue(withQuote(mockSwap) as any)
 
     const first = await handleSwapTokens(usdcWethSwap)
     const second = await handleSwapTokens({ ...usdcWethSwap, amount: '50' })
@@ -364,7 +374,7 @@ describe('swap_tokens', () => {
   it('fail-closes an identical retry after an unresolved swap broadcast', async () => {
     mockUsdcWethRegistry()
     const mockSwap = vi.fn().mockRejectedValueOnce(new Error('rpc timeout'))
-    mockAttachSwap.mockReturnValue({ swap: mockSwap } as any)
+    mockAttachSwap.mockReturnValue(withQuote(mockSwap) as any)
 
     const failed = await handleSwapTokens(usdcWethSwap)
     const retry = await handleSwapTokens(usdcWethSwap)
@@ -388,7 +398,7 @@ describe('swap_tokens', () => {
 
     const mockSwap = vi.fn().mockResolvedValue({ txHash: '0xswapafterpolicy', quote: null })
     mockUsdcWethRegistry()
-    mockAttachSwap.mockReturnValue({ swap: mockSwap } as any)
+    mockAttachSwap.mockReturnValue(withQuote(mockSwap) as any)
 
     await handleSetSpendPolicy({ dailyLimitEth: '50' })
 
@@ -405,7 +415,7 @@ describe('swap_tokens', () => {
   it('replays when the caller retries the same idempotency key', async () => {
     mockUsdcWethRegistry()
     const mockSwap = vi.fn().mockResolvedValue({ txHash: '0xswapkey', quote: null })
-    mockAttachSwap.mockReturnValue({ swap: mockSwap } as any)
+    mockAttachSwap.mockReturnValue(withQuote(mockSwap) as any)
 
     const first = await handleSwapTokens({ ...usdcWethSwap, idempotencyKey: 'invoice-1' })
     const retry = await handleSwapTokens({ ...usdcWethSwap, idempotencyKey: 'invoice-1' })
@@ -419,7 +429,7 @@ describe('swap_tokens', () => {
   it('replays when a retry only fills in the default slippageBps', async () => {
     mockUsdcWethRegistry()
     const mockSwap = vi.fn().mockResolvedValue({ txHash: '0xswapdefault', quote: null })
-    mockAttachSwap.mockReturnValue({ swap: mockSwap } as any)
+    mockAttachSwap.mockReturnValue(withQuote(mockSwap) as any)
 
     const first = await handleSwapTokens(usdcWethSwap)
     const retry = await handleSwapTokens({ ...usdcWethSwap, slippageBps: 50 })
@@ -441,7 +451,7 @@ describe('swap_tokens', () => {
     try {
       mockUsdcWethRegistry()
       const mockSwap = vi.fn().mockResolvedValue({ txHash: '0xswapdurable', quote: null })
-      mockAttachSwap.mockReturnValue({ swap: mockSwap } as any)
+      mockAttachSwap.mockReturnValue(withQuote(mockSwap) as any)
 
       const first = await handleSwapTokens({
         ...usdcWethSwap,
@@ -464,7 +474,7 @@ describe('swap_tokens', () => {
   it('refuses a keyed retry that changes the amount', async () => {
     mockUsdcWethRegistry()
     const mockSwap = vi.fn().mockResolvedValue({ txHash: '0xswapkey', quote: null })
-    mockAttachSwap.mockReturnValue({ swap: mockSwap } as any)
+    mockAttachSwap.mockReturnValue(withQuote(mockSwap) as any)
 
     const first = await handleSwapTokens({
       ...usdcWethSwap,
@@ -485,7 +495,7 @@ describe('swap_tokens', () => {
   it('replays a keyed retry that only fills in the default slippageBps', async () => {
     mockUsdcWethRegistry()
     const mockSwap = vi.fn().mockResolvedValue({ txHash: '0xswapkeyslip', quote: null })
-    mockAttachSwap.mockReturnValue({ swap: mockSwap } as any)
+    mockAttachSwap.mockReturnValue(withQuote(mockSwap) as any)
 
     const first = await handleSwapTokens({
       ...usdcWethSwap,
@@ -500,5 +510,31 @@ describe('swap_tokens', () => {
     expect(JSON.parse(retry.content[0].text).txHash).toBe('0xswapkeyslip')
     expect(JSON.parse(retry.content[0].text).idempotentRetry).toBe(true)
     expect(mockSwap).toHaveBeenCalledTimes(1)
+  })
+
+  it('retries after a swap quote fetch failure instead of locking the intent', async () => {
+    mockUsdcWethRegistry()
+    const getQuote = vi
+      .fn()
+      .mockRejectedValueOnce(new Error('quote rpc timeout'))
+      .mockResolvedValueOnce({
+        amountInNet: 1n,
+        amountOutMinimum: 1n,
+        poolFeeTier: 500,
+        feeAmount: 0n,
+        gasEstimate: 100000n,
+      })
+    const mockSwap = vi.fn().mockResolvedValue({ txHash: '0xafterquote', quote: null })
+    mockAttachSwap.mockReturnValue(withQuote(mockSwap, getQuote) as any)
+
+    const failed = await handleSwapTokens(usdcWethSwap)
+    const retried = await handleSwapTokens(usdcWethSwap)
+
+    expect(failed.isError).toBe(true)
+    expect(failed.content[0].text).toContain('quote rpc timeout')
+    expect(retried.isError).toBeUndefined()
+    expect(JSON.parse(retried.content[0].text).txHash).toBe('0xafterquote')
+    expect(mockSwap).toHaveBeenCalledTimes(1)
+    expect(getQuote).toHaveBeenCalledTimes(2)
   })
 })

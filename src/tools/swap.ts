@@ -15,6 +15,7 @@ import { assertConfiguredChain } from '../utils/wallet-chain.js'
 import {
   DEFAULT_SWAP_SLIPPAGE_BPS,
   DefiniteSpendFailure,
+  runDefinitePreBroadcast,
   swapTokensIntentIdentity,
   withSpendIntent,
 } from '../utils/spend-intent.js'
@@ -158,6 +159,14 @@ export async function handleSwapTokens(
       }
 
       const swapWallet = attachSwap(wallet as AnyWallet)
+      await runDefinitePreBroadcast(() =>
+        swapWallet.getQuote(
+          fromToken.address as Address,
+          toToken.address as Address,
+          rawAmountIn,
+          { slippageBps }
+        )
+      )
 
       const result = await swapWallet.swap(
         fromToken.address as Address,

@@ -13,6 +13,7 @@ import { assertConfiguredBridgeSource } from '../utils/wallet-chain.js'
 import {
   DefiniteSpendFailure,
   bridgeUsdcIntentIdentity,
+  runDefinitePreBroadcast,
   withSpendIntent,
 } from '../utils/spend-intent.js'
 import { enforceSpendPolicy } from './budget.js'
@@ -153,6 +154,7 @@ export async function handleBridgeUsdc(
       }
 
       const bridge = createBridge(wallet.walletClient as AnyWalletClient, input.fromChain as SupportedChain)
+      await runDefinitePreBroadcast(() => bridge.getUsdcAllowance())
 
       const result = await bridge.bridge(rawAmount, input.toChain as SupportedChain)
 
