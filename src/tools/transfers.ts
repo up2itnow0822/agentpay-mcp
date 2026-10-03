@@ -13,7 +13,7 @@ import { textContent, formatError } from '../utils/format.js'
 import { assertConfiguredChain } from '../utils/wallet-chain.js'
 import {
   DefiniteSpendFailure,
-  sendTokenIntentKey,
+  sendTokenIntentIdentity,
   withSpendIntent,
 } from '../utils/spend-intent.js'
 import { enforceSpendPolicy } from './budget.js'
@@ -35,8 +35,9 @@ export const SendTokenSchema = z.object({
     .optional()
     .describe(
       'Caller-supplied idempotency key. Distinct keys allow two equal payments; ' +
-        'the same key replays the original transfer. MCP retries without a key ' +
-        'still collapse on the settled payload for five minutes.'
+        'the same key replays the original transfer; reusing it with a different ' +
+        'payload is refused. MCP retries without a key still collapse on the ' +
+        'settled payload for five minutes.'
     ),
 })
 
@@ -87,7 +88,7 @@ export async function handleSendToken(
     }
 
     const rawAmount = parseAmount(input.amount, token.decimals)
-    const intentKey = sendTokenIntentKey({
+    const intent = sendTokenIntentIdentity({
       chainId: input.chainId,
       tokenAddress: token.address,
       recipientAddress: input.recipientAddress,
@@ -95,7 +96,7 @@ export async function handleSendToken(
       idempotencyKey: input.idempotencyKey,
     })
 
-    const { value, replayed } = await withSpendIntent(intentKey, async () => {
+    const { value, replayed } = await withSpendIntent(intent.key, async () => {
       // rawAmount is in the token's base units; decimals lets the policy
       // normalise to its 18-decimal ETH-equivalent caps.
       const policyDecision = await enforceSpendPolicy({
@@ -132,7 +133,10 @@ export async function handleSendToken(
         rawAmount: rawAmount.toString(),
         chainId: input.chainId,
       }
-    }, { durable: Boolean(input.idempotencyKey?.trim()) })
+    }, {
+      durable: Boolean(input.idempotencyKey?.trim()),
+      fingerprint: intent.fingerprint,
+    })
 
     return {
       content: [

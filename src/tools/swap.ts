@@ -15,7 +15,7 @@ import { assertConfiguredChain } from '../utils/wallet-chain.js'
 import {
   DEFAULT_SWAP_SLIPPAGE_BPS,
   DefiniteSpendFailure,
-  swapTokensIntentKey,
+  swapTokensIntentIdentity,
   withSpendIntent,
 } from '../utils/spend-intent.js'
 import { enforceSpendPolicy } from './budget.js'
@@ -45,8 +45,9 @@ export const SwapTokensSchema = z.object({
     .optional()
     .describe(
       'Caller-supplied idempotency key. Distinct keys allow two equal swaps; ' +
-        'the same key replays the original swap. MCP retries without a key ' +
-        'still collapse on the settled payload for five minutes.'
+        'the same key replays the original swap; reusing it with a different ' +
+        'payload is refused. MCP retries without a key still collapse on the ' +
+        'settled payload for five minutes.'
     ),
 })
 
@@ -110,7 +111,7 @@ export async function handleSwapTokens(
 
     const rawAmountIn = parseAmount(input.amount, fromToken.decimals)
     const slippageBps = input.slippageBps ?? DEFAULT_SWAP_SLIPPAGE_BPS
-    const intentKey = swapTokensIntentKey({
+    const intent = swapTokensIntentIdentity({
       chainId: input.chainId,
       fromTokenAddress: fromToken.address,
       toTokenAddress: toToken.address,
@@ -120,7 +121,7 @@ export async function handleSwapTokens(
     })
 
     const { value, replayed } = await withSpendIntent(
-      intentKey,
+      intent.key,
       async () => {
       // Enforce the in-process spend policy on the amount sold before swapping.
       // rawAmountIn is in fromToken base units (e.g. 6 decimals for USDC);
@@ -187,7 +188,10 @@ export async function handleSwapTokens(
         chainId: input.chainId,
       }
       },
-      { durable: Boolean(input.idempotencyKey?.trim()) }
+      {
+        durable: Boolean(input.idempotencyKey?.trim()),
+        fingerprint: intent.fingerprint,
+      }
     )
 
     return {

@@ -398,4 +398,32 @@ describe('bridge_usdc', () => {
       vi.useRealTimers()
     }
   })
+
+  it('refuses a keyed retry that changes the amount', async () => {
+    const mockBridge = vi.fn().mockResolvedValue({
+      burnTxHash: '0xburntx123',
+      mintTxHash: '0xminttx456',
+      fromChain: 'base',
+      toChain: 'polygon',
+      recipient: '0xagent',
+      amount: 100000000n,
+      elapsedMs: 12000,
+    })
+    mockCreateBridge.mockReturnValue({ bridge: mockBridge } as any)
+
+    const first = await handleBridgeUsdc({
+      ...baseToPolygon,
+      idempotencyKey: 'invoice-1',
+    })
+    const conflict = await handleBridgeUsdc({
+      ...baseToPolygon,
+      amount: '50',
+      idempotencyKey: 'invoice-1',
+    })
+
+    expect(JSON.parse(first.content[0].text).burnTxHash).toBe('0xburntx123')
+    expect(conflict.isError).toBe(true)
+    expect(conflict.content[0].text).toContain('different spend payload')
+    expect(mockBridge).toHaveBeenCalledTimes(1)
+  })
 })

@@ -237,6 +237,23 @@ describe('send_token', () => {
     expect(JSON.parse(retry.content[0].text).idempotentRetry).toBe(true)
     expect(mockAgentTransferToken).toHaveBeenCalledTimes(1)
   })
+
+  it('refuses a keyed retry that changes the amount', async () => {
+    mockUsdcRegistry()
+    mockAgentTransferToken.mockResolvedValue('0xtxhash123' as any)
+
+    const first = await handleSendToken({ ...usdcSend, idempotencyKey: 'invoice-1' })
+    const conflict = await handleSendToken({
+      ...usdcSend,
+      amount: '11',
+      idempotencyKey: 'invoice-1',
+    })
+
+    expect(JSON.parse(first.content[0].text).txHash).toBe('0xtxhash123')
+    expect(conflict.isError).toBe(true)
+    expect(conflict.content[0].text).toContain('different spend payload')
+    expect(mockAgentTransferToken).toHaveBeenCalledTimes(1)
+  })
 })
 
 describe('get_balances', () => {

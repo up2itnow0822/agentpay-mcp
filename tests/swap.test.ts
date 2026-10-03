@@ -460,4 +460,45 @@ describe('swap_tokens', () => {
       vi.useRealTimers()
     }
   })
+
+  it('refuses a keyed retry that changes the amount', async () => {
+    mockUsdcWethRegistry()
+    const mockSwap = vi.fn().mockResolvedValue({ txHash: '0xswapkey', quote: null })
+    mockAttachSwap.mockReturnValue({ swap: mockSwap } as any)
+
+    const first = await handleSwapTokens({
+      ...usdcWethSwap,
+      idempotencyKey: 'invoice-1',
+    })
+    const conflict = await handleSwapTokens({
+      ...usdcWethSwap,
+      amount: '50',
+      idempotencyKey: 'invoice-1',
+    })
+
+    expect(JSON.parse(first.content[0].text).txHash).toBe('0xswapkey')
+    expect(conflict.isError).toBe(true)
+    expect(conflict.content[0].text).toContain('different spend payload')
+    expect(mockSwap).toHaveBeenCalledTimes(1)
+  })
+
+  it('replays a keyed retry that only fills in the default slippageBps', async () => {
+    mockUsdcWethRegistry()
+    const mockSwap = vi.fn().mockResolvedValue({ txHash: '0xswapkeyslip', quote: null })
+    mockAttachSwap.mockReturnValue({ swap: mockSwap } as any)
+
+    const first = await handleSwapTokens({
+      ...usdcWethSwap,
+      idempotencyKey: 'invoice-1',
+    })
+    const retry = await handleSwapTokens({
+      ...usdcWethSwap,
+      slippageBps: 50,
+      idempotencyKey: 'invoice-1',
+    })
+
+    expect(JSON.parse(retry.content[0].text).txHash).toBe('0xswapkeyslip')
+    expect(JSON.parse(retry.content[0].text).idempotentRetry).toBe(true)
+    expect(mockSwap).toHaveBeenCalledTimes(1)
+  })
 })

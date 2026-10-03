@@ -12,7 +12,7 @@ import { textContent, formatError } from '../utils/format.js'
 import { assertConfiguredBridgeSource } from '../utils/wallet-chain.js'
 import {
   DefiniteSpendFailure,
-  bridgeUsdcIntentKey,
+  bridgeUsdcIntentIdentity,
   withSpendIntent,
 } from '../utils/spend-intent.js'
 import { enforceSpendPolicy } from './budget.js'
@@ -46,8 +46,9 @@ export const BridgeUsdcSchema = z.object({
     .optional()
     .describe(
       'Caller-supplied idempotency key. Distinct keys allow two equal bridges; ' +
-        'the same key replays the original bridge. MCP retries without a key ' +
-        'still collapse on the settled payload for five minutes.'
+        'the same key replays the original bridge; reusing it with a different ' +
+        'payload is refused. MCP retries without a key still collapse on the ' +
+        'settled payload for five minutes.'
     ),
 })
 
@@ -109,7 +110,7 @@ export async function handleBridgeUsdc(
     // Parse USDC amount (6 decimals) — strict string parsing, no float rounding
     const USDC_DECIMALS = 6
     const rawAmount = parseAmountStrict(input.amount, USDC_DECIMALS)
-    const intentKey = bridgeUsdcIntentKey({
+    const intent = bridgeUsdcIntentIdentity({
       fromChain: input.fromChain,
       toChain: input.toChain,
       rawAmount,
@@ -117,7 +118,7 @@ export async function handleBridgeUsdc(
     })
 
     const { value, replayed } = await withSpendIntent(
-      intentKey,
+      intent.key,
       async () => {
       // Enforce the in-process spend policy before burning USDC on the source
       // chain. rawAmount is USDC 6-decimal base units; enforceSpendPolicy
@@ -167,7 +168,10 @@ export async function handleBridgeUsdc(
         elapsedMs: result.elapsedMs,
       }
       },
-      { durable: Boolean(input.idempotencyKey?.trim()) }
+      {
+        durable: Boolean(input.idempotencyKey?.trim()),
+        fingerprint: intent.fingerprint,
+      }
     )
 
     return {

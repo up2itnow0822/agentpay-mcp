@@ -5,8 +5,10 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import {
   DefiniteSpendFailure,
   SEND_TOKEN_INTENT_TTL_MS,
+  SpendIntentConflictError,
   UnresolvedSpendIntentError,
   _resetSpendIntentStore,
+  sendTokenIntentIdentity,
   sendTokenIntentKey,
   swapTokensIntentKey,
   bridgeUsdcIntentKey,
@@ -59,6 +61,22 @@ describe('sendTokenIntentKey', () => {
     )
     expect(sendTokenIntentKey({ ...base, idempotencyKey: 'invoice-1' })).not.toBe(
       sendTokenIntentKey(base)
+    )
+  })
+
+  it('uses the explicit key as lookup identity independent of payload', () => {
+    const base = {
+      chainId: 8453,
+      tokenAddress: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913',
+      recipientAddress: '0xrecipient00000000000000000000000000000001',
+      rawAmount: 10_000_000n,
+      idempotencyKey: 'invoice-1',
+    }
+    expect(sendTokenIntentKey({ ...base, rawAmount: 20_000_000n })).toBe(
+      sendTokenIntentKey(base)
+    )
+    expect(sendTokenIntentIdentity({ ...base, rawAmount: 20_000_000n }).fingerprint).not.toBe(
+      sendTokenIntentIdentity(base).fingerprint
     )
   })
 })
@@ -215,6 +233,41 @@ describe('withSpendIntent', () => {
     vi.advanceTimersByTime(SEND_TOKEN_INTENT_TTL_MS + 1)
     const retry = await withSpendIntent('k1#invoice-1', run, { durable: true })
     expect(retry).toEqual({ value: '0xkeyed', replayed: true })
+    expect(run).toHaveBeenCalledTimes(1)
+  })
+
+  it('fail-closes when a keyed retry changes the payload fingerprint', async () => {
+    const run = vi.fn().mockResolvedValue('0xfirst')
+    await withSpendIntent('send_token#invoice-1', run, {
+      durable: true,
+      fingerprint: 'send_token:8453:usdc:alice:10000000',
+    })
+    await expect(
+      withSpendIntent('send_token#invoice-1', run, {
+        durable: true,
+        fingerprint: 'send_token:8453:usdc:alice:20000000',
+      })
+    ).rejects.toBeInstanceOf(SpendIntentConflictError)
+    expect(run).toHaveBeenCalledTimes(1)
+  })
+
+  it('does not broadcast a corrected payload after an unresolved keyed attempt', async () => {
+    const run = vi
+      .fn()
+      .mockRejectedValueOnce(new Error('rpc timeout'))
+      .mockResolvedValueOnce('0xsecond')
+    await expect(
+      withSpendIntent('send_token#invoice-1', run, {
+        durable: true,
+        fingerprint: 'send_token:8453:usdc:alice:10000000',
+      })
+    ).rejects.toThrow('rpc timeout')
+    await expect(
+      withSpendIntent('send_token#invoice-1', run, {
+        durable: true,
+        fingerprint: 'send_token:8453:usdc:alice:20000000',
+      })
+    ).rejects.toBeInstanceOf(SpendIntentConflictError)
     expect(run).toHaveBeenCalledTimes(1)
   })
 })
