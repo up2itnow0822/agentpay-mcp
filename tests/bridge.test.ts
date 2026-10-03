@@ -377,4 +377,25 @@ describe('bridge_usdc', () => {
     expect(retry.content[0].text).toContain('did not return a transaction hash')
     expect(mockBridge).toHaveBeenCalledTimes(1)
   })
+
+  it('keeps a Circle attestation timeout locked after the keyless TTL', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-10-02T22:00:00Z'))
+    try {
+      const mockBridge = vi.fn().mockRejectedValue(new Error('Circle attestation timeout'))
+      mockCreateBridge.mockReturnValue({ bridge: mockBridge } as any)
+
+      const failed = await handleBridgeUsdc(baseToPolygon)
+      vi.advanceTimersByTime(5 * 60 * 1000 + 1)
+      const retry = await handleBridgeUsdc(baseToPolygon)
+
+      expect(failed.isError).toBe(true)
+      expect(failed.content[0].text).toContain('Circle attestation timeout')
+      expect(retry.isError).toBe(true)
+      expect(retry.content[0].text).toContain('did not return a transaction hash')
+      expect(mockBridge).toHaveBeenCalledTimes(1)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
 })

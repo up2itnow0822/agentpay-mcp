@@ -13,6 +13,7 @@ import { getWallet } from '../utils/client.js'
 import { textContent, formatError } from '../utils/format.js'
 import { assertConfiguredChain } from '../utils/wallet-chain.js'
 import {
+  DEFAULT_SWAP_SLIPPAGE_BPS,
   DefiniteSpendFailure,
   swapTokensIntentKey,
   withSpendIntent,
@@ -71,6 +72,8 @@ export const swapTokensTool = {
       slippageBps: { type: 'number', description: 'Slippage in basis points (default: 50)' },
       idempotencyKey: {
         type: 'string',
+        minLength: 1,
+        maxLength: 128,
         description:
           'Optional idempotency key (1-128 chars). Distinct keys allow two equal swaps.',
       },
@@ -106,16 +109,19 @@ export async function handleSwapTokens(
     }
 
     const rawAmountIn = parseAmount(input.amount, fromToken.decimals)
+    const slippageBps = input.slippageBps ?? DEFAULT_SWAP_SLIPPAGE_BPS
     const intentKey = swapTokensIntentKey({
       chainId: input.chainId,
       fromTokenAddress: fromToken.address,
       toTokenAddress: toToken.address,
       rawAmountIn,
-      slippageBps: input.slippageBps,
+      slippageBps,
       idempotencyKey: input.idempotencyKey,
     })
 
-    const { value, replayed } = await withSpendIntent(intentKey, async () => {
+    const { value, replayed } = await withSpendIntent(
+      intentKey,
+      async () => {
       // Enforce the in-process spend policy on the amount sold before swapping.
       // rawAmountIn is in fromToken base units (e.g. 6 decimals for USDC);
       // enforceSpendPolicy normalises it to the policy's 18-decimal
@@ -156,7 +162,7 @@ export async function handleSwapTokens(
         fromToken.address as Address,
         toToken.address as Address,
         rawAmountIn,
-        { slippageBps: input.slippageBps }
+        { slippageBps }
       )
 
       return {
@@ -180,7 +186,9 @@ export async function handleSwapTokens(
           : null,
         chainId: input.chainId,
       }
-    })
+      },
+      { durable: Boolean(input.idempotencyKey?.trim()) }
+    )
 
     return {
       content: [

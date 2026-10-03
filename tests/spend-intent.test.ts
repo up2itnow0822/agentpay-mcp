@@ -96,6 +96,12 @@ describe('swapTokensIntentKey', () => {
       swapTokensIntentKey(base)
     )
   })
+
+  it('collides omitted slippage with the documented 50 bps default', () => {
+    expect(swapTokensIntentKey(base)).toBe(
+      swapTokensIntentKey({ ...base, slippageBps: 50 })
+    )
+  })
 })
 
 describe('bridgeUsdcIntentKey', () => {
@@ -181,21 +187,34 @@ describe('withSpendIntent', () => {
     expect(run).toHaveBeenCalledTimes(1)
   })
 
-  it('allows a new send after an unresolved intent TTL expires', async () => {
-    const run = vi.fn().mockRejectedValueOnce(new Error('rpc timeout')).mockResolvedValueOnce('0xsecond')
+  it('keeps an unresolved intent locked after the settled-result TTL', async () => {
+    const run = vi
+      .fn()
+      .mockRejectedValueOnce(new Error('rpc timeout'))
+      .mockResolvedValueOnce('0xsecond')
     await expect(withSpendIntent('k1', run)).rejects.toThrow('rpc timeout')
     vi.advanceTimersByTime(SEND_TOKEN_INTENT_TTL_MS + 1)
-    const retry = await withSpendIntent('k1', run)
-    expect(retry).toEqual({ value: '0xsecond', replayed: false })
-    expect(run).toHaveBeenCalledTimes(2)
+    await expect(withSpendIntent('k1', run)).rejects.toBeInstanceOf(
+      UnresolvedSpendIntentError
+    )
+    expect(run).toHaveBeenCalledTimes(1)
   })
 
-  it('allows a new send after the TTL expires', async () => {
+  it('allows a new keyless send after the TTL expires', async () => {
     const run = vi.fn().mockResolvedValueOnce('0xfirst').mockResolvedValueOnce('0xsecond')
     await withSpendIntent('k1', run)
     vi.advanceTimersByTime(SEND_TOKEN_INTENT_TTL_MS + 1)
     const retry = await withSpendIntent('k1', run)
     expect(retry).toEqual({ value: '0xsecond', replayed: false })
     expect(run).toHaveBeenCalledTimes(2)
+  })
+
+  it('replays a durable keyed result after the keyless TTL', async () => {
+    const run = vi.fn().mockResolvedValue('0xkeyed')
+    await withSpendIntent('k1#invoice-1', run, { durable: true })
+    vi.advanceTimersByTime(SEND_TOKEN_INTENT_TTL_MS + 1)
+    const retry = await withSpendIntent('k1#invoice-1', run, { durable: true })
+    expect(retry).toEqual({ value: '0xkeyed', replayed: true })
+    expect(run).toHaveBeenCalledTimes(1)
   })
 })

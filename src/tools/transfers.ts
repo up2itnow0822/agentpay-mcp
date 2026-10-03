@@ -60,6 +60,8 @@ export const sendTokenTool = {
       amount: { type: 'string', description: 'Amount in human-readable units (e.g. "10.5")' },
       idempotencyKey: {
         type: 'string',
+        minLength: 1,
+        maxLength: 128,
         description:
           'Optional idempotency key (1-128 chars). Distinct keys allow two equal payments.',
       },
@@ -130,7 +132,7 @@ export async function handleSendToken(
         rawAmount: rawAmount.toString(),
         chainId: input.chainId,
       }
-    })
+    }, { durable: Boolean(input.idempotencyKey?.trim()) })
 
     return {
       content: [

@@ -82,6 +82,8 @@ export const bridgeUsdcTool = {
       },
       idempotencyKey: {
         type: 'string',
+        minLength: 1,
+        maxLength: 128,
         description:
           'Optional idempotency key (1-128 chars). Distinct keys allow two equal bridges.',
       },
@@ -114,7 +116,9 @@ export async function handleBridgeUsdc(
       idempotencyKey: input.idempotencyKey,
     })
 
-    const { value, replayed } = await withSpendIntent(intentKey, async () => {
+    const { value, replayed } = await withSpendIntent(
+      intentKey,
+      async () => {
       // Enforce the in-process spend policy before burning USDC on the source
       // chain. rawAmount is USDC 6-decimal base units; enforceSpendPolicy
       // normalises it to the policy's 18-decimal ETH-equivalent caps (1 USDC
@@ -162,7 +166,9 @@ export async function handleBridgeUsdc(
         rawAmount: rawAmount.toString(),
         elapsedMs: result.elapsedMs,
       }
-    })
+      },
+      { durable: Boolean(input.idempotencyKey?.trim()) }
+    )
 
     return {
       content: [

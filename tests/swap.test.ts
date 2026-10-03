@@ -116,7 +116,7 @@ describe('swap_tokens', () => {
       USDC.address,
       WETH.address,
       expect.any(BigInt),
-      { slippageBps: undefined }
+      { slippageBps: 50 }
     )
   })
 
@@ -414,5 +414,50 @@ describe('swap_tokens', () => {
     expect(JSON.parse(retry.content[0].text).txHash).toBe('0xswapkey')
     expect(JSON.parse(retry.content[0].text).idempotentRetry).toBe(true)
     expect(mockSwap).toHaveBeenCalledTimes(1)
+  })
+
+  it('replays when a retry only fills in the default slippageBps', async () => {
+    mockUsdcWethRegistry()
+    const mockSwap = vi.fn().mockResolvedValue({ txHash: '0xswapdefault', quote: null })
+    mockAttachSwap.mockReturnValue({ swap: mockSwap } as any)
+
+    const first = await handleSwapTokens(usdcWethSwap)
+    const retry = await handleSwapTokens({ ...usdcWethSwap, slippageBps: 50 })
+
+    expect(JSON.parse(first.content[0].text).txHash).toBe('0xswapdefault')
+    expect(JSON.parse(retry.content[0].text).idempotentRetry).toBe(true)
+    expect(mockSwap).toHaveBeenCalledTimes(1)
+    expect(mockSwap).toHaveBeenCalledWith(
+      USDC.address,
+      WETH.address,
+      expect.any(BigInt),
+      { slippageBps: 50 }
+    )
+  })
+
+  it('replays a keyed swap after the keyless TTL', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-10-02T22:00:00Z'))
+    try {
+      mockUsdcWethRegistry()
+      const mockSwap = vi.fn().mockResolvedValue({ txHash: '0xswapdurable', quote: null })
+      mockAttachSwap.mockReturnValue({ swap: mockSwap } as any)
+
+      const first = await handleSwapTokens({
+        ...usdcWethSwap,
+        idempotencyKey: 'invoice-1',
+      })
+      vi.advanceTimersByTime(5 * 60 * 1000 + 1)
+      const retry = await handleSwapTokens({
+        ...usdcWethSwap,
+        idempotencyKey: 'invoice-1',
+      })
+
+      expect(JSON.parse(first.content[0].text).txHash).toBe('0xswapdurable')
+      expect(JSON.parse(retry.content[0].text).idempotentRetry).toBe(true)
+      expect(mockSwap).toHaveBeenCalledTimes(1)
+    } finally {
+      vi.useRealTimers()
+    }
   })
 })

@@ -10,15 +10,23 @@
  * Failures that happen before broadcast (policy reject / draft) are definite
  * and may be retried. Any other rejection is treated as an unresolved
  * broadcast: the next identical call fail-closes instead of sending again.
+ * Unresolved locks do not expire on a timer — a later identical retry would
+ * otherwise double-settle after an ambiguous burn, swap, or transfer.
+ *
+ * Keyed settled results stay for the process lifetime so the same
+ * idempotencyKey replays after the keyless MCP-retry window. Keyless settled
+ * results expire after SEND_TOKEN_INTENT_TTL_MS.
  *
  * This is process-local, matching SpendingPolicy. It prevents duplicate
  * settlement from MCP tool retries; it is not a durable cross-process ledger.
  */
 export const SEND_TOKEN_INTENT_TTL_MS = 5 * 60 * 1000
+export const DEFAULT_SWAP_SLIPPAGE_BPS = 50
 
 interface SettledIntent<T> {
   settledAt: number
   value: T
+  durable: boolean
 }
 
 interface UnresolvedIntent {
@@ -76,7 +84,7 @@ export function swapTokensIntentKey(input: {
     input.fromTokenAddress.toLowerCase(),
     input.toTokenAddress.toLowerCase(),
     input.rawAmountIn.toString(),
-    input.slippageBps === undefined ? 'default' : String(input.slippageBps),
+    String(input.slippageBps ?? DEFAULT_SWAP_SLIPPAGE_BPS),
   ].join(':')
   return withOptionalIdempotencyKey(payload, input.idempotencyKey)
 }
@@ -104,13 +112,8 @@ export function _resetSpendIntentStore(): void {
 
 function pruneExpired(now = Date.now()): void {
   for (const [key, entry] of settled) {
-    if (now - entry.settledAt > SEND_TOKEN_INTENT_TTL_MS) {
+    if (!entry.durable && now - entry.settledAt > SEND_TOKEN_INTENT_TTL_MS) {
       settled.delete(key)
-    }
-  }
-  for (const [key, entry] of unresolved) {
-    if (now - entry.settledAt > SEND_TOKEN_INTENT_TTL_MS) {
-      unresolved.delete(key)
     }
   }
 }
@@ -118,7 +121,7 @@ function pruneExpired(now = Date.now()): void {
 function unresolvedMessage(): string {
   return (
     'A previous attempt for this spend intent did not return a transaction hash. ' +
-    'Refusing to broadcast again until the original transfer is reconciled or the 5-minute intent TTL expires.'
+    'Refusing to broadcast again until the original transfer is reconciled.'
   )
 }
 
@@ -129,7 +132,8 @@ function withOptionalIdempotencyKey(payload: string, idempotencyKey?: string): s
 
 export async function withSpendIntent<T>(
   key: string,
-  run: () => Promise<T>
+  run: () => Promise<T>,
+  options?: { durable?: boolean }
 ): Promise<{ value: T; replayed: boolean }> {
   pruneExpired()
 
@@ -152,7 +156,11 @@ export async function withSpendIntent<T>(
   inflight.set(key, promise)
   try {
     const value = await promise
-    settled.set(key, { settledAt: Date.now(), value })
+    settled.set(key, {
+      settledAt: Date.now(),
+      value,
+      durable: Boolean(options?.durable),
+    })
     unresolved.delete(key)
     return { value, replayed: false }
   } catch (error: unknown) {
