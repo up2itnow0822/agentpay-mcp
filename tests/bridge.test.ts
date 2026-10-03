@@ -28,15 +28,23 @@ vi.mock('../src/utils/client.js', () => ({
 
 import { handleBridgeUsdc } from '../src/tools/bridge.js'
 import { handleSetSpendPolicy, _resetPolicyStore } from '../src/tools/budget.js'
+import { _resetSpendIntentStore } from '../src/utils/spend-intent.js'
 import { createBridge, SpendingPolicy } from 'agentwallet-sdk'
 
 const mockCreateBridge = vi.mocked(createBridge)
 const MockSpendingPolicy = vi.mocked(SpendingPolicy)
 
+const baseToPolygon = {
+  fromChain: 'base' as const,
+  toChain: 'polygon' as const,
+  amount: '100',
+}
+
 describe('bridge_usdc', () => {
   beforeEach(() => {
     vi.clearAllMocks()
     _resetPolicyStore()
+    _resetSpendIntentStore()
   })
 
   it('bridges USDC from base to polygon successfully', async () => {
@@ -291,5 +299,131 @@ describe('bridge_usdc', () => {
     expect(result.content[0].text).toContain('bridge_usdc failed')
     expect(result.content[0].text).toContain('refusing fromChain "optimism"')
     expect(mockCreateBridge).not.toHaveBeenCalled()
+  })
+
+  it('replays an identical bridge_usdc retry without a second burn', async () => {
+    const mockBridge = vi.fn().mockResolvedValue({
+      burnTxHash: '0xburntx123',
+      mintTxHash: '0xminttx456',
+      fromChain: 'base',
+      toChain: 'polygon',
+      recipient: '0xagent',
+      amount: 100000000n,
+      elapsedMs: 12000,
+    })
+    mockCreateBridge.mockReturnValue({ bridge: mockBridge } as any)
+
+    const first = await handleBridgeUsdc(baseToPolygon)
+    const retry = await handleBridgeUsdc(baseToPolygon)
+
+    expect(first.isError).toBeUndefined()
+    expect(retry.isError).toBeUndefined()
+    const firstData = JSON.parse(first.content[0].text)
+    const retryData = JSON.parse(retry.content[0].text)
+    expect(firstData.burnTxHash).toBe('0xburntx123')
+    expect(firstData.idempotentRetry).toBeUndefined()
+    expect(retryData.burnTxHash).toBe('0xburntx123')
+    expect(retryData.idempotentRetry).toBe(true)
+    expect(mockBridge).toHaveBeenCalledTimes(1)
+    expect(mockCreateBridge).toHaveBeenCalledTimes(1)
+  })
+
+  it('executes a second bridge when the destination or amount differs', async () => {
+    const mockBridge = vi
+      .fn()
+      .mockResolvedValueOnce({
+        burnTxHash: '0xburn1',
+        mintTxHash: '0xmint1',
+        fromChain: 'base',
+        toChain: 'polygon',
+        recipient: '0xagent',
+        amount: 100000000n,
+        elapsedMs: 1000,
+      })
+      .mockResolvedValueOnce({
+        burnTxHash: '0xburn2',
+        mintTxHash: '0xmint2',
+        fromChain: 'base',
+        toChain: 'arbitrum',
+        recipient: '0xagent',
+        amount: 100000000n,
+        elapsedMs: 1000,
+      })
+    mockCreateBridge.mockReturnValue({ bridge: mockBridge } as any)
+
+    const first = await handleBridgeUsdc(baseToPolygon)
+    const second = await handleBridgeUsdc({
+      fromChain: 'base',
+      toChain: 'arbitrum',
+      amount: '100',
+    })
+
+    expect(JSON.parse(first.content[0].text).burnTxHash).toBe('0xburn1')
+    expect(JSON.parse(second.content[0].text).burnTxHash).toBe('0xburn2')
+    expect(JSON.parse(second.content[0].text).idempotentRetry).toBeUndefined()
+    expect(mockBridge).toHaveBeenCalledTimes(2)
+  })
+
+  it('fail-closes an identical retry after an unresolved bridge broadcast', async () => {
+    const mockBridge = vi.fn().mockRejectedValueOnce(new Error('rpc timeout'))
+    mockCreateBridge.mockReturnValue({ bridge: mockBridge } as any)
+
+    const failed = await handleBridgeUsdc(baseToPolygon)
+    const retry = await handleBridgeUsdc(baseToPolygon)
+
+    expect(failed.isError).toBe(true)
+    expect(failed.content[0].text).toContain('rpc timeout')
+    expect(retry.isError).toBe(true)
+    expect(retry.content[0].text).toContain('did not return a transaction hash')
+    expect(mockBridge).toHaveBeenCalledTimes(1)
+  })
+
+  it('keeps a Circle attestation timeout locked after the keyless TTL', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-10-02T22:00:00Z'))
+    try {
+      const mockBridge = vi.fn().mockRejectedValue(new Error('Circle attestation timeout'))
+      mockCreateBridge.mockReturnValue({ bridge: mockBridge } as any)
+
+      const failed = await handleBridgeUsdc(baseToPolygon)
+      vi.advanceTimersByTime(5 * 60 * 1000 + 1)
+      const retry = await handleBridgeUsdc(baseToPolygon)
+
+      expect(failed.isError).toBe(true)
+      expect(failed.content[0].text).toContain('Circle attestation timeout')
+      expect(retry.isError).toBe(true)
+      expect(retry.content[0].text).toContain('did not return a transaction hash')
+      expect(mockBridge).toHaveBeenCalledTimes(1)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('refuses a keyed retry that changes the amount', async () => {
+    const mockBridge = vi.fn().mockResolvedValue({
+      burnTxHash: '0xburntx123',
+      mintTxHash: '0xminttx456',
+      fromChain: 'base',
+      toChain: 'polygon',
+      recipient: '0xagent',
+      amount: 100000000n,
+      elapsedMs: 12000,
+    })
+    mockCreateBridge.mockReturnValue({ bridge: mockBridge } as any)
+
+    const first = await handleBridgeUsdc({
+      ...baseToPolygon,
+      idempotencyKey: 'invoice-1',
+    })
+    const conflict = await handleBridgeUsdc({
+      ...baseToPolygon,
+      amount: '50',
+      idempotencyKey: 'invoice-1',
+    })
+
+    expect(JSON.parse(first.content[0].text).burnTxHash).toBe('0xburntx123')
+    expect(conflict.isError).toBe(true)
+    expect(conflict.content[0].text).toContain('different spend payload')
+    expect(mockBridge).toHaveBeenCalledTimes(1)
   })
 })
