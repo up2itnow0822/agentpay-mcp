@@ -14,6 +14,7 @@ import { assertConfiguredChain } from '../utils/wallet-chain.js'
 import {
   DefiniteSpendFailure,
   IDEMPOTENCY_KEY_JSON_SCHEMA,
+  requireSettlementHash,
   sendTokenIntentIdentity,
   withSpendIntent,
 } from '../utils/spend-intent.js'
@@ -117,11 +118,14 @@ export async function handleSendToken(
         )
       }
 
-      const txHash = await agentTransferToken(wallet, {
-        token: token.address as Address,
-        to: input.recipientAddress as Address,
-        amount: rawAmount,
-      })
+      const txHash = requireSettlementHash(
+        await agentTransferToken(wallet, {
+          token: token.address as Address,
+          to: input.recipientAddress as Address,
+          amount: rawAmount,
+        }),
+        'send_token'
+      )
 
       return {
         success: true as const,

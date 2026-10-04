@@ -9,6 +9,7 @@ import {
   SpendIntentConflictError,
   UnresolvedSpendIntentError,
   _resetSpendIntentStore,
+  requireSettlementHash,
   runDefinitePreBroadcast,
   sendTokenIntentIdentity,
   sendTokenIntentKey,
@@ -147,6 +148,20 @@ describe('bridgeUsdcIntentKey', () => {
     expect(bridgeUsdcIntentKey({ ...base, rawAmount: 50_000_000n })).not.toBe(
       bridgeUsdcIntentKey(base)
     )
+  })
+})
+
+describe('requireSettlementHash', () => {
+  it('returns a non-empty hash unchanged', () => {
+    expect(requireSettlementHash('0xtxhash', 'swap_tokens')).toBe('0xtxhash')
+  })
+
+  it('rejects missing, empty, or whitespace-only hashes', () => {
+    for (const bad of [undefined, null, '', '   ', 0, {}]) {
+      expect(() => requireSettlementHash(bad, 'swap_tokens')).toThrow(
+        'swap_tokens returned without a transaction hash'
+      )
+    }
   })
 })
 

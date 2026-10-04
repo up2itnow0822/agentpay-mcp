@@ -196,6 +196,20 @@ describe('send_token', () => {
     expect(mockAgentTransferToken).toHaveBeenCalledTimes(2)
   })
 
+  it('fail-closes a hashless send_token success instead of caching it', async () => {
+    mockUsdcRegistry()
+    mockAgentTransferToken.mockResolvedValue('' as any)
+
+    const failed = await handleSendToken(usdcSend)
+    const retry = await handleSendToken(usdcSend)
+
+    expect(failed.isError).toBe(true)
+    expect(failed.content[0].text).toContain('returned without a transaction hash')
+    expect(retry.isError).toBe(true)
+    expect(retry.content[0].text).toContain('did not return a transaction hash')
+    expect(mockAgentTransferToken).toHaveBeenCalledTimes(1)
+  })
+
   it('fail-closes an identical retry after an unresolved broadcast', async () => {
     mockUsdcRegistry()
     mockAgentTransferToken.mockRejectedValueOnce(new Error('rpc timeout'))

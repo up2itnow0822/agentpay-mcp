@@ -371,6 +371,21 @@ describe('swap_tokens', () => {
     expect(mockSwap).toHaveBeenCalledTimes(2)
   })
 
+  it('fail-closes a hashless swap success instead of caching it', async () => {
+    mockUsdcWethRegistry()
+    const mockSwap = vi.fn().mockResolvedValue({ txHash: '   ', quote: null })
+    mockAttachSwap.mockReturnValue(withQuote(mockSwap) as any)
+
+    const failed = await handleSwapTokens(usdcWethSwap)
+    const retry = await handleSwapTokens(usdcWethSwap)
+
+    expect(failed.isError).toBe(true)
+    expect(failed.content[0].text).toContain('returned without a transaction hash')
+    expect(retry.isError).toBe(true)
+    expect(retry.content[0].text).toContain('did not return a transaction hash')
+    expect(mockSwap).toHaveBeenCalledTimes(1)
+  })
+
   it('fail-closes an identical retry after an unresolved swap broadcast', async () => {
     mockUsdcWethRegistry()
     const mockSwap = vi.fn().mockRejectedValueOnce(new Error('rpc timeout'))

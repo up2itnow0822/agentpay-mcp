@@ -106,6 +106,22 @@ export class SpendIntentConflictError extends Error {
   }
 }
 
+/**
+ * Require a non-empty settlement hash before a spend callback may resolve
+ * into the settled cache. A hashless SDK result is ambiguous — the transfer
+ * may already have been broadcast — so this throws a generic Error and the
+ * intent stays locked instead of replaying success:true with no tx.
+ */
+export function requireSettlementHash(hash: unknown, label: string): string {
+  if (typeof hash !== 'string' || hash.trim().length === 0) {
+    throw new Error(
+      `${label} returned without a transaction hash. ` +
+        'Refusing to cache a hashless success; reconcile the original transfer before retrying.'
+    )
+  }
+  return hash
+}
+
 function spendIntentIdentity(
   tool: string,
   fingerprint: string,

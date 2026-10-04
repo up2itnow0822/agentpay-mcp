@@ -371,6 +371,28 @@ describe('bridge_usdc', () => {
     expect(mockBridge).toHaveBeenCalledTimes(2)
   })
 
+  it('fail-closes a mint-hashless bridge success instead of caching it', async () => {
+    const mockBridge = vi.fn().mockResolvedValue({
+      burnTxHash: '0xburntx123',
+      mintTxHash: '',
+      fromChain: 'base',
+      toChain: 'polygon',
+      recipient: '0xagent',
+      amount: 100000000n,
+      elapsedMs: 12000,
+    })
+    mockCreateBridge.mockReturnValue(withAllowance(mockBridge) as any)
+
+    const failed = await handleBridgeUsdc(baseToPolygon)
+    const retry = await handleBridgeUsdc(baseToPolygon)
+
+    expect(failed.isError).toBe(true)
+    expect(failed.content[0].text).toContain('returned without a transaction hash')
+    expect(retry.isError).toBe(true)
+    expect(retry.content[0].text).toContain('did not return a transaction hash')
+    expect(mockBridge).toHaveBeenCalledTimes(1)
+  })
+
   it('fail-closes an identical retry after an unresolved bridge broadcast', async () => {
     const mockBridge = vi.fn().mockRejectedValueOnce(new Error('rpc timeout'))
     mockCreateBridge.mockReturnValue(withAllowance(mockBridge) as any)

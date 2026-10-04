@@ -14,6 +14,7 @@ import {
   DefiniteSpendFailure,
   IDEMPOTENCY_KEY_JSON_SCHEMA,
   bridgeUsdcIntentIdentity,
+  requireSettlementHash,
   runDefinitePreBroadcast,
   withSpendIntent,
 } from '../utils/spend-intent.js'
@@ -156,11 +157,13 @@ export async function handleBridgeUsdc(
       await runDefinitePreBroadcast(() => bridge.getUsdcAllowance())
 
       const result = await bridge.bridge(rawAmount, input.toChain as SupportedChain)
+      const burnTxHash = requireSettlementHash(result.burnTxHash, 'bridge_usdc burn')
+      const mintTxHash = requireSettlementHash(result.mintTxHash, 'bridge_usdc mint')
 
       return {
         success: true as const,
-        burnTxHash: result.burnTxHash,
-        mintTxHash: result.mintTxHash,
+        burnTxHash,
+        mintTxHash,
         fromChain: result.fromChain,
         toChain: result.toChain,
         recipient: result.recipient,

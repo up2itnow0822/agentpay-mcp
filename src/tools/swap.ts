@@ -16,6 +16,7 @@ import {
   DEFAULT_SWAP_SLIPPAGE_BPS,
   DefiniteSpendFailure,
   IDEMPOTENCY_KEY_JSON_SCHEMA,
+  requireSettlementHash,
   runDefinitePreBroadcast,
   swapTokensIntentIdentity,
   withSpendIntent,
@@ -173,10 +174,11 @@ export async function handleSwapTokens(
         rawAmountIn,
         { slippageBps }
       )
+      const txHash = requireSettlementHash(result.txHash, 'swap_tokens')
 
       return {
         success: true as const,
-        txHash: result.txHash,
+        txHash,
         feeTxHash: result.feeTxHash ?? null,
         approvalRequired: result.approvalRequired,
         approvalTxHash: result.approvalTxHash ?? null,
