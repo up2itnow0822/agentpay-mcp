@@ -4,6 +4,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import {
   DefiniteSpendFailure,
+  IDEMPOTENCY_KEY_JSON_SCHEMA,
   SEND_TOKEN_INTENT_TTL_MS,
   SpendIntentConflictError,
   UnresolvedSpendIntentError,
@@ -15,6 +16,9 @@ import {
   bridgeUsdcIntentKey,
   withSpendIntent,
 } from '../src/utils/spend-intent.js'
+import { SwapTokensSchema, swapTokensTool } from '../src/tools/swap.js'
+import { BridgeUsdcSchema, bridgeUsdcTool } from '../src/tools/bridge.js'
+import { SendTokenSchema, sendTokenTool } from '../src/tools/transfers.js'
 
 describe('sendTokenIntentKey', () => {
   it('normalises address case so checksum retries collide', () => {
@@ -289,5 +293,46 @@ describe('withSpendIntent', () => {
       })
     ).rejects.toBeInstanceOf(SpendIntentConflictError)
     expect(run).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('idempotencyKey discovery schema', () => {
+  const published = [
+    swapTokensTool.inputSchema.properties.idempotencyKey,
+    bridgeUsdcTool.inputSchema.properties.idempotencyKey,
+    sendTokenTool.inputSchema.properties.idempotencyKey,
+  ]
+  const discoveryPattern = new RegExp(IDEMPOTENCY_KEY_JSON_SCHEMA.pattern)
+  const swapBase = {
+    fromSymbol: 'USDC',
+    toSymbol: 'WETH',
+    amount: '1',
+    chainId: 8453,
+  }
+  const bridgeBase = { fromChain: 'base' as const, toChain: 'optimism' as const, amount: '1' }
+  const sendBase = {
+    tokenSymbol: 'USDC',
+    chainId: 8453,
+    recipientAddress: '0xrecipient00000000000000000000000000000001',
+    amount: '1',
+  }
+
+  it('publishes the non-whitespace pattern on swap, bridge, and send', () => {
+    for (const schema of published) {
+      expect(schema).toMatchObject(IDEMPOTENCY_KEY_JSON_SCHEMA)
+    }
+    expect(discoveryPattern.test('   ')).toBe(false)
+    expect(discoveryPattern.test('\t\n')).toBe(false)
+    expect(discoveryPattern.test('invoice-1')).toBe(true)
+    expect(discoveryPattern.test(' invoice-1 ')).toBe(true)
+  })
+
+  it('rejects whitespace-only keys at runtime to match discovery', () => {
+    expect(SwapTokensSchema.safeParse({ ...swapBase, idempotencyKey: '   ' }).success).toBe(false)
+    expect(BridgeUsdcSchema.safeParse({ ...bridgeBase, idempotencyKey: '   ' }).success).toBe(false)
+    expect(SendTokenSchema.safeParse({ ...sendBase, idempotencyKey: '   ' }).success).toBe(false)
+    expect(SwapTokensSchema.safeParse({ ...swapBase, idempotencyKey: 'invoice-1' }).success).toBe(
+      true
+    )
   })
 })

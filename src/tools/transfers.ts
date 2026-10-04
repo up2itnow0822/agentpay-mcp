@@ -13,6 +13,7 @@ import { textContent, formatError } from '../utils/format.js'
 import { assertConfiguredChain } from '../utils/wallet-chain.js'
 import {
   DefiniteSpendFailure,
+  IDEMPOTENCY_KEY_JSON_SCHEMA,
   sendTokenIntentIdentity,
   withSpendIntent,
 } from '../utils/spend-intent.js'
@@ -60,11 +61,9 @@ export const sendTokenTool = {
       recipientAddress: { type: 'string', description: 'Recipient address (0x-prefixed)' },
       amount: { type: 'string', description: 'Amount in human-readable units (e.g. "10.5")' },
       idempotencyKey: {
-        type: 'string',
-        minLength: 1,
-        maxLength: 128,
+        ...IDEMPOTENCY_KEY_JSON_SCHEMA,
         description:
-          'Optional idempotency key (1-128 chars). Distinct keys allow two equal payments.',
+          'Optional idempotency key (1-128 non-whitespace chars). Distinct keys allow two equal payments.',
       },
     },
     required: ['tokenSymbol', 'chainId', 'recipientAddress', 'amount'],

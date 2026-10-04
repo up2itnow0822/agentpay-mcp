@@ -12,6 +12,7 @@ import { textContent, formatError } from '../utils/format.js'
 import { assertConfiguredBridgeSource } from '../utils/wallet-chain.js'
 import {
   DefiniteSpendFailure,
+  IDEMPOTENCY_KEY_JSON_SCHEMA,
   bridgeUsdcIntentIdentity,
   runDefinitePreBroadcast,
   withSpendIntent,
@@ -83,11 +84,9 @@ export const bridgeUsdcTool = {
         description: 'Amount of USDC to bridge (human-readable, e.g. "100")',
       },
       idempotencyKey: {
-        type: 'string',
-        minLength: 1,
-        maxLength: 128,
+        ...IDEMPOTENCY_KEY_JSON_SCHEMA,
         description:
-          'Optional idempotency key (1-128 chars). Distinct keys allow two equal bridges.',
+          'Optional idempotency key (1-128 non-whitespace chars). Distinct keys allow two equal bridges.',
       },
     },
     required: ['fromChain', 'toChain', 'amount'],

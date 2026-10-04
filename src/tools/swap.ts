@@ -15,6 +15,7 @@ import { assertConfiguredChain } from '../utils/wallet-chain.js'
 import {
   DEFAULT_SWAP_SLIPPAGE_BPS,
   DefiniteSpendFailure,
+  IDEMPOTENCY_KEY_JSON_SCHEMA,
   runDefinitePreBroadcast,
   swapTokensIntentIdentity,
   withSpendIntent,
@@ -73,11 +74,9 @@ export const swapTokensTool = {
       chainId: { type: 'number', description: 'Chain ID (8453=Base, 42161=Arbitrum, 10=Optimism, 137=Polygon)' },
       slippageBps: { type: 'number', description: 'Slippage in basis points (default: 50)' },
       idempotencyKey: {
-        type: 'string',
-        minLength: 1,
-        maxLength: 128,
+        ...IDEMPOTENCY_KEY_JSON_SCHEMA,
         description:
-          'Optional idempotency key (1-128 chars). Distinct keys allow two equal swaps.',
+          'Optional idempotency key (1-128 non-whitespace chars). Distinct keys allow two equal swaps.',
       },
     },
     required: ['fromSymbol', 'toSymbol', 'amount', 'chainId'],

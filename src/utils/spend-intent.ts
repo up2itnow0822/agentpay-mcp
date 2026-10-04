@@ -27,6 +27,18 @@
 export const SEND_TOKEN_INTENT_TTL_MS = 5 * 60 * 1000
 export const DEFAULT_SWAP_SLIPPAGE_BPS = 50
 
+/**
+ * Published MCP JSON Schema for optional idempotencyKey on spend tools.
+ * Runtime Zod trims then applies min(1)/max(128), so whitespace-only keys
+ * are rejected. Discovery must advertise the same non-whitespace constraint.
+ */
+export const IDEMPOTENCY_KEY_JSON_SCHEMA = {
+  type: 'string' as const,
+  minLength: 1,
+  maxLength: 128,
+  pattern: /.*\S.*/.source,
+}
+
 export interface SpendIntentIdentity {
   key: string
   fingerprint: string
