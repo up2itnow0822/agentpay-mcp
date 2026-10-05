@@ -116,15 +116,15 @@ export function wrapDefiniteSdkReads<T extends object>(sdk: T): T {
   const record = sdk as Record<string, unknown>
   const quote = record.getQuote
   if (typeof quote === 'function') {
-    const original = quote.bind(sdk) as (...args: unknown[]) => Promise<unknown>
-    record.getQuote = (...args: unknown[]) =>
-      runDefinitePreBroadcast(() => original(...args))
+    const original = quote.bind(sdk) as (..._args: unknown[]) => Promise<unknown>
+    record.getQuote = (..._args: unknown[]) =>
+      runDefinitePreBroadcast(() => original(..._args))
   }
   const allowance = record.getUsdcAllowance
   if (typeof allowance === 'function') {
-    const original = allowance.bind(sdk) as (...args: unknown[]) => Promise<unknown>
-    record.getUsdcAllowance = (...args: unknown[]) =>
-      runDefinitePreBroadcast(() => original(...args))
+    const original = allowance.bind(sdk) as (..._args: unknown[]) => Promise<unknown>
+    record.getUsdcAllowance = (..._args: unknown[]) =>
+      runDefinitePreBroadcast(() => original(..._args))
   }
   const nested = record.swapModule
   if (nested && typeof nested === 'object') {
@@ -143,7 +143,7 @@ export function wrapDefiniteSdkReads<T extends object>(sdk: T): T {
 export function classifyBridgeApproveUsdc<T>(bridge: T): T {
   const record = bridge as {
     getUsdcAllowance?: () => Promise<bigint>
-    approveUsdc?: (amount: bigint) => Promise<unknown>
+    approveUsdc?: (_amount: bigint) => Promise<unknown>
   }
   const original = record.approveUsdc?.bind(record)
   const readAllowance = record.getUsdcAllowance?.bind(record)
@@ -199,8 +199,8 @@ function instrumentWalletBroadcast(
     return () => undefined
   }
   const client = walletClient as {
-    sendTransaction?: (...args: unknown[]) => unknown
-    writeContract?: (...args: unknown[]) => unknown
+    sendTransaction?: (..._args: unknown[]) => unknown
+    writeContract?: (..._args: unknown[]) => unknown
   }
   const originalSend = client.sendTransaction
   const originalWrite = client.writeContract

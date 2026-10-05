@@ -53,22 +53,22 @@ const baseToPolygon = {
 }
 
 function withAllowance(
-  bridgeImpl: (...args: unknown[]) => unknown,
+  bridgeImpl: (..._args: unknown[]) => unknown,
   getUsdcAllowance = vi.fn().mockResolvedValue(0n)
 ) {
   const approveUsdc = async (amount: bigint) => {
     const current = await getUsdcAllowance()
     if (current >= amount) return
   }
-  const bridge = vi.fn(async (...args: unknown[]) => {
-    await approveUsdc(args[0] as bigint)
-    return bridgeImpl(...args)
+  const bridge = vi.fn(async (..._args: unknown[]) => {
+    await approveUsdc(_args[0] as bigint)
+    return bridgeImpl(..._args)
   })
   return { bridge, getUsdcAllowance, approveUsdc }
 }
 
 async function broadcastThenThrow(message: string): Promise<never> {
-  await (getWallet() as { walletClient: { writeContract: (tx: unknown) => Promise<unknown> } })
+  await (getWallet() as { walletClient: { writeContract: (_tx: unknown) => Promise<unknown> } })
     .walletClient.writeContract({ to: '0x1', data: '0x' })
   throw new Error(message)
 }

@@ -83,7 +83,7 @@ function mockUsdcWethRegistry() {
 }
 
 function withQuote(
-  swapImpl: (...args: unknown[]) => unknown,
+  swapImpl: (..._args: unknown[]) => unknown,
   getQuote = vi.fn().mockResolvedValue({
     amountInNet: 1n,
     amountOutMinimum: 1n,
@@ -92,15 +92,15 @@ function withQuote(
     gasEstimate: 100000n,
   })
 ) {
-  const swap = vi.fn(async (...args: unknown[]) => {
-    await getQuote(args[0], args[1], args[2], args[3])
-    return swapImpl(...args)
+  const swap = vi.fn(async (..._args: unknown[]) => {
+    await getQuote(_args[0], _args[1], _args[2], _args[3])
+    return swapImpl(..._args)
   })
   return { swap, getQuote, swapModule: { getQuote } }
 }
 
 async function broadcastThenThrow(message: string): Promise<never> {
-  await (getWallet() as { walletClient: { sendTransaction: (tx: unknown) => Promise<unknown> } })
+  await (getWallet() as { walletClient: { sendTransaction: (_tx: unknown) => Promise<unknown> } })
     .walletClient.sendTransaction({ to: '0x1', data: '0x' })
   throw new Error(message)
 }
