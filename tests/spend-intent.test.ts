@@ -151,15 +151,29 @@ describe('bridgeUsdcIntentKey', () => {
   })
 })
 
+const VALID_TX_HASH = `0x${'ab'.repeat(32)}`
+
 describe('requireSettlementHash', () => {
-  it('returns a non-empty hash unchanged', () => {
-    expect(requireSettlementHash('0xtxhash', 'swap_tokens')).toBe('0xtxhash')
+  it('returns a 32-byte 0x-prefixed hash, trimming surrounding whitespace', () => {
+    expect(requireSettlementHash(VALID_TX_HASH, 'swap_tokens')).toBe(VALID_TX_HASH)
+    expect(requireSettlementHash(`  ${VALID_TX_HASH}  `, 'swap_tokens')).toBe(VALID_TX_HASH)
   })
 
   it('rejects missing, empty, or whitespace-only hashes', () => {
     for (const bad of [undefined, null, '', '   ', 0, {}]) {
       expect(() => requireSettlementHash(bad, 'swap_tokens')).toThrow(
         'swap_tokens returned without a transaction hash'
+      )
+    }
+  })
+
+  it('rejects malformed hashes instead of treating them as settled', () => {
+    const tooShort = `0x${'ab'.repeat(31)}`
+    const tooLong = `0x${'ab'.repeat(33)}`
+    const uppercasePrefix = `0X${'ab'.repeat(32)}`
+    for (const bad of ['pending', '0x123', tooShort, tooLong, uppercasePrefix, '0xzzzz']) {
+      expect(() => requireSettlementHash(bad, 'swap_tokens')).toThrow(
+        'swap_tokens returned a malformed transaction hash'
       )
     }
   })

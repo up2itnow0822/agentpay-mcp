@@ -89,7 +89,7 @@ describe('swap_tokens', () => {
 
   it('swaps USDC to WETH successfully', async () => {
     const mockSwap = vi.fn().mockResolvedValue({
-      txHash: '0xswaptx123',
+      txHash: '0xa75b820028c10238305d038a08ffc1dbc6abea551cecee41b5652aa8d93d77f6',
       feeTxHash: null,
       approvalRequired: true,
       approvalTxHash: '0xapprovaltx',
@@ -118,7 +118,7 @@ describe('swap_tokens', () => {
     expect(result.isError).toBeUndefined()
     const data = JSON.parse(result.content[0].text)
     expect(data.success).toBe(true)
-    expect(data.txHash).toBe('0xswaptx123')
+    expect(data.txHash).toBe('0xa75b820028c10238305d038a08ffc1dbc6abea551cecee41b5652aa8d93d77f6')
     expect(data.fromToken).toBe('USDC')
     expect(data.toToken).toBe('WETH')
     expect(data.chainId).toBe(8453)
@@ -132,7 +132,7 @@ describe('swap_tokens', () => {
 
   it('applies custom slippageBps', async () => {
     const mockSwap = vi.fn().mockResolvedValue({
-      txHash: '0xswaptx456',
+      txHash: '0xa4b1e72419aca2c4bf7b370753a3a5df2f855d6dfb46dbf2e1ca647b6c327187',
       quote: { amountInNet: 1n, amountOutMinimum: 1n, poolFeeTier: 500, feeAmount: 0n, gasEstimate: 100000n },
     })
     mockGetGlobalRegistry.mockReturnValue({
@@ -281,7 +281,7 @@ describe('swap_tokens', () => {
     MockSpendingPolicy.mockImplementation(function () { return { check } } as any)
 
     const mockSwap = vi.fn().mockResolvedValue({
-      txHash: '0xswaptx999',
+      txHash: '0x58b6062bc5903ddbde75a7f123ecc63aa020127ea617b13c3bc3e90a8b17cf50',
       quote: { amountInNet: 1n, amountOutMinimum: 1n, poolFeeTier: 500, feeAmount: 0n, gasEstimate: 100000n },
     })
     mockGetGlobalRegistry.mockReturnValue({
@@ -326,7 +326,7 @@ describe('swap_tokens', () => {
   it('replays an identical swap_tokens retry without a second swap', async () => {
     mockUsdcWethRegistry()
     const mockSwap = vi.fn().mockResolvedValue({
-      txHash: '0xswaptx123',
+      txHash: '0xa75b820028c10238305d038a08ffc1dbc6abea551cecee41b5652aa8d93d77f6',
       feeTxHash: null,
       approvalRequired: true,
       approvalTxHash: '0xapprovaltx',
@@ -347,9 +347,9 @@ describe('swap_tokens', () => {
     expect(retry.isError).toBeUndefined()
     const firstData = JSON.parse(first.content[0].text)
     const retryData = JSON.parse(retry.content[0].text)
-    expect(firstData.txHash).toBe('0xswaptx123')
+    expect(firstData.txHash).toBe('0xa75b820028c10238305d038a08ffc1dbc6abea551cecee41b5652aa8d93d77f6')
     expect(firstData.idempotentRetry).toBeUndefined()
-    expect(retryData.txHash).toBe('0xswaptx123')
+    expect(retryData.txHash).toBe('0xa75b820028c10238305d038a08ffc1dbc6abea551cecee41b5652aa8d93d77f6')
     expect(retryData.idempotentRetry).toBe(true)
     expect(mockSwap).toHaveBeenCalledTimes(1)
   })
@@ -358,15 +358,15 @@ describe('swap_tokens', () => {
     mockUsdcWethRegistry()
     const mockSwap = vi
       .fn()
-      .mockResolvedValueOnce({ txHash: '0xswap1', quote: null })
-      .mockResolvedValueOnce({ txHash: '0xswap2', quote: null })
+      .mockResolvedValueOnce({ txHash: '0x6dc1ec722cd64b3a1fde946e06c2a2e4a3a537aca2ab5eb7c5458e65550b0f38', quote: null })
+      .mockResolvedValueOnce({ txHash: '0x1c269cc693bf2baaeac8812a815e4b527506d05ccf1b50d0c3453cf4cc011d2a', quote: null })
     mockAttachSwap.mockReturnValue(withQuote(mockSwap) as any)
 
     const first = await handleSwapTokens(usdcWethSwap)
     const second = await handleSwapTokens({ ...usdcWethSwap, amount: '50' })
 
-    expect(JSON.parse(first.content[0].text).txHash).toBe('0xswap1')
-    expect(JSON.parse(second.content[0].text).txHash).toBe('0xswap2')
+    expect(JSON.parse(first.content[0].text).txHash).toBe('0x6dc1ec722cd64b3a1fde946e06c2a2e4a3a537aca2ab5eb7c5458e65550b0f38')
+    expect(JSON.parse(second.content[0].text).txHash).toBe('0x1c269cc693bf2baaeac8812a815e4b527506d05ccf1b50d0c3453cf4cc011d2a')
     expect(JSON.parse(second.content[0].text).idempotentRetry).toBeUndefined()
     expect(mockSwap).toHaveBeenCalledTimes(2)
   })
@@ -381,6 +381,21 @@ describe('swap_tokens', () => {
 
     expect(failed.isError).toBe(true)
     expect(failed.content[0].text).toContain('returned without a transaction hash')
+    expect(retry.isError).toBe(true)
+    expect(retry.content[0].text).toContain('did not return a transaction hash')
+    expect(mockSwap).toHaveBeenCalledTimes(1)
+  })
+
+  it('fail-closes a malformed swap txHash instead of caching it', async () => {
+    mockUsdcWethRegistry()
+    const mockSwap = vi.fn().mockResolvedValue({ txHash: 'pending', quote: null })
+    mockAttachSwap.mockReturnValue(withQuote(mockSwap) as any)
+
+    const failed = await handleSwapTokens(usdcWethSwap)
+    const retry = await handleSwapTokens(usdcWethSwap)
+
+    expect(failed.isError).toBe(true)
+    expect(failed.content[0].text).toContain('malformed transaction hash')
     expect(retry.isError).toBe(true)
     expect(retry.content[0].text).toContain('did not return a transaction hash')
     expect(mockSwap).toHaveBeenCalledTimes(1)
@@ -411,7 +426,7 @@ describe('swap_tokens', () => {
       .mockResolvedValueOnce({ status: 'approved' })
     MockSpendingPolicy.mockImplementation(function () { return { check } } as any)
 
-    const mockSwap = vi.fn().mockResolvedValue({ txHash: '0xswapafterpolicy', quote: null })
+    const mockSwap = vi.fn().mockResolvedValue({ txHash: '0xc3746c982a2eeb7bc35e72d8a947e15e7e544950c861418fc0cab7c2d99b2fa9', quote: null })
     mockUsdcWethRegistry()
     mockAttachSwap.mockReturnValue(withQuote(mockSwap) as any)
 
@@ -423,33 +438,33 @@ describe('swap_tokens', () => {
     expect(blocked.isError).toBe(true)
     expect(blocked.content[0].text).toContain('Rolling spend cap exceeded')
     expect(retried.isError).toBeUndefined()
-    expect(JSON.parse(retried.content[0].text).txHash).toBe('0xswapafterpolicy')
+    expect(JSON.parse(retried.content[0].text).txHash).toBe('0xc3746c982a2eeb7bc35e72d8a947e15e7e544950c861418fc0cab7c2d99b2fa9')
     expect(mockSwap).toHaveBeenCalledTimes(1)
   })
 
   it('replays when the caller retries the same idempotency key', async () => {
     mockUsdcWethRegistry()
-    const mockSwap = vi.fn().mockResolvedValue({ txHash: '0xswapkey', quote: null })
+    const mockSwap = vi.fn().mockResolvedValue({ txHash: '0xe2ca719a6c68fddf6f0eba6672bf06c44d615d6cd6f88966d98a88354600d75e', quote: null })
     mockAttachSwap.mockReturnValue(withQuote(mockSwap) as any)
 
     const first = await handleSwapTokens({ ...usdcWethSwap, idempotencyKey: 'invoice-1' })
     const retry = await handleSwapTokens({ ...usdcWethSwap, idempotencyKey: 'invoice-1' })
 
     expect(JSON.parse(first.content[0].text).idempotentRetry).toBeUndefined()
-    expect(JSON.parse(retry.content[0].text).txHash).toBe('0xswapkey')
+    expect(JSON.parse(retry.content[0].text).txHash).toBe('0xe2ca719a6c68fddf6f0eba6672bf06c44d615d6cd6f88966d98a88354600d75e')
     expect(JSON.parse(retry.content[0].text).idempotentRetry).toBe(true)
     expect(mockSwap).toHaveBeenCalledTimes(1)
   })
 
   it('replays when a retry only fills in the default slippageBps', async () => {
     mockUsdcWethRegistry()
-    const mockSwap = vi.fn().mockResolvedValue({ txHash: '0xswapdefault', quote: null })
+    const mockSwap = vi.fn().mockResolvedValue({ txHash: '0x81dfd97e2d5187c186e08a70a91d7ddab140f7869f39b4cef3ec2b7b0e122cee', quote: null })
     mockAttachSwap.mockReturnValue(withQuote(mockSwap) as any)
 
     const first = await handleSwapTokens(usdcWethSwap)
     const retry = await handleSwapTokens({ ...usdcWethSwap, slippageBps: 50 })
 
-    expect(JSON.parse(first.content[0].text).txHash).toBe('0xswapdefault')
+    expect(JSON.parse(first.content[0].text).txHash).toBe('0x81dfd97e2d5187c186e08a70a91d7ddab140f7869f39b4cef3ec2b7b0e122cee')
     expect(JSON.parse(retry.content[0].text).idempotentRetry).toBe(true)
     expect(mockSwap).toHaveBeenCalledTimes(1)
     expect(mockSwap).toHaveBeenCalledWith(
@@ -465,7 +480,7 @@ describe('swap_tokens', () => {
     vi.setSystemTime(new Date('2026-10-02T22:00:00Z'))
     try {
       mockUsdcWethRegistry()
-      const mockSwap = vi.fn().mockResolvedValue({ txHash: '0xswapdurable', quote: null })
+      const mockSwap = vi.fn().mockResolvedValue({ txHash: '0xd2d28d84ab5a533299dc2dabb137843756f6c6eb8d1e8eb37d1a63f9133de737', quote: null })
       mockAttachSwap.mockReturnValue(withQuote(mockSwap) as any)
 
       const first = await handleSwapTokens({
@@ -478,7 +493,7 @@ describe('swap_tokens', () => {
         idempotencyKey: 'invoice-1',
       })
 
-      expect(JSON.parse(first.content[0].text).txHash).toBe('0xswapdurable')
+      expect(JSON.parse(first.content[0].text).txHash).toBe('0xd2d28d84ab5a533299dc2dabb137843756f6c6eb8d1e8eb37d1a63f9133de737')
       expect(JSON.parse(retry.content[0].text).idempotentRetry).toBe(true)
       expect(mockSwap).toHaveBeenCalledTimes(1)
     } finally {
@@ -488,7 +503,7 @@ describe('swap_tokens', () => {
 
   it('refuses a keyed retry that changes the amount', async () => {
     mockUsdcWethRegistry()
-    const mockSwap = vi.fn().mockResolvedValue({ txHash: '0xswapkey', quote: null })
+    const mockSwap = vi.fn().mockResolvedValue({ txHash: '0xe2ca719a6c68fddf6f0eba6672bf06c44d615d6cd6f88966d98a88354600d75e', quote: null })
     mockAttachSwap.mockReturnValue(withQuote(mockSwap) as any)
 
     const first = await handleSwapTokens({
@@ -501,7 +516,7 @@ describe('swap_tokens', () => {
       idempotencyKey: 'invoice-1',
     })
 
-    expect(JSON.parse(first.content[0].text).txHash).toBe('0xswapkey')
+    expect(JSON.parse(first.content[0].text).txHash).toBe('0xe2ca719a6c68fddf6f0eba6672bf06c44d615d6cd6f88966d98a88354600d75e')
     expect(conflict.isError).toBe(true)
     expect(conflict.content[0].text).toContain('different spend payload')
     expect(mockSwap).toHaveBeenCalledTimes(1)
@@ -509,7 +524,7 @@ describe('swap_tokens', () => {
 
   it('replays a keyed retry that only fills in the default slippageBps', async () => {
     mockUsdcWethRegistry()
-    const mockSwap = vi.fn().mockResolvedValue({ txHash: '0xswapkeyslip', quote: null })
+    const mockSwap = vi.fn().mockResolvedValue({ txHash: '0x523be71122b194c4248560f162f00eabdb43f8e1a68fb84c87c04eea265da335', quote: null })
     mockAttachSwap.mockReturnValue(withQuote(mockSwap) as any)
 
     const first = await handleSwapTokens({
@@ -522,7 +537,7 @@ describe('swap_tokens', () => {
       idempotencyKey: 'invoice-1',
     })
 
-    expect(JSON.parse(retry.content[0].text).txHash).toBe('0xswapkeyslip')
+    expect(JSON.parse(retry.content[0].text).txHash).toBe('0x523be71122b194c4248560f162f00eabdb43f8e1a68fb84c87c04eea265da335')
     expect(JSON.parse(retry.content[0].text).idempotentRetry).toBe(true)
     expect(mockSwap).toHaveBeenCalledTimes(1)
   })
@@ -539,7 +554,7 @@ describe('swap_tokens', () => {
         feeAmount: 0n,
         gasEstimate: 100000n,
       })
-    const mockSwap = vi.fn().mockResolvedValue({ txHash: '0xafterquote', quote: null })
+    const mockSwap = vi.fn().mockResolvedValue({ txHash: '0xd8e4908941b66c7b471093f86142a2468739573208f613a7e3650d13c153d3af', quote: null })
     mockAttachSwap.mockReturnValue(withQuote(mockSwap, getQuote) as any)
 
     const failed = await handleSwapTokens(usdcWethSwap)
@@ -548,7 +563,7 @@ describe('swap_tokens', () => {
     expect(failed.isError).toBe(true)
     expect(failed.content[0].text).toContain('quote rpc timeout')
     expect(retried.isError).toBeUndefined()
-    expect(JSON.parse(retried.content[0].text).txHash).toBe('0xafterquote')
+    expect(JSON.parse(retried.content[0].text).txHash).toBe('0xd8e4908941b66c7b471093f86142a2468739573208f613a7e3650d13c153d3af')
     expect(mockSwap).toHaveBeenCalledTimes(1)
     expect(getQuote).toHaveBeenCalledTimes(2)
   })

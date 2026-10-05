@@ -56,8 +56,8 @@ describe('bridge_usdc', () => {
 
   it('bridges USDC from base to polygon successfully', async () => {
     const mockBridge = vi.fn().mockResolvedValue({
-      burnTxHash: '0xburntx123',
-      mintTxHash: '0xminttx456',
+      burnTxHash: '0x0bcf0cd90bcd3694b04c4e810e626777e17b49dca45660a84e0b6619ae8ac1a9',
+      mintTxHash: '0xb2f5e43fac373c03f76f7ec086f320bc572965866e7083e5bf1877c225635529',
       fromChain: 'base',
       toChain: 'polygon',
       recipient: '0xagent',
@@ -75,8 +75,8 @@ describe('bridge_usdc', () => {
     expect(result.isError).toBeUndefined()
     const data = JSON.parse(result.content[0].text)
     expect(data.success).toBe(true)
-    expect(data.burnTxHash).toBe('0xburntx123')
-    expect(data.mintTxHash).toBe('0xminttx456')
+    expect(data.burnTxHash).toBe('0x0bcf0cd90bcd3694b04c4e810e626777e17b49dca45660a84e0b6619ae8ac1a9')
+    expect(data.mintTxHash).toBe('0xb2f5e43fac373c03f76f7ec086f320bc572965866e7083e5bf1877c225635529')
     expect(data.fromChain).toBe('base')
     expect(data.toChain).toBe('polygon')
     expect(data.amount).toBe('100')
@@ -160,8 +160,8 @@ describe('bridge_usdc', () => {
 
   it('converts large amounts exactly, beyond float precision', async () => {
     const mockBridge = vi.fn().mockResolvedValue({
-      burnTxHash: '0xburntx789',
-      mintTxHash: '0xminttxabc',
+      burnTxHash: '0x2ccda0565bb57928c180850e54af1b1d4fe9cd0eb7d25025d6c42ecfc3c62ec2',
+      mintTxHash: '0xb59db29d2c7d3310f818dc2d210abb661e91a94a8f1920c161ec9abcf581b0e3',
       fromChain: 'base',
       toChain: 'polygon',
       recipient: '0xagent',
@@ -274,8 +274,8 @@ describe('bridge_usdc', () => {
     await handleSetSpendPolicy({ dailyLimitEth: '1000' })
 
     const mockBridge = vi.fn().mockResolvedValue({
-      burnTxHash: '0xburntx123',
-      mintTxHash: '0xminttx456',
+      burnTxHash: '0x0bcf0cd90bcd3694b04c4e810e626777e17b49dca45660a84e0b6619ae8ac1a9',
+      mintTxHash: '0xb2f5e43fac373c03f76f7ec086f320bc572965866e7083e5bf1877c225635529',
       fromChain: 'base',
       toChain: 'polygon',
       recipient: '0xagent',
@@ -310,8 +310,8 @@ describe('bridge_usdc', () => {
 
   it('replays an identical bridge_usdc retry without a second burn', async () => {
     const mockBridge = vi.fn().mockResolvedValue({
-      burnTxHash: '0xburntx123',
-      mintTxHash: '0xminttx456',
+      burnTxHash: '0x0bcf0cd90bcd3694b04c4e810e626777e17b49dca45660a84e0b6619ae8ac1a9',
+      mintTxHash: '0xb2f5e43fac373c03f76f7ec086f320bc572965866e7083e5bf1877c225635529',
       fromChain: 'base',
       toChain: 'polygon',
       recipient: '0xagent',
@@ -327,9 +327,9 @@ describe('bridge_usdc', () => {
     expect(retry.isError).toBeUndefined()
     const firstData = JSON.parse(first.content[0].text)
     const retryData = JSON.parse(retry.content[0].text)
-    expect(firstData.burnTxHash).toBe('0xburntx123')
+    expect(firstData.burnTxHash).toBe('0x0bcf0cd90bcd3694b04c4e810e626777e17b49dca45660a84e0b6619ae8ac1a9')
     expect(firstData.idempotentRetry).toBeUndefined()
-    expect(retryData.burnTxHash).toBe('0xburntx123')
+    expect(retryData.burnTxHash).toBe('0x0bcf0cd90bcd3694b04c4e810e626777e17b49dca45660a84e0b6619ae8ac1a9')
     expect(retryData.idempotentRetry).toBe(true)
     expect(mockBridge).toHaveBeenCalledTimes(1)
     expect(mockCreateBridge).toHaveBeenCalledTimes(1)
@@ -339,8 +339,8 @@ describe('bridge_usdc', () => {
     const mockBridge = vi
       .fn()
       .mockResolvedValueOnce({
-        burnTxHash: '0xburn1',
-        mintTxHash: '0xmint1',
+        burnTxHash: '0x82b5b141919ad95b1caaeebd1cb2f8d10f2845ee7cb0107bcf2a463edf850985',
+        mintTxHash: '0x234c5d96b607e867e5282232c222ed197f815b19bce4cc831dab8cedc5f9fc1d',
         fromChain: 'base',
         toChain: 'polygon',
         recipient: '0xagent',
@@ -348,8 +348,8 @@ describe('bridge_usdc', () => {
         elapsedMs: 1000,
       })
       .mockResolvedValueOnce({
-        burnTxHash: '0xburn2',
-        mintTxHash: '0xmint2',
+        burnTxHash: '0xa5b9e522c0a2efe12b74a7b789774ab62df07cb8ac9a2bc9b59ca4d69ff27071',
+        mintTxHash: '0xbb69ba149e4209f560f283dd21c11606c8e878e6acb4af975129cb200d4db215',
         fromChain: 'base',
         toChain: 'arbitrum',
         recipient: '0xagent',
@@ -365,15 +365,37 @@ describe('bridge_usdc', () => {
       amount: '100',
     })
 
-    expect(JSON.parse(first.content[0].text).burnTxHash).toBe('0xburn1')
-    expect(JSON.parse(second.content[0].text).burnTxHash).toBe('0xburn2')
+    expect(JSON.parse(first.content[0].text).burnTxHash).toBe('0x82b5b141919ad95b1caaeebd1cb2f8d10f2845ee7cb0107bcf2a463edf850985')
+    expect(JSON.parse(second.content[0].text).burnTxHash).toBe('0xa5b9e522c0a2efe12b74a7b789774ab62df07cb8ac9a2bc9b59ca4d69ff27071')
     expect(JSON.parse(second.content[0].text).idempotentRetry).toBeUndefined()
     expect(mockBridge).toHaveBeenCalledTimes(2)
   })
 
+  it('fail-closes a malformed burnTxHash instead of caching a bridge success', async () => {
+    const mockBridge = vi.fn().mockResolvedValue({
+      burnTxHash: 'pending',
+      mintTxHash: '0xb2f5e43fac373c03f76f7ec086f320bc572965866e7083e5bf1877c225635529',
+      fromChain: 'base',
+      toChain: 'polygon',
+      recipient: '0xagent',
+      amount: 100000000n,
+      elapsedMs: 12000,
+    })
+    mockCreateBridge.mockReturnValue(withAllowance(mockBridge) as any)
+
+    const failed = await handleBridgeUsdc(baseToPolygon)
+    const retry = await handleBridgeUsdc(baseToPolygon)
+
+    expect(failed.isError).toBe(true)
+    expect(failed.content[0].text).toContain('malformed transaction hash')
+    expect(retry.isError).toBe(true)
+    expect(retry.content[0].text).toContain('did not return a transaction hash')
+    expect(mockBridge).toHaveBeenCalledTimes(1)
+  })
+
   it('fail-closes a mint-hashless bridge success instead of caching it', async () => {
     const mockBridge = vi.fn().mockResolvedValue({
-      burnTxHash: '0xburntx123',
+      burnTxHash: '0x0bcf0cd90bcd3694b04c4e810e626777e17b49dca45660a84e0b6619ae8ac1a9',
       mintTxHash: '',
       fromChain: 'base',
       toChain: 'polygon',
@@ -430,8 +452,8 @@ describe('bridge_usdc', () => {
 
   it('refuses a keyed retry that changes the amount', async () => {
     const mockBridge = vi.fn().mockResolvedValue({
-      burnTxHash: '0xburntx123',
-      mintTxHash: '0xminttx456',
+      burnTxHash: '0x0bcf0cd90bcd3694b04c4e810e626777e17b49dca45660a84e0b6619ae8ac1a9',
+      mintTxHash: '0xb2f5e43fac373c03f76f7ec086f320bc572965866e7083e5bf1877c225635529',
       fromChain: 'base',
       toChain: 'polygon',
       recipient: '0xagent',
@@ -450,7 +472,7 @@ describe('bridge_usdc', () => {
       idempotencyKey: 'invoice-1',
     })
 
-    expect(JSON.parse(first.content[0].text).burnTxHash).toBe('0xburntx123')
+    expect(JSON.parse(first.content[0].text).burnTxHash).toBe('0x0bcf0cd90bcd3694b04c4e810e626777e17b49dca45660a84e0b6619ae8ac1a9')
     expect(conflict.isError).toBe(true)
     expect(conflict.content[0].text).toContain('different spend payload')
     expect(mockBridge).toHaveBeenCalledTimes(1)
@@ -462,8 +484,8 @@ describe('bridge_usdc', () => {
       .mockRejectedValueOnce(new Error('allowance rpc timeout'))
       .mockResolvedValueOnce(0n)
     const mockBridge = vi.fn().mockResolvedValue({
-      burnTxHash: '0xburnafterallowance',
-      mintTxHash: '0xmintafterallowance',
+      burnTxHash: '0x9bea025fd37c325f56bf24b39e8a1d1def2faa0d1f9b468a350376bbd1d6a48b',
+      mintTxHash: '0xb3f19930f6f5077981d255a842ccb7f07e447a6136fa3f3b17e182e9e2ab6d87',
       fromChain: 'base',
       toChain: 'polygon',
       recipient: '0xagent',
@@ -478,7 +500,7 @@ describe('bridge_usdc', () => {
     expect(failed.isError).toBe(true)
     expect(failed.content[0].text).toContain('allowance rpc timeout')
     expect(retried.isError).toBeUndefined()
-    expect(JSON.parse(retried.content[0].text).burnTxHash).toBe('0xburnafterallowance')
+    expect(JSON.parse(retried.content[0].text).burnTxHash).toBe('0x9bea025fd37c325f56bf24b39e8a1d1def2faa0d1f9b468a350376bbd1d6a48b')
     expect(mockBridge).toHaveBeenCalledTimes(1)
     expect(getUsdcAllowance).toHaveBeenCalledTimes(2)
   })

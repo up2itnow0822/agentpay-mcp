@@ -106,11 +106,15 @@ export class SpendIntentConflictError extends Error {
   }
 }
 
+/** 32-byte 0x-prefixed EVM transaction hash. */
+const EVM_TX_HASH = /^0x[a-fA-F0-9]{64}$/
+
 /**
- * Require a non-empty settlement hash before a spend callback may resolve
- * into the settled cache. A hashless SDK result is ambiguous — the transfer
- * may already have been broadcast — so this throws a generic Error and the
- * intent stays locked instead of replaying success:true with no tx.
+ * Require a complete EVM settlement hash before a spend callback may resolve
+ * into the settled cache. A hashless or malformed SDK result is ambiguous —
+ * the transfer may already have been broadcast — so this throws a generic
+ * Error and the intent stays locked instead of replaying success:true with
+ * a non-usable hash such as "pending" or "0x123".
  */
 export function requireSettlementHash(hash: unknown, label: string): string {
   if (typeof hash !== 'string' || hash.trim().length === 0) {
@@ -119,7 +123,15 @@ export function requireSettlementHash(hash: unknown, label: string): string {
         'Refusing to cache a hashless success; reconcile the original transfer before retrying.'
     )
   }
-  return hash
+  const normalized = hash.trim()
+  if (!EVM_TX_HASH.test(normalized)) {
+    throw new Error(
+      `${label} returned a malformed transaction hash. ` +
+        'Refusing to cache success without a 32-byte 0x-prefixed hash; ' +
+        'reconcile the original transfer before retrying.'
+    )
+  }
+  return normalized
 }
 
 function spendIntentIdentity(
