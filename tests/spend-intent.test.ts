@@ -5,11 +5,17 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import {
   DefiniteSpendFailure,
   IDEMPOTENCY_KEY_JSON_SCHEMA,
+  IdempotencyKeyZodSchema,
   SEND_TOKEN_INTENT_TTL_MS,
+  SPEND_INTENT_MAX_DURABLE,
+  SPEND_INTENT_MAX_UNRESOLVED,
   SpendIntentConflictError,
   UnresolvedSpendIntentError,
   _resetSpendIntentStore,
+  _spendIntentStoreSizes,
+  isConfirmedUnchargedRevert,
   requireSettlementHash,
+  runClassifiedSpend,
   runDefinitePreBroadcast,
   sendTokenIntentIdentity,
   sendTokenIntentKey,
@@ -323,6 +329,102 @@ describe('withSpendIntent', () => {
     ).rejects.toBeInstanceOf(SpendIntentConflictError)
     expect(run).toHaveBeenCalledTimes(1)
   })
+
+  it('evicts the oldest durable result when the LRU cap is exceeded', async () => {
+    const run = vi.fn().mockResolvedValue('0xnew')
+    for (let i = 0; i < SPEND_INTENT_MAX_DURABLE; i++) {
+      await withSpendIntent(`durable#${i}`, async () => `0x${i}`, { durable: true })
+    }
+    expect(_spendIntentStoreSizes().durable).toBe(SPEND_INTENT_MAX_DURABLE)
+
+    await withSpendIntent('durable#overflow', run, { durable: true })
+    expect(_spendIntentStoreSizes().durable).toBe(SPEND_INTENT_MAX_DURABLE)
+
+    const evicted = vi.fn().mockResolvedValue('0xevicted-retry')
+    const replay = await withSpendIntent('durable#0', evicted, { durable: true })
+    expect(replay).toEqual({ value: '0xevicted-retry', replayed: false })
+    expect(evicted).toHaveBeenCalledTimes(1)
+  })
+
+  it('caps unresolved locks so the permanent map cannot grow without bound', async () => {
+    for (let i = 0; i < SPEND_INTENT_MAX_UNRESOLVED; i++) {
+      await expect(
+        withSpendIntent(`unknown#${i}`, async () => {
+          throw new Error('rpc timeout')
+        })
+      ).rejects.toThrow('rpc timeout')
+    }
+    expect(_spendIntentStoreSizes().unresolved).toBe(SPEND_INTENT_MAX_UNRESOLVED)
+
+    await expect(
+      withSpendIntent('unknown#overflow', async () => {
+        throw new Error('rpc timeout')
+      })
+    ).rejects.toThrow('rpc timeout')
+    expect(_spendIntentStoreSizes().unresolved).toBe(SPEND_INTENT_MAX_UNRESOLVED)
+
+    const retriedOldest = vi.fn().mockResolvedValue('0xafter-evict')
+    const result = await withSpendIntent('unknown#0', retriedOldest)
+    expect(result).toEqual({ value: '0xafter-evict', replayed: false })
+  })
+})
+
+describe('runClassifiedSpend', () => {
+  it('classifies a failure before wallet write as definite', async () => {
+    const walletClient = {
+      sendTransaction: vi.fn().mockResolvedValue('0xsend'),
+    }
+    await expect(
+      runClassifiedSpend(walletClient, async () => {
+        throw new Error('quote rpc timeout')
+      })
+    ).rejects.toBeInstanceOf(DefiniteSpendFailure)
+    expect(walletClient.sendTransaction).not.toHaveBeenCalled()
+  })
+
+  it('keeps an ambiguous post-broadcast error unknown', async () => {
+    const walletClient = {
+      sendTransaction: vi.fn().mockResolvedValue('0xsend'),
+    }
+    await expect(
+      runClassifiedSpend(walletClient, async () => {
+        await walletClient.sendTransaction({ to: '0x1' })
+        throw new Error('rpc timeout')
+      })
+    ).rejects.toSatisfy((error: unknown) => {
+      expect(error).toBeInstanceOf(Error)
+      expect(error).not.toBeInstanceOf(DefiniteSpendFailure)
+      expect((error as Error).message).toBe('rpc timeout')
+      return true
+    })
+  })
+
+  it('classifies a confirmed uncharged revert as definite', async () => {
+    const walletClient = {
+      sendTransaction: vi.fn().mockResolvedValue('0xsend'),
+    }
+    await expect(
+      runClassifiedSpend(walletClient, async () => {
+        await walletClient.sendTransaction({ to: '0x1' })
+        throw new Error('depositForBurn transaction reverted (tx: 0xabc).')
+      })
+    ).rejects.toBeInstanceOf(DefiniteSpendFailure)
+  })
+})
+
+describe('isConfirmedUnchargedRevert', () => {
+  it('treats approve/burn reverts as uncharged and mint/attestation as charged', () => {
+    expect(isConfirmedUnchargedRevert(new Error('execution reverted'))).toBe(true)
+    expect(
+      isConfirmedUnchargedRevert(new Error('USDC approve failed (tx: 0xabc).'))
+    ).toBe(true)
+    expect(
+      isConfirmedUnchargedRevert(new Error('Circle attestation timeout'))
+    ).toBe(false)
+    expect(
+      isConfirmedUnchargedRevert(new Error('[BridgeModule:MINT_FAILED] receiveMessage reverted'))
+    ).toBe(false)
+  })
 })
 
 describe('idempotencyKey discovery schema', () => {
@@ -361,6 +463,22 @@ describe('idempotencyKey discovery schema', () => {
     expect(BridgeUsdcSchema.safeParse({ ...bridgeBase, idempotencyKey: '   ' }).success).toBe(false)
     expect(SendTokenSchema.safeParse({ ...sendBase, idempotencyKey: '   ' }).success).toBe(false)
     expect(SwapTokensSchema.safeParse({ ...swapBase, idempotencyKey: 'invoice-1' }).success).toBe(
+      true
+    )
+  })
+
+  it('applies maxLength to the raw string, not the trimmed value', () => {
+    const raw129 = ` ${'x'.repeat(128)}`
+    expect(raw129.length).toBe(129)
+    expect(raw129.trim().length).toBe(128)
+    expect(SwapTokensSchema.safeParse({ ...swapBase, idempotencyKey: raw129 }).success).toBe(false)
+    expect(BridgeUsdcSchema.safeParse({ ...bridgeBase, idempotencyKey: raw129 }).success).toBe(
+      false
+    )
+    expect(SendTokenSchema.safeParse({ ...sendBase, idempotencyKey: raw129 }).success).toBe(false)
+    expect(IdempotencyKeyZodSchema.safeParse(raw129).success).toBe(false)
+    expect(raw129.length > IDEMPOTENCY_KEY_JSON_SCHEMA.maxLength).toBe(true)
+    expect(SwapTokensSchema.safeParse({ ...swapBase, idempotencyKey: 'x'.repeat(128) }).success).toBe(
       true
     )
   })

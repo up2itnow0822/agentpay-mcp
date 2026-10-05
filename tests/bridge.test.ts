@@ -5,30 +5,42 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 
 // ─── Mock agentwallet-sdk ──────────────────────────────────────────────────
 
-vi.mock('agentwallet-sdk', () => ({
-  createBridge: vi.fn(),
-  SpendingPolicy: vi.fn(),
-  checkBudget: vi.fn(),
-}))
+vi.mock('agentwallet-sdk', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('agentwallet-sdk')>()
+  return {
+    ...actual,
+    createBridge: vi.fn(),
+    SpendingPolicy: vi.fn(),
+    checkBudget: vi.fn(),
+  }
+})
 
 // ─── Mock client utils ─────────────────────────────────────────────────────
 
-vi.mock('../src/utils/client.js', () => ({
-  getConfig: vi.fn(() => ({
-    chainId: 8453,
-    walletAddress: '0x1234567890123456789012345678901234567890',
-  })),
-  getWallet: vi.fn(() => ({
-    address: '0x1234567890123456789012345678901234567890',
-    publicClient: {},
-    walletClient: { account: { address: '0xagent' } },
-    chain: { id: 8453 },
-  })),
-}))
+vi.mock('../src/utils/client.js', () => {
+  const walletClient = {
+    account: { address: '0xagent' },
+    sendTransaction: vi.fn().mockResolvedValue('0xsend'),
+    writeContract: vi.fn().mockResolvedValue('0xwrite'),
+  }
+  return {
+    getConfig: vi.fn(() => ({
+      chainId: 8453,
+      walletAddress: '0x1234567890123456789012345678901234567890',
+    })),
+    getWallet: vi.fn(() => ({
+      address: '0x1234567890123456789012345678901234567890',
+      publicClient: {},
+      walletClient,
+      chain: { id: 8453 },
+    })),
+  }
+})
 
 import { handleBridgeUsdc } from '../src/tools/bridge.js'
 import { handleSetSpendPolicy, _resetPolicyStore } from '../src/tools/budget.js'
 import { _resetSpendIntentStore } from '../src/utils/spend-intent.js'
+import { getWallet } from '../src/utils/client.js'
 import { createBridge, SpendingPolicy } from 'agentwallet-sdk'
 
 const mockCreateBridge = vi.mocked(createBridge)
@@ -41,10 +53,24 @@ const baseToPolygon = {
 }
 
 function withAllowance(
-  bridge: unknown,
+  bridgeImpl: (...args: unknown[]) => unknown,
   getUsdcAllowance = vi.fn().mockResolvedValue(0n)
 ) {
-  return { bridge, getUsdcAllowance }
+  const approveUsdc = async (amount: bigint) => {
+    const current = await getUsdcAllowance()
+    if (current >= amount) return
+  }
+  const bridge = vi.fn(async (...args: unknown[]) => {
+    await approveUsdc(args[0] as bigint)
+    return bridgeImpl(...args)
+  })
+  return { bridge, getUsdcAllowance, approveUsdc }
+}
+
+async function broadcastThenThrow(message: string): Promise<never> {
+  await (getWallet() as { walletClient: { writeContract: (tx: unknown) => Promise<unknown> } })
+    .walletClient.writeContract({ to: '0x1', data: '0x' })
+  throw new Error(message)
 }
 
 describe('bridge_usdc', () => {
@@ -184,7 +210,9 @@ describe('bridge_usdc', () => {
   })
 
   it('returns error when bridge call fails', async () => {
-    const mockBridge = vi.fn().mockRejectedValue(new Error('Circle attestation timeout'))
+    const mockBridge = vi.fn().mockImplementation(() =>
+      broadcastThenThrow('Circle attestation timeout')
+    )
     mockCreateBridge.mockReturnValue(withAllowance(mockBridge) as any)
 
     const result = await handleBridgeUsdc({
@@ -416,7 +444,7 @@ describe('bridge_usdc', () => {
   })
 
   it('fail-closes an identical retry after an unresolved bridge broadcast', async () => {
-    const mockBridge = vi.fn().mockRejectedValueOnce(new Error('rpc timeout'))
+    const mockBridge = vi.fn().mockImplementationOnce(() => broadcastThenThrow('rpc timeout'))
     mockCreateBridge.mockReturnValue(withAllowance(mockBridge) as any)
 
     const failed = await handleBridgeUsdc(baseToPolygon)
@@ -433,7 +461,9 @@ describe('bridge_usdc', () => {
     vi.useFakeTimers()
     vi.setSystemTime(new Date('2026-10-02T22:00:00Z'))
     try {
-      const mockBridge = vi.fn().mockRejectedValue(new Error('Circle attestation timeout'))
+      const mockBridge = vi.fn().mockImplementation(() =>
+        broadcastThenThrow('Circle attestation timeout')
+      )
       mockCreateBridge.mockReturnValue(withAllowance(mockBridge) as any)
 
       const failed = await handleBridgeUsdc(baseToPolygon)

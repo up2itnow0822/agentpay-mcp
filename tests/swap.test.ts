@@ -5,34 +5,46 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 
 // ─── Mock agentwallet-sdk ──────────────────────────────────────────────────
 
-vi.mock('agentwallet-sdk', () => ({
-  getGlobalRegistry: vi.fn(),
-  attachSwap: vi.fn(),
-  parseAmount: vi.fn((amount: string, decimals: number) =>
-    BigInt(Math.round(parseFloat(amount) * 10 ** decimals))
-  ),
-  SpendingPolicy: vi.fn(),
-  checkBudget: vi.fn(),
-}))
+vi.mock('agentwallet-sdk', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('agentwallet-sdk')>()
+  return {
+    ...actual,
+    getGlobalRegistry: vi.fn(),
+    attachSwap: vi.fn(),
+    parseAmount: vi.fn((amount: string, decimals: number) =>
+      BigInt(Math.round(parseFloat(amount) * 10 ** decimals))
+    ),
+    SpendingPolicy: vi.fn(),
+    checkBudget: vi.fn(),
+  }
+})
 
 // ─── Mock client utils ─────────────────────────────────────────────────────
 
-vi.mock('../src/utils/client.js', () => ({
-  getConfig: vi.fn(() => ({
-    chainId: 8453,
-    walletAddress: '0x1234567890123456789012345678901234567890',
-  })),
-  getWallet: vi.fn(() => ({
-    address: '0x1234567890123456789012345678901234567890',
-    publicClient: {},
-    walletClient: { account: { address: '0xagent' } },
-    chain: { id: 8453 },
-  })),
-}))
+vi.mock('../src/utils/client.js', () => {
+  const walletClient = {
+    account: { address: '0xagent' },
+    sendTransaction: vi.fn().mockResolvedValue('0xsend'),
+    writeContract: vi.fn().mockResolvedValue('0xwrite'),
+  }
+  return {
+    getConfig: vi.fn(() => ({
+      chainId: 8453,
+      walletAddress: '0x1234567890123456789012345678901234567890',
+    })),
+    getWallet: vi.fn(() => ({
+      address: '0x1234567890123456789012345678901234567890',
+      publicClient: {},
+      walletClient,
+      chain: { id: 8453 },
+    })),
+  }
+})
 
 import { handleSwapTokens } from '../src/tools/swap.js'
 import { handleSetSpendPolicy, _resetPolicyStore } from '../src/tools/budget.js'
 import { _resetSpendIntentStore } from '../src/utils/spend-intent.js'
+import { getWallet } from '../src/utils/client.js'
 import { getGlobalRegistry, attachSwap, SpendingPolicy } from 'agentwallet-sdk'
 
 const mockGetGlobalRegistry = vi.mocked(getGlobalRegistry)
@@ -70,14 +82,27 @@ function mockUsdcWethRegistry() {
   } as any)
 }
 
-function withQuote(swap: unknown, getQuote = vi.fn().mockResolvedValue({
-  amountInNet: 1n,
-  amountOutMinimum: 1n,
-  poolFeeTier: 500,
-  feeAmount: 0n,
-  gasEstimate: 100000n,
-})) {
-  return { swap, getQuote }
+function withQuote(
+  swapImpl: (...args: unknown[]) => unknown,
+  getQuote = vi.fn().mockResolvedValue({
+    amountInNet: 1n,
+    amountOutMinimum: 1n,
+    poolFeeTier: 500,
+    feeAmount: 0n,
+    gasEstimate: 100000n,
+  })
+) {
+  const swap = vi.fn(async (...args: unknown[]) => {
+    await getQuote(args[0], args[1], args[2], args[3])
+    return swapImpl(...args)
+  })
+  return { swap, getQuote, swapModule: { getQuote } }
+}
+
+async function broadcastThenThrow(message: string): Promise<never> {
+  await (getWallet() as { walletClient: { sendTransaction: (tx: unknown) => Promise<unknown> } })
+    .walletClient.sendTransaction({ to: '0x1', data: '0x' })
+  throw new Error(message)
 }
 
 describe('swap_tokens', () => {
@@ -403,7 +428,7 @@ describe('swap_tokens', () => {
 
   it('fail-closes an identical retry after an unresolved swap broadcast', async () => {
     mockUsdcWethRegistry()
-    const mockSwap = vi.fn().mockRejectedValueOnce(new Error('rpc timeout'))
+    const mockSwap = vi.fn().mockImplementationOnce(() => broadcastThenThrow('rpc timeout'))
     mockAttachSwap.mockReturnValue(withQuote(mockSwap) as any)
 
     const failed = await handleSwapTokens(usdcWethSwap)
@@ -414,6 +439,28 @@ describe('swap_tokens', () => {
     expect(retry.isError).toBe(true)
     expect(retry.content[0].text).toContain('did not return a transaction hash')
     expect(mockSwap).toHaveBeenCalledTimes(1)
+  })
+
+  it('keeps an ambiguous post-broadcast swap locked after the keyless TTL', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-10-02T22:00:00Z'))
+    try {
+      mockUsdcWethRegistry()
+      const mockSwap = vi.fn().mockImplementation(() => broadcastThenThrow('rpc timeout'))
+      mockAttachSwap.mockReturnValue(withQuote(mockSwap) as any)
+
+      const failed = await handleSwapTokens(usdcWethSwap)
+      vi.advanceTimersByTime(5 * 60 * 1000 + 1)
+      const retry = await handleSwapTokens(usdcWethSwap)
+
+      expect(failed.isError).toBe(true)
+      expect(failed.content[0].text).toContain('rpc timeout')
+      expect(retry.isError).toBe(true)
+      expect(retry.content[0].text).toContain('did not return a transaction hash')
+      expect(mockSwap).toHaveBeenCalledTimes(1)
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it('retries a spend-policy rejection instead of locking the swap intent', async () => {
@@ -564,6 +611,46 @@ describe('swap_tokens', () => {
     expect(failed.content[0].text).toContain('quote rpc timeout')
     expect(retried.isError).toBeUndefined()
     expect(JSON.parse(retried.content[0].text).txHash).toBe('0xd8e4908941b66c7b471093f86142a2468739573208f613a7e3650d13c153d3af')
+    expect(mockSwap).toHaveBeenCalledTimes(1)
+    expect(getQuote).toHaveBeenCalledTimes(2)
+  })
+
+  it('releases a 100-unit reservation under a 150 cap after a quote failure', async () => {
+    const { SpendingPolicy: RealPolicy } = await vi.importActual<
+      typeof import('agentwallet-sdk')
+    >('agentwallet-sdk')
+    MockSpendingPolicy.mockImplementation(function (this: unknown, config: unknown) {
+      return new RealPolicy(config as ConstructorParameters<typeof RealPolicy>[0])
+    } as any)
+
+    mockUsdcWethRegistry()
+    const getQuote = vi
+      .fn()
+      .mockRejectedValueOnce(new Error('quote rpc timeout'))
+      .mockResolvedValueOnce({
+        amountInNet: 1n,
+        amountOutMinimum: 1n,
+        poolFeeTier: 500,
+        feeAmount: 0n,
+        gasEstimate: 100000n,
+      })
+    const mockSwap = vi.fn().mockResolvedValue({
+      txHash: '0x7c3a1d0e9b2f4a6c8e0d1f3b5a7c9e1d2f4b6a8c0e2d4f6b8a0c2e4d6f8b0a12',
+      quote: null,
+    })
+    mockAttachSwap.mockReturnValue(withQuote(mockSwap, getQuote) as any)
+
+    await handleSetSpendPolicy({ dailyLimitEth: '150' })
+
+    const failed = await handleSwapTokens(usdcWethSwap)
+    const retried = await handleSwapTokens(usdcWethSwap)
+
+    expect(failed.isError).toBe(true)
+    expect(failed.content[0].text).toContain('quote rpc timeout')
+    expect(retried.isError).toBeUndefined()
+    expect(JSON.parse(retried.content[0].text).txHash).toBe(
+      '0x7c3a1d0e9b2f4a6c8e0d1f3b5a7c9e1d2f4b6a8c0e2d4f6b8a0c2e4d6f8b0a12'
+    )
     expect(mockSwap).toHaveBeenCalledTimes(1)
     expect(getQuote).toHaveBeenCalledTimes(2)
   })

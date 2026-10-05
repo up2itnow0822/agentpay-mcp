@@ -85,6 +85,10 @@ These boundaries matter more than the feature list:
   call that tool again, and a process restart clears its rolling state.
 - Every current value-moving handler calls the in-process policy check, but
   this is still application-level enforcement.
+- `swap_tokens` and `bridge_usdc` reserve spend at approve, then settle,
+  release, or hold-unknown. Quote, validation, and confirmed uncharged revert
+  failures release the reservation and stay retryable. An unclear
+  post-broadcast outcome locks that intent with no timer.
 - On-chain limits exist only when the wallet owner configures them directly on
   `AgentAccountV2`. `set_spend_policy` does not write those contract limits.
 - An over-limit transaction is a human gate only when the owner key is kept

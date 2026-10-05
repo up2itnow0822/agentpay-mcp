@@ -1,6 +1,15 @@
+import { z } from 'zod'
+
 /**
  * In-process spend-intent cache so an identical send_token, swap_tokens, or
  * bridge_usdc retry does not broadcast a second settlement.
+ *
+ * Payment flow: reserve → execute → settle | release | hold-unknown.
+ * Spend is counted at policy approve time. Definite not-charged outcomes
+ * (quote, validation, confirmed uncharged revert, other pre-broadcast
+ * failures) release that reservation and stay retryable. An unclear
+ * post-broadcast outcome holds the reservation and locks the intent with
+ * no timer — a later identical retry would otherwise double-settle.
  *
  * Keyless retries look up the settled payload (tool + tool-specific fields).
  * An explicit idempotencyKey is the lookup identity for that tool: the same
@@ -10,27 +19,24 @@
  * A matching retry inside the TTL returns the original result and skips both
  * the spend-policy check and the on-chain transfer.
  *
- * Failures that happen before broadcast (policy reject / draft, SDK quote
- * fetch, SDK allowance read) are definite and may be retried. Any other
- * rejection is treated as an unresolved broadcast: the next identical call
- * fail-closes instead of sending again. Unresolved locks do not expire on a
- * timer — a later identical retry would otherwise double-settle after an
- * ambiguous burn, swap, or transfer.
- *
- * Keyed settled results stay for the process lifetime so the same
+ * Keyed settled results stay until the durable LRU evicts them so the same
  * idempotencyKey replays after the keyless MCP-retry window. Keyless settled
- * results expire after SEND_TOKEN_INTENT_TTL_MS.
+ * results expire after SEND_TOKEN_INTENT_TTL_MS. Durable and unresolved maps
+ * are size-capped so a long-lived process cannot grow them without bound.
  *
  * This is process-local, matching SpendingPolicy. It prevents duplicate
  * settlement from MCP tool retries; it is not a durable cross-process ledger.
  */
 export const SEND_TOKEN_INTENT_TTL_MS = 5 * 60 * 1000
 export const DEFAULT_SWAP_SLIPPAGE_BPS = 50
+export const SPEND_INTENT_MAX_DURABLE = 1024
+export const SPEND_INTENT_MAX_UNRESOLVED = 1024
 
 /**
  * Published MCP JSON Schema for optional idempotencyKey on spend tools.
- * Runtime Zod trims then applies min(1)/max(128), so whitespace-only keys
- * are rejected. Discovery must advertise the same non-whitespace constraint.
+ * Runtime Zod applies the same minLength / maxLength / non-whitespace
+ * pattern to the raw string (no trim-before-length). Identity lookup still
+ * trims after validation.
  */
 export const IDEMPOTENCY_KEY_JSON_SCHEMA = {
   type: 'string' as const,
@@ -38,6 +44,16 @@ export const IDEMPOTENCY_KEY_JSON_SCHEMA = {
   maxLength: 128,
   pattern: /.*\S.*/.source,
 }
+
+/**
+ * Runtime check matching IDEMPOTENCY_KEY_JSON_SCHEMA: length and
+ * non-whitespace apply to the raw string. Do not trim before min/max.
+ */
+export const IdempotencyKeyZodSchema = z
+  .string()
+  .min(1)
+  .max(128)
+  .regex(/.*\S.*/)
 
 export interface SpendIntentIdentity {
   key: string
@@ -61,7 +77,8 @@ interface InflightIntent {
   fingerprint: string
 }
 
-const settled = new Map<string, SettledIntent<unknown>>()
+const settledEphemeral = new Map<string, SettledIntent<unknown>>()
+const settledDurable = new Map<string, SettledIntent<unknown>>()
 const inflight = new Map<string, InflightIntent>()
 const unresolved = new Map<string, UnresolvedIntent>()
 
@@ -88,6 +105,135 @@ export async function runDefinitePreBroadcast<T>(run: () => Promise<T>): Promise
       error instanceof Error ? error.message : String(error)
     )
   }
+}
+
+/**
+ * Wrap SDK read methods so a failure inside swap()/bridge() is still
+ * classified as definite. SwapModule.swap() calls this.getQuote() again;
+ * BridgeModule.approveUsdc() re-reads allowance before any write.
+ */
+export function wrapDefiniteSdkReads<T extends object>(sdk: T): T {
+  const record = sdk as Record<string, unknown>
+  const quote = record.getQuote
+  if (typeof quote === 'function') {
+    const original = quote.bind(sdk) as (...args: unknown[]) => Promise<unknown>
+    record.getQuote = (...args: unknown[]) =>
+      runDefinitePreBroadcast(() => original(...args))
+  }
+  const allowance = record.getUsdcAllowance
+  if (typeof allowance === 'function') {
+    const original = allowance.bind(sdk) as (...args: unknown[]) => Promise<unknown>
+    record.getUsdcAllowance = (...args: unknown[]) =>
+      runDefinitePreBroadcast(() => original(...args))
+  }
+  const nested = record.swapModule
+  if (nested && typeof nested === 'object') {
+    wrapDefiniteSdkReads(nested)
+  }
+  return sdk
+}
+
+/**
+ * BridgeModule.approveUsdc() inlines an allowance re-read before write.
+ * Pre-check via getUsdcAllowance (already wrapped as definite). If allowance
+ * is already sufficient, skip the original write path. Otherwise the original
+ * re-read still runs; runClassifiedSpend treats a throw before write as
+ * definite.
+ */
+export function classifyBridgeApproveUsdc<T>(bridge: T): T {
+  const record = bridge as {
+    getUsdcAllowance?: () => Promise<bigint>
+    approveUsdc?: (amount: bigint) => Promise<unknown>
+  }
+  const original = record.approveUsdc?.bind(record)
+  const readAllowance = record.getUsdcAllowance?.bind(record)
+  if (typeof original !== 'function' || typeof readAllowance !== 'function') {
+    return bridge
+  }
+  record.approveUsdc = async (amount: bigint) => {
+    const current = await runDefinitePreBroadcast(() => readAllowance())
+    if (current >= amount) {
+      return
+    }
+    return original(amount)
+  }
+  return bridge
+}
+
+/**
+ * Classify a value-moving SDK call. Errors before wallet write stay definite.
+ * A confirmed uncharged revert (approve/burn/swap simulation or receipt
+ * revert) also stays definite. Once a write is submitted and the outcome is
+ * unclear, the error stays generic so the intent locks.
+ */
+export async function runClassifiedSpend<T>(
+  walletClient: { sendTransaction?: unknown; writeContract?: unknown } | null | undefined,
+  run: () => Promise<T>
+): Promise<T> {
+  const state = { broadcastStarted: false }
+  const restore = instrumentWalletBroadcast(walletClient, () => {
+    state.broadcastStarted = true
+  })
+  try {
+    return await run()
+  } catch (error: unknown) {
+    if (error instanceof DefiniteSpendFailure) {
+      throw error
+    }
+    if (!state.broadcastStarted || isConfirmedUnchargedRevert(error)) {
+      throw new DefiniteSpendFailure(
+        error instanceof Error ? error.message : String(error)
+      )
+    }
+    throw error
+  } finally {
+    restore()
+  }
+}
+
+function instrumentWalletBroadcast(
+  walletClient: { sendTransaction?: unknown; writeContract?: unknown } | null | undefined,
+  onWrite: () => void
+): () => void {
+  if (!walletClient) {
+    return () => undefined
+  }
+  const client = walletClient as {
+    sendTransaction?: (...args: unknown[]) => unknown
+    writeContract?: (...args: unknown[]) => unknown
+  }
+  const originalSend = client.sendTransaction
+  const originalWrite = client.writeContract
+  if (typeof originalSend === 'function') {
+    client.sendTransaction = (...args: unknown[]) => {
+      onWrite()
+      return originalSend.apply(client, args)
+    }
+  }
+  if (typeof originalWrite === 'function') {
+    client.writeContract = (...args: unknown[]) => {
+      onWrite()
+      return originalWrite.apply(client, args)
+    }
+  }
+  return () => {
+    client.sendTransaction = originalSend
+    client.writeContract = originalWrite
+  }
+}
+
+const POST_VALUE_MOVE =
+  /MINT_FAILED|receiveMessage|attestation|ATTESTATION|Circle attestation/i
+const UNCHARGED_REVERT =
+  /transaction reverted|execution reverted|approve failed \(tx:|depositForBurn transaction reverted/i
+
+/** Receipt-confirmed revert of an approve/burn/swap that did not move funds. */
+export function isConfirmedUnchargedRevert(error: unknown): boolean {
+  const msg = error instanceof Error ? error.message : String(error)
+  if (POST_VALUE_MOVE.test(msg)) {
+    return false
+  }
+  return UNCHARGED_REVERT.test(msg)
 }
 
 /** A prior attempt for this intent may already have broadcast a transfer. */
@@ -228,15 +374,52 @@ export function bridgeUsdcIntentKey(input: {
 }
 
 export function _resetSpendIntentStore(): void {
-  settled.clear()
+  settledEphemeral.clear()
+  settledDurable.clear()
   inflight.clear()
   unresolved.clear()
 }
 
+export function _spendIntentStoreSizes(): {
+  ephemeral: number
+  durable: number
+  unresolved: number
+} {
+  return {
+    ephemeral: settledEphemeral.size,
+    durable: settledDurable.size,
+    unresolved: unresolved.size,
+  }
+}
+
+function remember<V>(map: Map<string, V>, key: string, value: V, max: number): void {
+  if (map.has(key)) {
+    map.delete(key)
+  }
+  map.set(key, value)
+  while (map.size > max) {
+    const oldest = map.keys().next().value
+    if (oldest === undefined) {
+      break
+    }
+    map.delete(oldest)
+  }
+}
+
+function touch<V>(map: Map<string, V>, key: string): V | undefined {
+  const value = map.get(key)
+  if (value === undefined) {
+    return undefined
+  }
+  map.delete(key)
+  map.set(key, value)
+  return value
+}
+
 function pruneExpired(now = Date.now()): void {
-  for (const [key, entry] of settled) {
-    if (!entry.durable && now - entry.settledAt > SEND_TOKEN_INTENT_TTL_MS) {
-      settled.delete(key)
+  for (const [key, entry] of settledEphemeral) {
+    if (now - entry.settledAt > SEND_TOKEN_INTENT_TTL_MS) {
+      settledEphemeral.delete(key)
     }
   }
 }
@@ -269,7 +452,7 @@ export async function withSpendIntent<T>(
   pruneExpired()
   const fingerprint = options?.fingerprint ?? key
 
-  const existing = settled.get(key)
+  const existing = touch(settledDurable, key) ?? settledEphemeral.get(key)
   if (existing) {
     assertFingerprint(existing.fingerprint, fingerprint)
     return { value: existing.value as T, replayed: true }
@@ -292,19 +475,24 @@ export async function withSpendIntent<T>(
   inflight.set(key, { promise, fingerprint })
   try {
     const value = await promise
-    settled.set(key, {
+    const entry: SettledIntent<T> = {
       settledAt: Date.now(),
       value,
       durable: Boolean(options?.durable),
       fingerprint,
-    })
+    }
+    if (entry.durable) {
+      remember(settledDurable, key, entry, SPEND_INTENT_MAX_DURABLE)
+    } else {
+      settledEphemeral.set(key, entry)
+    }
     unresolved.delete(key)
     return { value, replayed: false }
   } catch (error: unknown) {
     if (error instanceof DefiniteSpendFailure) {
       throw error
     }
-    unresolved.set(key, { settledAt: Date.now(), fingerprint })
+    remember(unresolved, key, { settledAt: Date.now(), fingerprint }, SPEND_INTENT_MAX_UNRESOLVED)
     throw error
   } finally {
     inflight.delete(key)

@@ -5,10 +5,14 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 
 // ─── Mock agentwallet-sdk ──────────────────────────────────────────────────
 
-vi.mock('agentwallet-sdk', () => ({
-  SpendingPolicy: vi.fn(),
-  checkBudget: vi.fn(),
-}))
+vi.mock('agentwallet-sdk', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('agentwallet-sdk')>()
+  return {
+    ...actual,
+    SpendingPolicy: vi.fn(),
+    checkBudget: vi.fn(),
+  }
+})
 
 // ─── Mock client utils ─────────────────────────────────────────────────────
 
@@ -26,6 +30,8 @@ import {
   handleSetSpendPolicy,
   handleCheckBudget,
   enforceSpendPolicy,
+  releaseSpendReservation,
+  reserveSpendPolicy,
   _resetPolicyStore,
 } from '../src/tools/budget.js'
 import { SpendingPolicy, checkBudget } from 'agentwallet-sdk'
@@ -405,5 +411,50 @@ describe('check_budget', () => {
     expect(result.isError).toBe(true)
     expect(result.content[0].text).toContain('check_budget failed')
     expect(result.content[0].text).toContain('Contract not deployed')
+  })
+})
+
+describe('reserveSpendPolicy / releaseSpendReservation', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    _resetPolicyStore()
+  })
+
+  it('releases a reserved 100-unit spend so a retry fits under a 150 cap', async () => {
+    const { SpendingPolicy: RealPolicy } = await vi.importActual<
+      typeof import('agentwallet-sdk')
+    >('agentwallet-sdk')
+    MockSpendingPolicy.mockImplementation(function (this: unknown, config: unknown) {
+      return new RealPolicy(config as ConstructorParameters<typeof RealPolicy>[0])
+    } as any)
+
+    await handleSetSpendPolicy({ dailyLimitEth: '150' })
+
+    const first = await reserveSpendPolicy({
+      merchant: '0x1234567890123456789012345678901234567890',
+      amount: 100_000_000n,
+      decimals: 6,
+    })
+    expect(first.decision.status).toBe('approved')
+    expect(first.reservation).not.toBeNull()
+
+    const blocked = await reserveSpendPolicy({
+      merchant: '0x1234567890123456789012345678901234567890',
+      amount: 100_000_000n,
+      decimals: 6,
+    })
+    expect(blocked.decision.status).toBe('rejected')
+    expect(blocked.decision).toEqual(
+      expect.objectContaining({ reason: expect.stringMatching(/Rolling spend cap exceeded/i) })
+    )
+
+    releaseSpendReservation(first.reservation)
+
+    const retried = await reserveSpendPolicy({
+      merchant: '0x1234567890123456789012345678901234567890',
+      amount: 100_000_000n,
+      decimals: 6,
+    })
+    expect(retried.decision.status).toBe('approved')
   })
 })

@@ -16,12 +16,14 @@ import {
   DEFAULT_SWAP_SLIPPAGE_BPS,
   DefiniteSpendFailure,
   IDEMPOTENCY_KEY_JSON_SCHEMA,
+  IdempotencyKeyZodSchema,
   requireSettlementHash,
-  runDefinitePreBroadcast,
+  runClassifiedSpend,
   swapTokensIntentIdentity,
   withSpendIntent,
+  wrapDefiniteSdkReads,
 } from '../utils/spend-intent.js'
-import { enforceSpendPolicy } from './budget.js'
+import { withReservedSpend } from './budget.js'
 
 // ─── Schema ────────────────────────────────────────────────────────────────
 
@@ -40,12 +42,7 @@ export const SwapTokensSchema = z.object({
     .max(10000)
     .optional()
     .describe('Slippage tolerance in basis points (default: 50 = 0.5%)'),
-  idempotencyKey: z
-    .string()
-    .trim()
-    .min(1)
-    .max(128)
-    .optional()
+  idempotencyKey: IdempotencyKeyZodSchema.optional()
     .describe(
       'Caller-supplied idempotency key. Distinct keys allow two equal swaps; ' +
         'the same key replays the original swap; reusing it with a different ' +
@@ -139,40 +136,22 @@ export async function handleSwapTokens(
           'Wallet has no address; cannot verify spend policy for swap_tokens.'
         )
       }
-      const policyDecision = await enforceSpendPolicy({
-        merchant: swapRecipient,
-        amount: rawAmountIn,
-        decimals: fromToken.decimals,
-      })
-      if (policyDecision.status === 'rejected') {
-        throw new DefiniteSpendFailure(
-          policyDecision.reason ??
-            `Swap blocked by spend policy for wallet ${swapRecipient}.`
-        )
-      }
-      if (policyDecision.status === 'draft') {
-        throw new DefiniteSpendFailure(
-          `Swap exceeds per-tx spend policy and was queued as draft` +
-            `${policyDecision.draftId ? ` (${policyDecision.draftId})` : ''}. ` +
-            (policyDecision.reason ?? 'Approve the draft before executing.')
-        )
-      }
 
-      const swapWallet = attachSwap(wallet as AnyWallet)
-      await runDefinitePreBroadcast(() =>
-        swapWallet.getQuote(
+      return withReservedSpend(
+        {
+          merchant: swapRecipient,
+          amount: rawAmountIn,
+          decimals: fromToken.decimals,
+        },
+        async () => {
+      const swapWallet = wrapDefiniteSdkReads(attachSwap(wallet as AnyWallet))
+      const result = await runClassifiedSpend(wallet.walletClient, () =>
+        swapWallet.swap(
           fromToken.address as Address,
           toToken.address as Address,
           rawAmountIn,
           { slippageBps }
         )
-      )
-
-      const result = await swapWallet.swap(
-        fromToken.address as Address,
-        toToken.address as Address,
-        rawAmountIn,
-        { slippageBps }
       )
       const txHash = requireSettlementHash(result.txHash, 'swap_tokens')
 
@@ -197,6 +176,8 @@ export async function handleSwapTokens(
           : null,
         chainId: input.chainId,
       }
+        }
+      )
       },
       {
         durable: Boolean(input.idempotencyKey?.trim()),

@@ -14,6 +14,7 @@ import { assertConfiguredChain } from '../utils/wallet-chain.js'
 import {
   DefiniteSpendFailure,
   IDEMPOTENCY_KEY_JSON_SCHEMA,
+  IdempotencyKeyZodSchema,
   requireSettlementHash,
   sendTokenIntentIdentity,
   withSpendIntent,
@@ -29,12 +30,7 @@ export const SendTokenSchema = z.object({
   amount: z
     .string()
     .describe('Amount in human-readable units, e.g. "10.5" for 10.5 USDC'),
-  idempotencyKey: z
-    .string()
-    .trim()
-    .min(1)
-    .max(128)
-    .optional()
+  idempotencyKey: IdempotencyKeyZodSchema.optional()
     .describe(
       'Caller-supplied idempotency key. Distinct keys allow two equal payments; ' +
         'the same key replays the original transfer; reusing it with a different ' +

@@ -9,6 +9,7 @@ import { SpendingPolicy, checkBudget } from 'agentwallet-sdk'
 import { parseEther, zeroAddress, type Address } from 'viem'
 import { getWallet } from '../utils/client.js'
 import { textContent, formatError } from '../utils/format.js'
+import { DefiniteSpendFailure } from '../utils/spend-intent.js'
 
 // ─── Module-level policy store ─────────────────────────────────────────────
 
@@ -30,6 +31,80 @@ export function _resetPolicyStore(): void {
 export type SpendPolicyDecision =
   | { status: 'approved' }
   | { status: 'rejected' | 'draft'; reason?: string; draftId?: string }
+
+export interface SpendReservation {
+  amount: number
+  policies: Array<InstanceType<typeof SpendingPolicy>>
+}
+
+type SpendWindowEntry = { amount: number; ts: number }
+
+function getSpendWindow(
+  policy: InstanceType<typeof SpendingPolicy>
+): SpendWindowEntry[] | undefined {
+  const window = (policy as unknown as { spendWindow?: SpendWindowEntry[] }).spendWindow
+  return Array.isArray(window) ? window : undefined
+}
+
+/**
+ * Undo a reservation recorded by SpendingPolicy.check() on approve.
+ * Pops the last matching rolling-window entry from each reserved policy.
+ */
+export function releaseSpendReservation(
+  reservation: SpendReservation | null | undefined
+): void {
+  if (!reservation) {
+    return
+  }
+  for (const policy of reservation.policies) {
+    const window = getSpendWindow(policy)
+    if (!window || window.length === 0) {
+      continue
+    }
+    for (let i = window.length - 1; i >= 0; i--) {
+      if (window[i]!.amount === reservation.amount) {
+        window.splice(i, 1)
+        break
+      }
+    }
+  }
+}
+
+/**
+ * Reserve spend (policy.check records on approve), run the attempt, then
+ * settle | release | hold-unknown. Definite not-charged failures release
+ * the reservation so a retry can use the same remaining cap.
+ */
+export async function withReservedSpend<T>(
+  input: {
+    merchant: string
+    amount: number | bigint
+    decimals: number | (() => number)
+  },
+  run: () => Promise<T>
+): Promise<T> {
+  const { decision, reservation } = await reserveSpendPolicy(input)
+  if (decision.status === 'rejected') {
+    throw new DefiniteSpendFailure(
+      decision.reason ?? `Spend blocked by spend policy for ${input.merchant}.`
+    )
+  }
+  if (decision.status === 'draft') {
+    throw new DefiniteSpendFailure(
+      `Payment exceeds per-tx spend policy and was queued as draft` +
+        `${decision.draftId ? ` (${decision.draftId})` : ''}. ` +
+        (decision.reason ?? 'Approve the draft before executing.')
+    )
+  }
+  try {
+    return await run()
+  } catch (error: unknown) {
+    if (error instanceof DefiniteSpendFailure) {
+      releaseSpendReservation(reservation)
+    }
+    throw error
+  }
+}
 
 /**
  * Enforce the in-process spend policy for a payment attempt.
@@ -58,25 +133,30 @@ export type SpendPolicyDecision =
  * numeric conversion, or the policy engine itself — rejects the payment, and
  * unrecognised policy statuses are treated as rejections.
  */
-export async function enforceSpendPolicy(input: {
+export async function reserveSpendPolicy(input: {
   merchant: string
   /** Amount in the asset's base units. BigInt is preferred for exactness. */
   amount: number | bigint
   /** Decimals of the asset `amount` is denominated in (0–18), or a thunk. */
   decimals: number | (() => number)
-}): Promise<SpendPolicyDecision> {
+}): Promise<{ decision: SpendPolicyDecision; reservation: SpendReservation | null }> {
   const policies = Array.from(_spendingPolicyByScope.entries())
-  if (policies.length === 0) return { status: 'approved' }
+  if (policies.length === 0) {
+    return { decision: { status: 'approved' }, reservation: null }
+  }
 
   try {
     const decimals =
       typeof input.decimals === 'function' ? input.decimals() : input.decimals
     if (!Number.isInteger(decimals) || decimals < 0 || decimals > 18) {
       return {
-        status: 'rejected',
-        reason:
-          `Spend policy check failed (fail-closed): unsupported asset decimals ` +
-          `${String(decimals)}. Expected an integer between 0 and 18.`,
+        decision: {
+          status: 'rejected',
+          reason:
+            `Spend policy check failed (fail-closed): unsupported asset decimals ` +
+            `${String(decimals)}. Expected an integer between 0 and 18.`,
+        },
+        reservation: null,
       }
     }
 
@@ -84,8 +164,11 @@ export async function enforceSpendPolicy(input: {
       typeof input.amount === 'bigint' ? input.amount : BigInt(input.amount)
     if (baseUnits < 0n) {
       return {
-        status: 'rejected',
-        reason: 'Spend policy check failed (fail-closed): negative amount.',
+        decision: {
+          status: 'rejected',
+          reason: 'Spend policy check failed (fail-closed): negative amount.',
+        },
+        reservation: null,
       }
     }
 
@@ -99,15 +182,24 @@ export async function enforceSpendPolicy(input: {
     let amountNumber = Number(scaled)
     if (!Number.isFinite(amountNumber)) {
       return {
-        status: 'rejected',
-        reason:
-          'Spend policy check failed (fail-closed): amount too large to evaluate. ' +
-          'Reduce the amount or clear the spend policy.',
+        decision: {
+          status: 'rejected',
+          reason:
+            'Spend policy check failed (fail-closed): amount too large to evaluate. ' +
+            'Reduce the amount or clear the spend policy.',
+        },
+        reservation: null,
       }
     }
     if (BigInt(amountNumber) < scaled) {
       amountNumber *= 1 + Number.EPSILON
     }
+
+    const snapshots = policies.map(([, policy]) => ({
+      policy,
+      beforeLength: getSpendWindow(policy)?.length ?? 0,
+    }))
+    const reservedPolicies: Array<InstanceType<typeof SpendingPolicy>> = []
 
     for (const [scope, policy] of policies) {
       const result = await policy.check({
@@ -115,28 +207,61 @@ export async function enforceSpendPolicy(input: {
         amount: amountNumber,
       })
 
-      if (result.status === 'approved') continue
+      if (result.status === 'approved') {
+        const afterLength = getSpendWindow(policy)?.length ?? 0
+        if (afterLength > (snapshots.find((s) => s.policy === policy)?.beforeLength ?? 0)) {
+          reservedPolicies.push(policy)
+        }
+        continue
+      }
       if (result.status === 'draft') {
-        return { status: 'draft', reason: result.reason, draftId: result.draftId }
+        releaseSpendReservation({ amount: amountNumber, policies: reservedPolicies })
+        return {
+          decision: { status: 'draft', reason: result.reason, draftId: result.draftId },
+          reservation: null,
+        }
       }
       // 'rejected' and anything unrecognised both deny.
+      releaseSpendReservation({ amount: amountNumber, policies: reservedPolicies })
       return {
-        status: 'rejected',
-        reason:
-          result.reason ??
-          `Spend policy (scope "${scope}") returned unexpected status ` +
-            `"${String(result.status)}" (fail-closed).`,
+        decision: {
+          status: 'rejected',
+          reason:
+            result.reason ??
+            `Spend policy (scope "${scope}") returned unexpected status ` +
+              `"${String(result.status)}" (fail-closed).`,
+        },
+        reservation: null,
       }
     }
-    return { status: 'approved' }
+    return {
+      decision: { status: 'approved' },
+      reservation:
+        reservedPolicies.length > 0
+          ? { amount: amountNumber, policies: reservedPolicies }
+          : null,
+    }
   } catch (error: unknown) {
     return {
-      status: 'rejected',
-      reason: `Spend policy check failed (fail-closed): ${
-        error instanceof Error ? error.message : String(error)
-      }`,
+      decision: {
+        status: 'rejected',
+        reason: `Spend policy check failed (fail-closed): ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      },
+      reservation: null,
     }
   }
+}
+
+export async function enforceSpendPolicy(input: {
+  merchant: string
+  /** Amount in the asset's base units. BigInt is preferred for exactness. */
+  amount: number | bigint
+  /** Decimals of the asset `amount` is denominated in (0–18), or a thunk. */
+  decimals: number | (() => number)
+}): Promise<SpendPolicyDecision> {
+  return (await reserveSpendPolicy(input)).decision
 }
 
 // ─── set_spend_policy ──────────────────────────────────────────────────────

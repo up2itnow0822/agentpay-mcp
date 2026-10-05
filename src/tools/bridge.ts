@@ -13,12 +13,15 @@ import { assertConfiguredBridgeSource } from '../utils/wallet-chain.js'
 import {
   DefiniteSpendFailure,
   IDEMPOTENCY_KEY_JSON_SCHEMA,
+  IdempotencyKeyZodSchema,
   bridgeUsdcIntentIdentity,
+  classifyBridgeApproveUsdc,
   requireSettlementHash,
-  runDefinitePreBroadcast,
+  runClassifiedSpend,
   withSpendIntent,
+  wrapDefiniteSdkReads,
 } from '../utils/spend-intent.js'
-import { enforceSpendPolicy } from './budget.js'
+import { withReservedSpend } from './budget.js'
 import { parseAmountStrict } from '../utils/amount.js'
 
 // Supported CCTP V2 chain names
@@ -41,12 +44,7 @@ export const BridgeUsdcSchema = z.object({
   amount: z
     .string()
     .describe('Amount of USDC to bridge in human-readable units, e.g. "100" for 100 USDC'),
-  idempotencyKey: z
-    .string()
-    .trim()
-    .min(1)
-    .max(128)
-    .optional()
+  idempotencyKey: IdempotencyKeyZodSchema.optional()
     .describe(
       'Caller-supplied idempotency key. Distinct keys allow two equal bridges; ' +
         'the same key replays the original bridge; reusing it with a different ' +
@@ -134,29 +132,21 @@ export async function handleBridgeUsdc(
           'Wallet client has no account; cannot verify spend policy for bridge_usdc.'
         )
       }
-      const policyDecision = await enforceSpendPolicy({
-        merchant: bridgeRecipient,
-        amount: rawAmount,
-        decimals: USDC_DECIMALS,
-      })
-      if (policyDecision.status === 'rejected') {
-        throw new DefiniteSpendFailure(
-          policyDecision.reason ??
-            `Bridge blocked by spend policy for recipient ${bridgeRecipient}.`
+      return withReservedSpend(
+        {
+          merchant: bridgeRecipient,
+          amount: rawAmount,
+          decimals: USDC_DECIMALS,
+        },
+        async () => {
+      const bridge = classifyBridgeApproveUsdc(
+        wrapDefiniteSdkReads(
+          createBridge(wallet.walletClient as AnyWalletClient, input.fromChain as SupportedChain)
         )
-      }
-      if (policyDecision.status === 'draft') {
-        throw new DefiniteSpendFailure(
-          `Bridge exceeds per-tx spend policy and was queued as draft` +
-            `${policyDecision.draftId ? ` (${policyDecision.draftId})` : ''}. ` +
-            (policyDecision.reason ?? 'Approve the draft before executing.')
-        )
-      }
-
-      const bridge = createBridge(wallet.walletClient as AnyWalletClient, input.fromChain as SupportedChain)
-      await runDefinitePreBroadcast(() => bridge.getUsdcAllowance())
-
-      const result = await bridge.bridge(rawAmount, input.toChain as SupportedChain)
+      )
+      const result = await runClassifiedSpend(wallet.walletClient, () =>
+        bridge.bridge(rawAmount, input.toChain as SupportedChain)
+      )
       const burnTxHash = requireSettlementHash(result.burnTxHash, 'bridge_usdc burn')
       const mintTxHash = requireSettlementHash(result.mintTxHash, 'bridge_usdc mint')
 
@@ -171,6 +161,8 @@ export async function handleBridgeUsdc(
         rawAmount: rawAmount.toString(),
         elapsedMs: result.elapsedMs,
       }
+        }
+      )
       },
       {
         durable: Boolean(input.idempotencyKey?.trim()),
