@@ -52,7 +52,10 @@ const MOCK_WALLET = {
     getBalance: vi.fn().mockResolvedValue(1_000_000_000_000_000_000n),
     getBlockNumber: vi.fn().mockResolvedValue(5000n),
   },
-  walletClient: {},
+  walletClient: {
+    sendTransaction: vi.fn().mockResolvedValue('0xsending'),
+    writeContract: vi.fn().mockResolvedValue('0xwrite'),
+  },
   contract: {},
   chain: { id: 8453 },
 };
@@ -325,7 +328,51 @@ describe('x402_pay tool', () => {
     const retry = await handleX402Pay({ url: 'https://api.example.com/paid-timeout' });
 
     expect(first.isError).toBe(true);
-    expect(first.content[0]!.text).toContain('timed out');
+    expect(first.content[0]!.text).toContain('failed after settlement');
+    expect(first.content[0]!.text).toContain('Do not resubmit');
+    expect(first.content[0]!.text).toContain(
+      '0xc480941a588f513a6f4ecbcee0826ea66147b0f68488131572522830b4ac60fb'
+    );
+    expect(first.content[0]!.text).toContain(
+      '0xfeedfacefeedfacefeedfacefeedfacefeedface'
+    );
+    expect(first.content[0]!.text).toContain('1000000');
+    expect(retry.isError).toBe(true);
+    expect(retry.content[0]!.text).toContain('did not return a transaction hash');
+    expect(fetches).toBe(1);
+  });
+
+  it('locks when a wallet write starts before onPaymentComplete', async () => {
+    let fetches = 0;
+    mockCreateX402Client.mockImplementation((wallet) => ({
+      fetch: async () => {
+        fetches += 1;
+        const wc = (
+          wallet as {
+            walletClient: {
+              sendTransaction: (_tx: unknown) => Promise<unknown>;
+            };
+          }
+        ).walletClient;
+        await wc.sendTransaction({ to: '0x1' });
+        throw new Error('receipt rpc timeout after fee transfer');
+      },
+      getTransactionLog: vi.fn(() => []),
+      getDailySpendSummary: vi.fn(() => ({ global: 0n, byService: {}, resetsAt: 0 })),
+      budgetTracker: {},
+    }));
+
+    const first = await handleX402Pay({
+      url: 'https://api.example.com/fee-then-rpc-fail',
+    });
+    const retry = await handleX402Pay({
+      url: 'https://api.example.com/fee-then-rpc-fail',
+    });
+
+    expect(first.isError).toBe(true);
+    expect(first.content[0]!.text).toContain(
+      'receipt rpc timeout after fee transfer'
+    );
     expect(retry.isError).toBe(true);
     expect(retry.content[0]!.text).toContain('did not return a transaction hash');
     expect(fetches).toBe(1);

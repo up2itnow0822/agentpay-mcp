@@ -42,7 +42,9 @@ import {
   DefiniteSpendFailure,
   IDEMPOTENCY_KEY_JSON_SCHEMA,
   IdempotencyKeyZodSchema,
+  PostSettlementSpendError,
   requireSettlementHash,
+  runClassifiedSpend,
   withSpendIntent,
   x402PayIntentIdentity,
 } from '../utils/spend-intent.js';
@@ -343,7 +345,8 @@ export async function handleX402Pay(
 
     // ── Standard x402 payment flow ────────────────────────────────────────
     // Identical MCP retries replay from the spend-intent cache. A drop after
-    // onPaymentComplete locks the intent so a retry cannot sign twice.
+    // a wallet write or onPaymentComplete locks the intent so a retry cannot
+    // sign twice.
     const method = input.method ?? 'GET';
     const intent = x402PayIntentIdentity({
       url: input.url,
@@ -448,20 +451,35 @@ export async function handleX402Pay(
         let response: Response;
         let responseText: string;
         try {
-          response = await x402Client.fetch(input.url, requestInit);
-          responseText = await response.text();
+          const paid = await runClassifiedSpend(
+            wallet.walletClient,
+            async () => {
+              const next = await x402Client.fetch(input.url, requestInit);
+              return { response: next, responseText: await next.text() };
+            },
+            { lockAfterBroadcast: true }
+          );
+          response = paid.response;
+          responseText = paid.responseText;
         } catch (error: unknown) {
           if (paymentMade) {
-            throw error;
+            throw new PostSettlementSpendError({
+              txHash: paymentTxHash,
+              amount: paymentAmount,
+              recipient: paymentRecipient,
+              cause: error,
+            });
           }
-          if (error instanceof Error && error.name === 'AbortError') {
+          if (
+            error instanceof DefiniteSpendFailure &&
+            /abort/i.test(error.message)
+          ) {
             throw new DefiniteSpendFailure(
               `Request timed out after ${timeoutMs}ms`
             );
           }
-          throw new DefiniteSpendFailure(
-            error instanceof Error ? error.message : String(error)
-          );
+          // Post-broadcast AbortError stays generic so withSpendIntent locks.
+          throw error;
         }
 
         if (response.status === 402 && !paymentMade) {
@@ -513,6 +531,25 @@ export async function handleX402Pay(
     if (error instanceof X402UnsupportedRequirementError) {
       return {
         content: [textContent(error.message)],
+        isError: true,
+      };
+    }
+    if (error instanceof PostSettlementSpendError) {
+      const cause =
+        error.cause instanceof Error ? error.cause.message : undefined;
+      let out =
+        '❌ x402_pay failed after settlement. Do not resubmit this request.\n\n';
+      out += `  Amount:    ${sanitizeUntrustedInline(error.amount, 64)} (base units)\n`;
+      out += `  Recipient: ${sanitizeUntrustedInline(error.recipient, 64)}\n`;
+      out += `  TX Hash:   ${sanitizeUntrustedInline(error.txHash, 80)}\n`;
+      out +=
+        '\nFunds may already have moved. Reconcile this transaction before any new payment.\n';
+      if (cause) {
+        out += '\nFollow-up error:\n';
+        out += formatUntrustedBody(cause, 8000);
+      }
+      return {
+        content: [textContent(out)],
         isError: true,
       };
     }

@@ -433,6 +433,27 @@ describe('runClassifiedSpend', () => {
       })
     ).rejects.toBeInstanceOf(DefiniteSpendFailure)
   })
+
+  it('locks x402-style reverts after the first wallet write', async () => {
+    const walletClient = {
+      sendTransaction: vi.fn().mockResolvedValue('0xsend'),
+    }
+    await expect(
+      runClassifiedSpend(
+        walletClient,
+        async () => {
+          await walletClient.sendTransaction({ to: '0xfee' })
+          throw new Error('execution reverted')
+        },
+        { lockAfterBroadcast: true }
+      )
+    ).rejects.toSatisfy((error: unknown) => {
+      expect(error).toBeInstanceOf(Error)
+      expect(error).not.toBeInstanceOf(DefiniteSpendFailure)
+      expect((error as Error).message).toBe('execution reverted')
+      return true
+    })
+  })
 })
 
 describe('isConfirmedUnchargedRevert', () => {

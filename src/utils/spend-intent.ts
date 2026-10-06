@@ -91,6 +91,36 @@ export class DefiniteSpendFailure extends Error {
 }
 
 /**
+ * Payment already settled, but the follow-up HTTP response failed.
+ * The intent must lock; the caller must not resubmit.
+ */
+export class PostSettlementSpendError extends Error {
+  readonly txHash: string
+  readonly amount: string
+  readonly recipient: string
+  readonly cause: unknown
+
+  constructor(input: {
+    txHash: string
+    amount: bigint | string
+    recipient: string
+    cause?: unknown
+  }) {
+    const amount =
+      typeof input.amount === 'bigint' ? input.amount.toString() : input.amount
+    super(
+      'x402 payment already settled; do not resubmit. ' +
+        `txHash=${input.txHash} amount=${amount} recipient=${input.recipient}`
+    )
+    this.name = 'PostSettlementSpendError'
+    this.txHash = input.txHash
+    this.amount = amount
+    this.recipient = input.recipient
+    this.cause = input.cause
+  }
+}
+
+/**
  * Run a pre-broadcast SDK phase (quote fetch, allowance read). Failures here
  * cannot have settled, so they stay retryable instead of locking the intent.
  */
@@ -165,10 +195,15 @@ export function classifyBridgeApproveUsdc<T>(bridge: T): T {
  * A confirmed uncharged revert (approve/burn/swap simulation or receipt
  * revert) also stays definite. Once a write is submitted and the outcome is
  * unclear, the error stays generic so the intent locks.
+ *
+ * x402 sends the protocol fee before the merchant transfer. Pass
+ * `lockAfterBroadcast: true` so a later revert cannot release the intent
+ * and allow a second fee.
  */
 export async function runClassifiedSpend<T>(
   walletClient: { sendTransaction?: unknown; writeContract?: unknown } | null | undefined,
-  run: () => Promise<T>
+  run: () => Promise<T>,
+  options?: { lockAfterBroadcast?: boolean }
 ): Promise<T> {
   const state = { broadcastStarted: false }
   const restore = instrumentWalletBroadcast(walletClient, () => {
@@ -180,7 +215,10 @@ export async function runClassifiedSpend<T>(
     if (error instanceof DefiniteSpendFailure) {
       throw error
     }
-    if (!state.broadcastStarted || isConfirmedUnchargedRevert(error)) {
+    if (
+      !state.broadcastStarted ||
+      (!options?.lockAfterBroadcast && isConfirmedUnchargedRevert(error))
+    ) {
       throw new DefiniteSpendFailure(
         error instanceof Error ? error.message : String(error)
       )
