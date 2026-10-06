@@ -21,11 +21,13 @@ import {
   sendTokenIntentKey,
   swapTokensIntentKey,
   bridgeUsdcIntentKey,
+  x402PayIntentKey,
   withSpendIntent,
 } from '../src/utils/spend-intent.js'
 import { SwapTokensSchema, swapTokensTool } from '../src/tools/swap.js'
 import { BridgeUsdcSchema, bridgeUsdcTool } from '../src/tools/bridge.js'
 import { SendTokenSchema, sendTokenTool } from '../src/tools/transfers.js'
+import { X402PaySchema, x402PayTool } from '../src/tools/x402.js'
 
 describe('sendTokenIntentKey', () => {
   it('normalises address case so checksum retries collide', () => {
@@ -131,6 +133,27 @@ describe('swapTokensIntentKey', () => {
     expect(swapTokensIntentKey(base)).toBe(
       swapTokensIntentKey({ ...base, slippageBps: 50 })
     )
+  })
+})
+
+describe('x402PayIntentKey', () => {
+  const base = {
+    url: 'https://api.example.com/premium',
+    method: 'GET',
+  }
+
+  it('changes when url, method, or body changes', () => {
+    expect(x402PayIntentKey({ ...base, url: 'https://api.example.com/other' })).not.toBe(
+      x402PayIntentKey(base)
+    )
+    expect(x402PayIntentKey({ ...base, method: 'POST' })).not.toBe(x402PayIntentKey(base))
+    expect(x402PayIntentKey({ ...base, body: '{"n":1}' })).not.toBe(x402PayIntentKey(base))
+  })
+
+  it('uses the explicit key as lookup identity independent of payload', () => {
+    expect(
+      x402PayIntentKey({ ...base, url: 'https://api.example.com/other', idempotencyKey: 'invoice-1' })
+    ).toBe(x402PayIntentKey({ ...base, idempotencyKey: 'invoice-1' }))
   })
 })
 
@@ -432,6 +455,7 @@ describe('idempotencyKey discovery schema', () => {
     swapTokensTool.inputSchema.properties.idempotencyKey,
     bridgeUsdcTool.inputSchema.properties.idempotencyKey,
     sendTokenTool.inputSchema.properties.idempotencyKey,
+    x402PayTool.inputSchema.properties.idempotencyKey,
   ]
   const discoveryPattern = new RegExp(IDEMPOTENCY_KEY_JSON_SCHEMA.pattern)
   const swapBase = {
@@ -447,8 +471,9 @@ describe('idempotencyKey discovery schema', () => {
     recipientAddress: '0xrecipient00000000000000000000000000000001',
     amount: '1',
   }
+  const x402Base = { url: 'https://api.example.com/premium' }
 
-  it('publishes the non-whitespace pattern on swap, bridge, and send', () => {
+  it('publishes the non-whitespace pattern on swap, bridge, send, and x402_pay', () => {
     for (const schema of published) {
       expect(schema).toMatchObject(IDEMPOTENCY_KEY_JSON_SCHEMA)
     }
@@ -462,9 +487,11 @@ describe('idempotencyKey discovery schema', () => {
     expect(SwapTokensSchema.safeParse({ ...swapBase, idempotencyKey: '   ' }).success).toBe(false)
     expect(BridgeUsdcSchema.safeParse({ ...bridgeBase, idempotencyKey: '   ' }).success).toBe(false)
     expect(SendTokenSchema.safeParse({ ...sendBase, idempotencyKey: '   ' }).success).toBe(false)
+    expect(X402PaySchema.safeParse({ ...x402Base, idempotencyKey: '   ' }).success).toBe(false)
     expect(SwapTokensSchema.safeParse({ ...swapBase, idempotencyKey: 'invoice-1' }).success).toBe(
       true
     )
+    expect(X402PaySchema.safeParse({ ...x402Base, idempotencyKey: 'invoice-1' }).success).toBe(true)
   })
 
   it('applies maxLength to the raw string, not the trimmed value', () => {
@@ -476,6 +503,7 @@ describe('idempotencyKey discovery schema', () => {
       false
     )
     expect(SendTokenSchema.safeParse({ ...sendBase, idempotencyKey: raw129 }).success).toBe(false)
+    expect(X402PaySchema.safeParse({ ...x402Base, idempotencyKey: raw129 }).success).toBe(false)
     expect(IdempotencyKeyZodSchema.safeParse(raw129).success).toBe(false)
     expect(raw129.length > IDEMPOTENCY_KEY_JSON_SCHEMA.maxLength).toBe(true)
     expect(SwapTokensSchema.safeParse({ ...swapBase, idempotencyKey: 'x'.repeat(128) }).success).toBe(

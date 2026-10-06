@@ -373,6 +373,30 @@ export function bridgeUsdcIntentKey(input: {
   return bridgeUsdcIntentIdentity(input).key
 }
 
+export function x402PayIntentIdentity(input: {
+  url: string
+  method: string
+  body?: string
+  idempotencyKey?: string
+}): SpendIntentIdentity {
+  const fingerprint = [
+    'x402_pay',
+    input.method.toUpperCase(),
+    input.url,
+    input.body ?? '',
+  ].join(':')
+  return spendIntentIdentity('x402_pay', fingerprint, input.idempotencyKey)
+}
+
+export function x402PayIntentKey(input: {
+  url: string
+  method: string
+  body?: string
+  idempotencyKey?: string
+}): string {
+  return x402PayIntentIdentity(input).key
+}
+
 export function _resetSpendIntentStore(): void {
   settledEphemeral.clear()
   settledDurable.clear()

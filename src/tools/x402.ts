@@ -38,6 +38,22 @@ import { findSessionForUrl, buildSessionHeaders } from './session.js';
 import { fetchWithSessionCredentials } from '../utils/session-fetch.js';
 import { recordSessionCall } from '../session/manager.js';
 import { enforceSpendPolicy } from './budget.js';
+import {
+  DefiniteSpendFailure,
+  IDEMPOTENCY_KEY_JSON_SCHEMA,
+  IdempotencyKeyZodSchema,
+  requireSettlementHash,
+  withSpendIntent,
+  x402PayIntentIdentity,
+} from '../utils/spend-intent.js';
+
+/** 402 offers no payable Base option. Retryable; nothing was broadcast. */
+class X402UnsupportedRequirementError extends DefiniteSpendFailure {
+  constructor(body: string) {
+    super(body);
+    this.name = 'X402UnsupportedRequirementError';
+  }
+}
 
 type X402PaymentAccept = {
   scheme?: string;
@@ -184,6 +200,13 @@ export const X402PaySchema = z.object({
       'Default: false. When false, if an active session covers this URL, ' +
       'the session token is used instead of paying again (x402 V2 behaviour).'
     ),
+  idempotencyKey: IdempotencyKeyZodSchema.optional()
+    .describe(
+      'Caller-supplied idempotency key. Distinct keys allow two equal paid fetches; ' +
+        'the same key replays the original payment; reusing it with a different ' +
+        'payload is refused. MCP retries without a key still collapse on the ' +
+        'settled URL/method/body for five minutes.'
+    ),
 });
 
 export type X402PayInput = z.infer<typeof X402PaySchema>;
@@ -196,6 +219,8 @@ export const x402PayTool = {
     'Use when an agent needs one capped x402 paid HTTP request and has already verified the URL, price, payTo, asset, and Base network. ' +
     'Automatically handles HTTP 402 Payment Required responses with the x402 v2.11 Payment-Signature flow. ' +
     'If an active x402 V2 session covers this URL, the session token is used instead of making a new payment. ' +
+    'Identical retries replay the original paid result; pass idempotencyKey to distinguish two equal fetches. ' +
+    'An RPC drop after payment fail-closes instead of signing a second settlement. ' +
     'Do not use when the endpoint is an uninitialized Streamable HTTP MCP session, the offered network is unsupported, the buyer lacks a spend cap, or a reusable entitlement should use x402_session_start instead.',
   inputSchema: {
     type: 'object' as const,
@@ -232,6 +257,11 @@ export const x402PayTool = {
         type: 'boolean',
         description: 'Skip local x402 session detection and force a fresh payment. Do not enable unless the buyer wants a new receipt instead of using an active session.',
         default: false,
+      },
+      idempotencyKey: {
+        ...IDEMPOTENCY_KEY_JSON_SCHEMA,
+        description:
+          'Optional idempotency key (1-128 non-whitespace chars). Distinct keys allow two equal paid fetches.',
       },
     },
     required: ['url'],
@@ -312,140 +342,194 @@ export async function handleX402Pay(
     }
 
     // ── Standard x402 payment flow ────────────────────────────────────────
+    // Identical MCP retries replay from the spend-intent cache. A drop after
+    // onPaymentComplete locks the intent so a retry cannot sign twice.
+    const method = input.method ?? 'GET';
+    const intent = x402PayIntentIdentity({
+      url: input.url,
+      method,
+      body: input.body,
+      idempotencyKey: input.idempotencyKey,
+    });
 
-    if (input.max_payment_eth) {
-      const cap = parseFloat(input.max_payment_eth);
-      if (isNaN(cap) || cap <= 0) {
-        throw new Error(`Invalid max_payment_eth: "${input.max_payment_eth}"`);
-      }
-    }
-
-    // Track payment result
-    let paymentMade = false;
-    let paymentAmount = 0n;
-    let paymentTxHash = '';
-    let paymentRecipient = '';
-
-    // Create x402 client with budget controls.
-    // Cap enforcement happens in onBeforePayment using the selected asset's
-    // decimals — never compare USDC base units against ETH-wei.
-    const x402Client = createX402Client(wallet, {
-      autoPay: true,
-      maxRetries: 1,
-      supportedNetworks: supportedX402NetworksForChainId(config.chainId),
-      onBeforePayment: async (req, _url) => {
-        // The 402's payTo is remote-controlled and ends up inside error
-        // messages (SDK allowlist rejection, viem InvalidAddressError).
-        // Reject non-addresses before signing or interpolating.
-        const merchant = assertPayableX402Recipient(req.payTo);
-        // req.amount is remote-controlled; a raw BigInt() here would put the
-        // whole value verbatim into V8's "Cannot convert <amount> to a
-        // BigInt" message.
-        const amount = assertParsableX402Amount(req.amount);
+    const { value, replayed } = await withSpendIntent(
+      intent.key,
+      async () => {
         if (input.max_payment_eth) {
-          const maxRaw = maxPaymentBaseUnits(
-            input.max_payment_eth,
-            req.asset,
-            config.chainId
-          );
-          if (amount > maxRaw) {
-            throw new Error(
-              `Payment required (${amount} base units) exceeds max_payment_eth cap ` +
-              `(${maxRaw} base units for asset ${req.asset} = ${input.max_payment_eth}). ` +
-              `Increase max_payment_eth or the payment will not proceed.`
+          const cap = parseFloat(input.max_payment_eth);
+          if (isNaN(cap) || cap <= 0) {
+            throw new DefiniteSpendFailure(
+              `Invalid max_payment_eth: "${input.max_payment_eth}"`
             );
           }
         }
 
-        // amount is in the offered asset's base units; the decimals thunk
-        // only runs when a policy is configured, and resolution failures
-        // reject (fail closed) inside enforceSpendPolicy.
-        const policyDecision = await enforceSpendPolicy({
-          merchant,
-          amount,
-          decimals: () =>
-            resolveX402AssetDecimals(
-              req.asset ?? '0x0000000000000000000000000000000000000000',
-              config.chainId
-            ),
+        let paymentMade = false;
+        let paymentAmount = 0n;
+        let paymentTxHash = '';
+        let paymentRecipient = '';
+
+        // Cap enforcement happens in onBeforePayment using the selected asset's
+        // decimals — never compare USDC base units against ETH-wei.
+        const x402Client = createX402Client(wallet, {
+          autoPay: true,
+          maxRetries: 1,
+          supportedNetworks: supportedX402NetworksForChainId(config.chainId),
+          onBeforePayment: async (req, _url) => {
+            // The 402's payTo is remote-controlled and ends up inside error
+            // messages (SDK allowlist rejection, viem InvalidAddressError).
+            // Reject non-addresses before signing or interpolating.
+            const merchant = assertPayableX402Recipient(req.payTo);
+            // req.amount is remote-controlled; a raw BigInt() here would put the
+            // whole value verbatim into V8's "Cannot convert <amount> to a
+            // BigInt" message.
+            const amount = assertParsableX402Amount(req.amount);
+            if (input.max_payment_eth) {
+              const maxRaw = maxPaymentBaseUnits(
+                input.max_payment_eth,
+                req.asset,
+                config.chainId
+              );
+              if (amount > maxRaw) {
+                throw new Error(
+                  `Payment required (${amount} base units) exceeds max_payment_eth cap ` +
+                  `(${maxRaw} base units for asset ${req.asset} = ${input.max_payment_eth}). ` +
+                  `Increase max_payment_eth or the payment will not proceed.`
+                );
+              }
+            }
+
+            // amount is in the offered asset's base units; the decimals thunk
+            // only runs when a policy is configured, and resolution failures
+            // reject (fail closed) inside enforceSpendPolicy.
+            const policyDecision = await enforceSpendPolicy({
+              merchant,
+              amount,
+              decimals: () =>
+                resolveX402AssetDecimals(
+                  req.asset ?? '0x0000000000000000000000000000000000000000',
+                  config.chainId
+                ),
+            });
+            if (policyDecision.status !== 'approved') {
+              throw new Error(
+                policyDecision.reason ??
+                  `x402 payment blocked by spend policy (${policyDecision.status}).`
+              );
+            }
+            return true;
+          },
+          onPaymentComplete: (log) => {
+            paymentMade = true;
+            paymentAmount = log.amount;
+            paymentTxHash = log.txHash;
+            paymentRecipient = log.recipient;
+          },
         });
-        if (policyDecision.status !== 'approved') {
-          throw new Error(
-            policyDecision.reason ??
-              `x402 payment blocked by spend policy (${policyDecision.status}).`
+
+        const headers: Record<string, string> = {
+          'Accept': 'application/json, text/plain, */*',
+          ...(input.headers ?? {}),
+        };
+
+        if (input.body && ['POST', 'PUT', 'PATCH'].includes(method)) {
+          if (!headers['Content-Type']) {
+            headers['Content-Type'] = 'application/json';
+          }
+        }
+
+        const requestInit: RequestInit = {
+          method,
+          headers,
+          ...(input.body ? { body: input.body } : {}),
+          signal: AbortSignal.timeout(timeoutMs),
+        };
+
+        let response: Response;
+        let responseText: string;
+        try {
+          response = await x402Client.fetch(input.url, requestInit);
+          responseText = await response.text();
+        } catch (error: unknown) {
+          if (paymentMade) {
+            throw error;
+          }
+          if (error instanceof Error && error.name === 'AbortError') {
+            throw new DefiniteSpendFailure(
+              `Request timed out after ${timeoutMs}ms`
+            );
+          }
+          throw new DefiniteSpendFailure(
+            error instanceof Error ? error.message : String(error)
           );
         }
-        return true;
-      },
-      onPaymentComplete: (log) => {
-        paymentMade = true;
-        paymentAmount = log.amount;
-        paymentTxHash = log.txHash;
-        paymentRecipient = log.recipient;
-      },
-    });
 
-    // Build request options
-    const method = input.method ?? 'GET';
-    const headers: Record<string, string> = {
-      'Accept': 'application/json, text/plain, */*',
-      ...(input.headers ?? {}),
-    };
+        if (response.status === 402 && !paymentMade) {
+          throw new X402UnsupportedRequirementError(
+            describeUnsupported402(input, response, responseText, config.chainId)
+          );
+        }
 
-    if (input.body && ['POST', 'PUT', 'PATCH'].includes(method)) {
-      if (!headers['Content-Type']) {
-        headers['Content-Type'] = 'application/json';
+        if (paymentMade) {
+          requireSettlementHash(paymentTxHash, 'x402_pay');
+        }
+
+        let out = `🌐 **x402 Fetch Result**\n\n`;
+        out += `  URL:     ${sanitizeUntrustedUrl(input.url)}\n`;
+        out += describeFinalUrl(input.url, response);
+        out += `  Method:  ${method}\n`;
+        out += `  Status:  ${formatHttpStatus(response.status)}\n`;
+        out += `  Network: ${chainName(config.chainId)}\n`;
+
+        if (paymentMade) {
+          out += `\n💳 **Payment Made**\n`;
+          out += `  Amount:    ${paymentAmount.toString()} (base units)\n`;
+          // Both come from the SDK's payment log: `recipient` is the 402's own
+          // `payTo`, i.e. remote text, and `txHash` is whatever the write returned.
+          // They sit in the trusted narration region above the fence, so they are
+          // flattened and capped like every other untrusted value echoed there.
+          out += `  Recipient: ${sanitizeUntrustedInline(paymentRecipient, 64)}\n`;
+          out += `  TX Hash:   ${sanitizeUntrustedInline(paymentTxHash, 80)}\n`;
+          out += `\n💡 Tip: Use x402_session_start to pay once for a session and skip per-call payments.\n`;
+        } else {
+          out += `\n✅ No payment required\n`;
+        }
+
+        out += `\n📄 **Response Body**\n`;
+        out += formatUntrustedBody(responseText, 8000);
+        return { text: out };
+      },
+      {
+        durable: Boolean(input.idempotencyKey?.trim()),
+        fingerprint: intent.fingerprint,
       }
-    }
+    );
 
-    const requestInit: RequestInit = {
-      method,
-      headers,
-      ...(input.body ? { body: input.body } : {}),
-      signal: AbortSignal.timeout(timeoutMs),
-    };
-
-    // Execute request with x402 handling
-    const response = await x402Client.fetch(input.url, requestInit);
-    const responseText = await response.text();
-
-    if (response.status === 402 && !paymentMade) {
+    const text = replayed
+      ? `${value.text}\n♻️ Idempotent retry: original x402 result replayed; no second settlement.\n`
+      : value.text;
+    return { content: [textContent(text)] };
+  } catch (error: unknown) {
+    if (error instanceof X402UnsupportedRequirementError) {
       return {
-        content: [textContent(describeUnsupported402(input, response, responseText, config.chainId))],
+        content: [textContent(error.message)],
         isError: true,
       };
     }
-
-    let out = `🌐 **x402 Fetch Result**\n\n`;
-    out += `  URL:     ${sanitizeUntrustedUrl(input.url)}\n`;
-    out += describeFinalUrl(input.url, response);
-    out += `  Method:  ${method}\n`;
-    out += `  Status:  ${formatHttpStatus(response.status)}\n`;
-    out += `  Network: ${chainName(config.chainId)}\n`;
-
-    if (paymentMade) {
-      out += `\n💳 **Payment Made**\n`;
-      out += `  Amount:    ${paymentAmount.toString()} (base units)\n`;
-      // Both come from the SDK's payment log: `recipient` is the 402's own
-      // `payTo`, i.e. remote text, and `txHash` is whatever the write returned.
-      // They sit in the trusted narration region above the fence, so they are
-      // flattened and capped like every other untrusted value echoed there.
-      out += `  Recipient: ${sanitizeUntrustedInline(paymentRecipient, 64)}\n`;
-      out += `  TX Hash:   ${sanitizeUntrustedInline(paymentTxHash, 80)}\n`;
-      out += `\n💡 Tip: Use x402_session_start to pay once for a session and skip per-call payments.\n`;
-    } else {
-      out += `\n✅ No payment required\n`;
-    }
-
-    out += `\n📄 **Response Body**\n`;
-    out += formatUntrustedBody(responseText, 8000);
-
-    return { content: [textContent(out)] };
-  } catch (error: unknown) {
-    // Check for AbortError (timeout)
-    if (error instanceof Error && error.name === 'AbortError') {
+    if (
+      (error instanceof Error && error.name === 'AbortError') ||
+      (error instanceof DefiniteSpendFailure &&
+        /Request timed out after \d+ms/.test(error.message))
+    ) {
+      const timeout = /Request timed out after (\d+)ms/.exec(
+        error instanceof Error ? error.message : ''
+      );
       return {
-        content: [textContent(`❌ x402_pay failed: Request timed out after ${input.timeout_ms ?? 30000}ms`)],
+        content: [
+          textContent(
+            `❌ x402_pay failed: Request timed out after ${timeout?.[1] ?? input.timeout_ms ?? 30000}ms`
+          ),
+        ],
         isError: true,
       };
     }
