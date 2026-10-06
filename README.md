@@ -2,6 +2,7 @@
 
 [![npm](https://img.shields.io/npm/v/agentpay-mcp.svg)](https://www.npmjs.com/package/agentpay-mcp)
 [![CI](https://github.com/up2itnow0822/agentpay-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/up2itnow0822/agentpay-mcp/actions/workflows/ci.yml)
+[![Glama MCP Server](https://img.shields.io/badge/glama.ai-MCP%20server-1ee495?logo=githubsponsors&logoColor=1ee495&labelColor=0a0a0a)](https://glama.ai/mcp/servers/up2itnow0822/claw-pay-mcp)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 AgentPay MCP is a stdio Model Context Protocol server for x402 payments and
@@ -131,7 +132,7 @@ versioned documents:
 - [`docs/dependency-pin-policy.md`](docs/dependency-pin-policy.md) defines the
   release gate for payment-critical packages.
 
-This release pins `viem` exactly at `2.48.7`.
+AgentPay pins `viem` exactly at `2.48.7`.
 
 The directory comparison was captured against `agentpay-mcp@4.1.9`; the
 package version at the top of this README is the current release.
