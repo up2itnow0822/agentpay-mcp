@@ -9,7 +9,7 @@ AgentPay MCP is a stdio Model Context Protocol server for x402 payments and
 wallet operations. It exposes Agent Wallet SDK functions as MCP tools and loads
 a caller-controlled signing key from the local process environment.
 
-The current npm package is `agentpay-mcp` v4.1.17.
+The current npm package is `agentpay-mcp` v4.1.18.
 
 ## Start without funds
 
