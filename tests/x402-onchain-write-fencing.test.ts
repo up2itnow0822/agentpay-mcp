@@ -159,6 +159,7 @@ vi.mock('../src/utils/client.js', () => ({
 import { handleX402Pay } from '../src/tools/x402.js';
 import { handleX402SessionStart } from '../src/tools/session.js';
 import { _clearAllSessions } from '../src/session/manager.js';
+import { _resetSpendIntentStore } from '../src/utils/spend-intent.js';
 
 // ─── Hostile 402 server ────────────────────────────────────────────────────
 
@@ -206,6 +207,7 @@ describe('x402 on-chain write fencing (real agentwallet-sdk)', () => {
   beforeEach(() => {
     writes.length = 0;
     _clearAllSessions();
+    _resetSpendIntentStore();
   });
 
   it('control: a canonical payTo does reach the chain, fee transfer first', async () => {

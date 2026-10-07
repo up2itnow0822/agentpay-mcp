@@ -21,11 +21,14 @@ import {
   sendTokenIntentKey,
   swapTokensIntentKey,
   bridgeUsdcIntentKey,
+  x402PayIntentIdentity,
+  x402PayIntentKey,
   withSpendIntent,
 } from '../src/utils/spend-intent.js'
 import { SwapTokensSchema, swapTokensTool } from '../src/tools/swap.js'
 import { BridgeUsdcSchema, bridgeUsdcTool } from '../src/tools/bridge.js'
 import { SendTokenSchema, sendTokenTool } from '../src/tools/transfers.js'
+import { X402PaySchema, x402PayTool } from '../src/tools/x402.js'
 
 describe('sendTokenIntentKey', () => {
   it('normalises address case so checksum retries collide', () => {
@@ -134,6 +137,88 @@ describe('swapTokensIntentKey', () => {
   })
 })
 
+describe('x402PayIntentKey', () => {
+  const base = {
+    url: 'https://api.example.com/premium',
+    method: 'GET',
+  }
+
+  it('changes when url, method, or body changes', () => {
+    expect(x402PayIntentKey({ ...base, url: 'https://api.example.com/other' })).not.toBe(
+      x402PayIntentKey(base)
+    )
+    expect(x402PayIntentKey({ ...base, method: 'POST' })).not.toBe(x402PayIntentKey(base))
+    expect(x402PayIntentKey({ ...base, body: '{"n":1}' })).not.toBe(x402PayIntentKey(base))
+  })
+
+  it('uses the explicit key as lookup identity independent of payload', () => {
+    expect(
+      x402PayIntentKey({ ...base, url: 'https://api.example.com/other', idempotencyKey: 'invoice-1' })
+    ).toBe(x402PayIntentKey({ ...base, idempotencyKey: 'invoice-1' }))
+  })
+
+  it('does not collide when colon-joined url and body fields swap', () => {
+    const left = x402PayIntentIdentity({
+      url: 'https://example.com/a',
+      method: 'GET',
+      body: 'b:c',
+    })
+    const right = x402PayIntentIdentity({
+      url: 'https://example.com/a:b',
+      method: 'GET',
+      body: 'c',
+    })
+    expect(left.fingerprint).not.toBe(right.fingerprint)
+    expect(left.key).not.toBe(right.key)
+  })
+
+  it('includes headers in the fingerprint and normalises name case and order', () => {
+    expect(
+      x402PayIntentIdentity({
+        ...base,
+        headers: { Authorization: 'Bearer alice', 'X-Api-Key': 'one' },
+      }).fingerprint
+    ).not.toBe(x402PayIntentIdentity(base).fingerprint)
+    expect(
+      x402PayIntentIdentity({
+        ...base,
+        headers: { Authorization: 'Bearer alice' },
+      }).fingerprint
+    ).not.toBe(
+      x402PayIntentIdentity({
+        ...base,
+        headers: { Authorization: 'Bearer bob' },
+      }).fingerprint
+    )
+    expect(
+      x402PayIntentIdentity({
+        ...base,
+        headers: { Authorization: 'Bearer alice', 'X-Api-Key': 'one' },
+      }).fingerprint
+    ).toBe(
+      x402PayIntentIdentity({
+        ...base,
+        headers: { 'x-api-key': 'one', authorization: 'Bearer alice' },
+      }).fingerprint
+    )
+  })
+
+  it('treats a keyed header change as a payload conflict, not a replay', () => {
+    const first = x402PayIntentIdentity({
+      ...base,
+      headers: { Authorization: 'Bearer alice' },
+      idempotencyKey: 'invoice-1',
+    })
+    const changed = x402PayIntentIdentity({
+      ...base,
+      headers: { Authorization: 'Bearer bob' },
+      idempotencyKey: 'invoice-1',
+    })
+    expect(first.key).toBe(changed.key)
+    expect(first.fingerprint).not.toBe(changed.fingerprint)
+  })
+})
+
 describe('bridgeUsdcIntentKey', () => {
   const base = {
     fromChain: 'base',
@@ -204,6 +289,22 @@ describe('withSpendIntent', () => {
     expect(first).toEqual({ value: '0xtxhash', replayed: false })
     expect(second).toEqual({ value: '0xtxhash', replayed: true })
     expect(run).toHaveBeenCalledTimes(1)
+  })
+
+  it('releases an uncharged success instead of settling it', async () => {
+    const run = vi
+      .fn()
+      .mockResolvedValueOnce({ text: 'free-1', charged: false })
+      .mockResolvedValueOnce({ text: 'free-2', charged: false })
+    const first = await withSpendIntent('k1', run, {
+      shouldSettle: (value) => value.charged,
+    })
+    const second = await withSpendIntent('k1', run, {
+      shouldSettle: (value) => value.charged,
+    })
+    expect(first).toEqual({ value: { text: 'free-1', charged: false }, replayed: false })
+    expect(second).toEqual({ value: { text: 'free-2', charged: false }, replayed: false })
+    expect(run).toHaveBeenCalledTimes(2)
   })
 
   it('fail-closes after an unresolved broadcast instead of sending again', async () => {
@@ -410,6 +511,27 @@ describe('runClassifiedSpend', () => {
       })
     ).rejects.toBeInstanceOf(DefiniteSpendFailure)
   })
+
+  it('locks x402-style reverts after the first wallet write', async () => {
+    const walletClient = {
+      sendTransaction: vi.fn().mockResolvedValue('0xsend'),
+    }
+    await expect(
+      runClassifiedSpend(
+        walletClient,
+        async () => {
+          await walletClient.sendTransaction({ to: '0xfee' })
+          throw new Error('execution reverted')
+        },
+        { lockAfterBroadcast: true }
+      )
+    ).rejects.toSatisfy((error: unknown) => {
+      expect(error).toBeInstanceOf(Error)
+      expect(error).not.toBeInstanceOf(DefiniteSpendFailure)
+      expect((error as Error).message).toBe('execution reverted')
+      return true
+    })
+  })
 })
 
 describe('isConfirmedUnchargedRevert', () => {
@@ -432,6 +554,7 @@ describe('idempotencyKey discovery schema', () => {
     swapTokensTool.inputSchema.properties.idempotencyKey,
     bridgeUsdcTool.inputSchema.properties.idempotencyKey,
     sendTokenTool.inputSchema.properties.idempotencyKey,
+    x402PayTool.inputSchema.properties.idempotencyKey,
   ]
   const discoveryPattern = new RegExp(IDEMPOTENCY_KEY_JSON_SCHEMA.pattern)
   const swapBase = {
@@ -447,8 +570,9 @@ describe('idempotencyKey discovery schema', () => {
     recipientAddress: '0xrecipient00000000000000000000000000000001',
     amount: '1',
   }
+  const x402Base = { url: 'https://api.example.com/premium' }
 
-  it('publishes the non-whitespace pattern on swap, bridge, and send', () => {
+  it('publishes the non-whitespace pattern on swap, bridge, send, and x402_pay', () => {
     for (const schema of published) {
       expect(schema).toMatchObject(IDEMPOTENCY_KEY_JSON_SCHEMA)
     }
@@ -462,9 +586,11 @@ describe('idempotencyKey discovery schema', () => {
     expect(SwapTokensSchema.safeParse({ ...swapBase, idempotencyKey: '   ' }).success).toBe(false)
     expect(BridgeUsdcSchema.safeParse({ ...bridgeBase, idempotencyKey: '   ' }).success).toBe(false)
     expect(SendTokenSchema.safeParse({ ...sendBase, idempotencyKey: '   ' }).success).toBe(false)
+    expect(X402PaySchema.safeParse({ ...x402Base, idempotencyKey: '   ' }).success).toBe(false)
     expect(SwapTokensSchema.safeParse({ ...swapBase, idempotencyKey: 'invoice-1' }).success).toBe(
       true
     )
+    expect(X402PaySchema.safeParse({ ...x402Base, idempotencyKey: 'invoice-1' }).success).toBe(true)
   })
 
   it('applies maxLength to the raw string, not the trimmed value', () => {
@@ -476,6 +602,7 @@ describe('idempotencyKey discovery schema', () => {
       false
     )
     expect(SendTokenSchema.safeParse({ ...sendBase, idempotencyKey: raw129 }).success).toBe(false)
+    expect(X402PaySchema.safeParse({ ...x402Base, idempotencyKey: raw129 }).success).toBe(false)
     expect(IdempotencyKeyZodSchema.safeParse(raw129).success).toBe(false)
     expect(raw129.length > IDEMPOTENCY_KEY_JSON_SCHEMA.maxLength).toBe(true)
     expect(SwapTokensSchema.safeParse({ ...swapBase, idempotencyKey: 'x'.repeat(128) }).success).toBe(

@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto'
 import { z } from 'zod'
 
 /**
@@ -17,7 +18,8 @@ import { z } from 'zod'
  * different fingerprint fail-closes as a conflict instead of settling twice.
  *
  * A matching retry inside the TTL returns the original result and skips both
- * the spend-policy check and the on-chain transfer.
+ * the spend-policy check and the on-chain transfer. x402_pay settles only
+ * after a payment; an uncharged HTTP response is released and stays retryable.
  *
  * Keyed settled results stay until the durable LRU evicts them so the same
  * idempotencyKey replays after the keyless MCP-retry window. Keyless settled
@@ -87,6 +89,36 @@ export class DefiniteSpendFailure extends Error {
   constructor(message: string) {
     super(message)
     this.name = 'DefiniteSpendFailure'
+  }
+}
+
+/**
+ * Payment already settled, but the follow-up HTTP response failed.
+ * The intent must lock; the caller must not resubmit.
+ */
+export class PostSettlementSpendError extends Error {
+  readonly txHash: string
+  readonly amount: string
+  readonly recipient: string
+  readonly cause: unknown
+
+  constructor(input: {
+    txHash: string
+    amount: bigint | string
+    recipient: string
+    cause?: unknown
+  }) {
+    const amount =
+      typeof input.amount === 'bigint' ? input.amount.toString() : input.amount
+    super(
+      'x402 payment already settled; do not resubmit. ' +
+        `txHash=${input.txHash} amount=${amount} recipient=${input.recipient}`
+    )
+    this.name = 'PostSettlementSpendError'
+    this.txHash = input.txHash
+    this.amount = amount
+    this.recipient = input.recipient
+    this.cause = input.cause
   }
 }
 
@@ -165,10 +197,15 @@ export function classifyBridgeApproveUsdc<T>(bridge: T): T {
  * A confirmed uncharged revert (approve/burn/swap simulation or receipt
  * revert) also stays definite. Once a write is submitted and the outcome is
  * unclear, the error stays generic so the intent locks.
+ *
+ * x402 sends the protocol fee before the merchant transfer. Pass
+ * `lockAfterBroadcast: true` so a later revert cannot release the intent
+ * and allow a second fee.
  */
 export async function runClassifiedSpend<T>(
   walletClient: { sendTransaction?: unknown; writeContract?: unknown } | null | undefined,
-  run: () => Promise<T>
+  run: () => Promise<T>,
+  options?: { lockAfterBroadcast?: boolean }
 ): Promise<T> {
   const state = { broadcastStarted: false }
   const restore = instrumentWalletBroadcast(walletClient, () => {
@@ -180,7 +217,10 @@ export async function runClassifiedSpend<T>(
     if (error instanceof DefiniteSpendFailure) {
       throw error
     }
-    if (!state.broadcastStarted || isConfirmedUnchargedRevert(error)) {
+    if (
+      !state.broadcastStarted ||
+      (!options?.lockAfterBroadcast && isConfirmedUnchargedRevert(error))
+    ) {
       throw new DefiniteSpendFailure(
         error instanceof Error ? error.message : String(error)
       )
@@ -373,6 +413,62 @@ export function bridgeUsdcIntentKey(input: {
   return bridgeUsdcIntentIdentity(input).key
 }
 
+/**
+ * Length-safe x402_pay identity: JSON-encode method/url/body/headers, then
+ * hash. Colon-joined fields collide (`url=…/a` + `body=b:c` vs `url=…/a:b`
+ * + `body=c`), and raw header values must not become Map keys.
+ */
+function encodeX402PayFingerprint(input: {
+  url: string
+  method: string
+  body?: string
+  headers?: Record<string, string>
+}): string {
+  const headers = Object.entries(input.headers ?? {})
+    .map(([name, value]) => [name.toLowerCase(), value] as const)
+    .sort((left, right) => {
+      if (left[0] !== right[0]) {
+        return left[0] < right[0] ? -1 : 1
+      }
+      if (left[1] !== right[1]) {
+        return left[1] < right[1] ? -1 : 1
+      }
+      return 0
+    })
+  const encoded = JSON.stringify([
+    'x402_pay',
+    input.method.toUpperCase(),
+    input.url,
+    input.body ?? '',
+    headers,
+  ])
+  return `x402_pay:${createHash('sha256').update(encoded).digest('hex')}`
+}
+
+export function x402PayIntentIdentity(input: {
+  url: string
+  method: string
+  body?: string
+  headers?: Record<string, string>
+  idempotencyKey?: string
+}): SpendIntentIdentity {
+  return spendIntentIdentity(
+    'x402_pay',
+    encodeX402PayFingerprint(input),
+    input.idempotencyKey
+  )
+}
+
+export function x402PayIntentKey(input: {
+  url: string
+  method: string
+  body?: string
+  headers?: Record<string, string>
+  idempotencyKey?: string
+}): string {
+  return x402PayIntentIdentity(input).key
+}
+
 export function _resetSpendIntentStore(): void {
   settledEphemeral.clear()
   settledDurable.clear()
@@ -447,7 +543,11 @@ function assertFingerprint(stored: string, incoming: string): void {
 export async function withSpendIntent<T>(
   key: string,
   run: () => Promise<T>,
-  options?: { durable?: boolean; fingerprint?: string }
+  options?: {
+    durable?: boolean
+    fingerprint?: string
+    shouldSettle?: (_value: T) => boolean
+  }
 ): Promise<{ value: T; replayed: boolean }> {
   pruneExpired()
   const fingerprint = options?.fingerprint ?? key
@@ -475,6 +575,9 @@ export async function withSpendIntent<T>(
   inflight.set(key, { promise, fingerprint })
   try {
     const value = await promise
+    if (options?.shouldSettle && !options.shouldSettle(value)) {
+      return { value, replayed: false }
+    }
     const entry: SettledIntent<T> = {
       settledAt: Date.now(),
       value,
