@@ -2,7 +2,7 @@
   "name": "agentpay-mcp",
   "version": "4.1.17",
   "mcpName": "io.github.up2itnow0822/agentpay",
-  "description": "AgentPay MCP Server - Non-custodial x402 payment layer for AI agents. Multi-chain wallets, spending limits, and machine-to-machine payments. Patent Pending.",
+  "description": "Non-custodial x402 payment MCP server for AI agents: wallet, payment, and spend-policy tools for MCP clients. Start on Base Sepolia (CHAIN_ID 84532).",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "bin": {
