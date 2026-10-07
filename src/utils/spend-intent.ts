@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto'
 import { z } from 'zod'
 
 /**
@@ -17,7 +18,8 @@ import { z } from 'zod'
  * different fingerprint fail-closes as a conflict instead of settling twice.
  *
  * A matching retry inside the TTL returns the original result and skips both
- * the spend-policy check and the on-chain transfer.
+ * the spend-policy check and the on-chain transfer. x402_pay settles only
+ * after a payment; an uncharged HTTP response is released and stays retryable.
  *
  * Keyed settled results stay until the durable LRU evicts them so the same
  * idempotencyKey replays after the keyless MCP-retry window. Keyless settled
@@ -411,25 +413,57 @@ export function bridgeUsdcIntentKey(input: {
   return bridgeUsdcIntentIdentity(input).key
 }
 
-export function x402PayIntentIdentity(input: {
+/**
+ * Length-safe x402_pay identity: JSON-encode method/url/body/headers, then
+ * hash. Colon-joined fields collide (`url=…/a` + `body=b:c` vs `url=…/a:b`
+ * + `body=c`), and raw header values must not become Map keys.
+ */
+function encodeX402PayFingerprint(input: {
   url: string
   method: string
   body?: string
-  idempotencyKey?: string
-}): SpendIntentIdentity {
-  const fingerprint = [
+  headers?: Record<string, string>
+}): string {
+  const headers = Object.entries(input.headers ?? {})
+    .map(([name, value]) => [name.toLowerCase(), value] as const)
+    .sort((left, right) => {
+      if (left[0] !== right[0]) {
+        return left[0] < right[0] ? -1 : 1
+      }
+      if (left[1] !== right[1]) {
+        return left[1] < right[1] ? -1 : 1
+      }
+      return 0
+    })
+  const encoded = JSON.stringify([
     'x402_pay',
     input.method.toUpperCase(),
     input.url,
     input.body ?? '',
-  ].join(':')
-  return spendIntentIdentity('x402_pay', fingerprint, input.idempotencyKey)
+    headers,
+  ])
+  return `x402_pay:${createHash('sha256').update(encoded).digest('hex')}`
+}
+
+export function x402PayIntentIdentity(input: {
+  url: string
+  method: string
+  body?: string
+  headers?: Record<string, string>
+  idempotencyKey?: string
+}): SpendIntentIdentity {
+  return spendIntentIdentity(
+    'x402_pay',
+    encodeX402PayFingerprint(input),
+    input.idempotencyKey
+  )
 }
 
 export function x402PayIntentKey(input: {
   url: string
   method: string
   body?: string
+  headers?: Record<string, string>
   idempotencyKey?: string
 }): string {
   return x402PayIntentIdentity(input).key
@@ -509,7 +543,11 @@ function assertFingerprint(stored: string, incoming: string): void {
 export async function withSpendIntent<T>(
   key: string,
   run: () => Promise<T>,
-  options?: { durable?: boolean; fingerprint?: string }
+  options?: {
+    durable?: boolean
+    fingerprint?: string
+    shouldSettle?: (_value: T) => boolean
+  }
 ): Promise<{ value: T; replayed: boolean }> {
   pruneExpired()
   const fingerprint = options?.fingerprint ?? key
@@ -537,6 +575,9 @@ export async function withSpendIntent<T>(
   inflight.set(key, { promise, fingerprint })
   try {
     const value = await promise
+    if (options?.shouldSettle && !options.shouldSettle(value)) {
+      return { value, replayed: false }
+    }
     const entry: SettledIntent<T> = {
       settledAt: Date.now(),
       value,

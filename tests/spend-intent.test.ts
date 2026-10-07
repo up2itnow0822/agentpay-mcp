@@ -21,6 +21,7 @@ import {
   sendTokenIntentKey,
   swapTokensIntentKey,
   bridgeUsdcIntentKey,
+  x402PayIntentIdentity,
   x402PayIntentKey,
   withSpendIntent,
 } from '../src/utils/spend-intent.js'
@@ -155,6 +156,67 @@ describe('x402PayIntentKey', () => {
       x402PayIntentKey({ ...base, url: 'https://api.example.com/other', idempotencyKey: 'invoice-1' })
     ).toBe(x402PayIntentKey({ ...base, idempotencyKey: 'invoice-1' }))
   })
+
+  it('does not collide when colon-joined url and body fields swap', () => {
+    const left = x402PayIntentIdentity({
+      url: 'https://example.com/a',
+      method: 'GET',
+      body: 'b:c',
+    })
+    const right = x402PayIntentIdentity({
+      url: 'https://example.com/a:b',
+      method: 'GET',
+      body: 'c',
+    })
+    expect(left.fingerprint).not.toBe(right.fingerprint)
+    expect(left.key).not.toBe(right.key)
+  })
+
+  it('includes headers in the fingerprint and normalises name case and order', () => {
+    expect(
+      x402PayIntentIdentity({
+        ...base,
+        headers: { Authorization: 'Bearer alice', 'X-Api-Key': 'one' },
+      }).fingerprint
+    ).not.toBe(x402PayIntentIdentity(base).fingerprint)
+    expect(
+      x402PayIntentIdentity({
+        ...base,
+        headers: { Authorization: 'Bearer alice' },
+      }).fingerprint
+    ).not.toBe(
+      x402PayIntentIdentity({
+        ...base,
+        headers: { Authorization: 'Bearer bob' },
+      }).fingerprint
+    )
+    expect(
+      x402PayIntentIdentity({
+        ...base,
+        headers: { Authorization: 'Bearer alice', 'X-Api-Key': 'one' },
+      }).fingerprint
+    ).toBe(
+      x402PayIntentIdentity({
+        ...base,
+        headers: { 'x-api-key': 'one', authorization: 'Bearer alice' },
+      }).fingerprint
+    )
+  })
+
+  it('treats a keyed header change as a payload conflict, not a replay', () => {
+    const first = x402PayIntentIdentity({
+      ...base,
+      headers: { Authorization: 'Bearer alice' },
+      idempotencyKey: 'invoice-1',
+    })
+    const changed = x402PayIntentIdentity({
+      ...base,
+      headers: { Authorization: 'Bearer bob' },
+      idempotencyKey: 'invoice-1',
+    })
+    expect(first.key).toBe(changed.key)
+    expect(first.fingerprint).not.toBe(changed.fingerprint)
+  })
 })
 
 describe('bridgeUsdcIntentKey', () => {
@@ -227,6 +289,22 @@ describe('withSpendIntent', () => {
     expect(first).toEqual({ value: '0xtxhash', replayed: false })
     expect(second).toEqual({ value: '0xtxhash', replayed: true })
     expect(run).toHaveBeenCalledTimes(1)
+  })
+
+  it('releases an uncharged success instead of settling it', async () => {
+    const run = vi
+      .fn()
+      .mockResolvedValueOnce({ text: 'free-1', charged: false })
+      .mockResolvedValueOnce({ text: 'free-2', charged: false })
+    const first = await withSpendIntent('k1', run, {
+      shouldSettle: (value) => value.charged,
+    })
+    const second = await withSpendIntent('k1', run, {
+      shouldSettle: (value) => value.charged,
+    })
+    expect(first).toEqual({ value: { text: 'free-1', charged: false }, replayed: false })
+    expect(second).toEqual({ value: { text: 'free-2', charged: false }, replayed: false })
+    expect(run).toHaveBeenCalledTimes(2)
   })
 
   it('fail-closes after an unresolved broadcast instead of sending again', async () => {

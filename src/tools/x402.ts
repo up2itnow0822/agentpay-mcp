@@ -6,7 +6,9 @@
  *
  * v1.1.0: Auto-session detection. If an active x402 V2 session covers the
  * requested URL, session headers are injected and no new payment is made.
- * Pass skip_session_check=true to force a fresh payment regardless.
+ * Pass skip_session_check=true to skip x402 V2 session reuse and take the
+ * payment path. Identical paid retries still replay from the spend-intent
+ * cache; use a new idempotencyKey for a second settlement.
  */
 import { z } from 'zod';
 import { createX402Client } from 'agentwallet-sdk';
@@ -198,9 +200,9 @@ export const X402PaySchema = z.object({
     .optional()
     .default(false)
     .describe(
-      'Skip auto-session detection and always make a fresh x402 payment. ' +
-      'Default: false. When false, if an active session covers this URL, ' +
-      'the session token is used instead of paying again (x402 V2 behaviour).'
+      'Skip auto-session detection and take the x402 payment path instead of ' +
+      'an active session token. Default: false. Does not bypass spend-intent ' +
+      'replay; use a new idempotencyKey to settle twice.'
     ),
   idempotencyKey: IdempotencyKeyZodSchema.optional()
     .describe(
@@ -257,7 +259,8 @@ export const x402PayTool = {
       },
       skip_session_check: {
         type: 'boolean',
-        description: 'Skip local x402 session detection and force a fresh payment. Do not enable unless the buyer wants a new receipt instead of using an active session.',
+        description:
+          'Skip local x402 session detection and take the payment path instead of an active session. Does not bypass spend-intent replay. Use a new idempotencyKey for a second settlement.',
         default: false,
       },
       idempotencyKey: {
@@ -344,29 +347,30 @@ export async function handleX402Pay(
     }
 
     // ── Standard x402 payment flow ────────────────────────────────────────
-    // Identical MCP retries replay from the spend-intent cache. A drop after
-    // a wallet write or onPaymentComplete locks the intent so a retry cannot
-    // sign twice.
+    // Identical paid MCP retries replay from the spend-intent cache. Uncharged
+    // responses are not settled. A drop after a wallet write or
+    // onPaymentComplete locks the intent so a retry cannot sign twice.
     const method = input.method ?? 'GET';
+    if (input.max_payment_eth) {
+      const cap = parseFloat(input.max_payment_eth);
+      if (isNaN(cap) || cap <= 0) {
+        throw new DefiniteSpendFailure(
+          `Invalid max_payment_eth: "${input.max_payment_eth}"`
+        );
+      }
+    }
+
     const intent = x402PayIntentIdentity({
       url: input.url,
       method,
       body: input.body,
+      headers: input.headers,
       idempotencyKey: input.idempotencyKey,
     });
 
     const { value, replayed } = await withSpendIntent(
       intent.key,
       async () => {
-        if (input.max_payment_eth) {
-          const cap = parseFloat(input.max_payment_eth);
-          if (isNaN(cap) || cap <= 0) {
-            throw new DefiniteSpendFailure(
-              `Invalid max_payment_eth: "${input.max_payment_eth}"`
-            );
-          }
-        }
-
         let paymentMade = false;
         let paymentAmount = 0n;
         let paymentTxHash = '';
@@ -515,11 +519,12 @@ export async function handleX402Pay(
 
         out += `\n📄 **Response Body**\n`;
         out += formatUntrustedBody(responseText, 8000);
-        return { text: out };
+        return { text: out, charged: paymentMade };
       },
       {
         durable: Boolean(input.idempotencyKey?.trim()),
         fingerprint: intent.fingerprint,
+        shouldSettle: (result) => result.charged,
       }
     );
 

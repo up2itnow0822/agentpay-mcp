@@ -457,6 +457,237 @@ describe('x402_pay tool', () => {
     expect(fetches).toBe(2);
   });
 
+  it('does not settle an unpaid 200 or 5xx into the spend-intent cache', async () => {
+    mockX402Fetch
+      .mockResolvedValueOnce(new Response('{"v":1}', { status: 200 }))
+      .mockResolvedValueOnce(new Response('{"v":2}', { status: 200 }))
+      .mockResolvedValueOnce(new Response('upstream', { status: 503 }))
+      .mockResolvedValueOnce(new Response('recovered', { status: 200 }));
+
+    const firstFree = await handleX402Pay({ url: 'https://api.example.com/free-cache' });
+    const secondFree = await handleX402Pay({ url: 'https://api.example.com/free-cache' });
+    const firstErr = await handleX402Pay({ url: 'https://api.example.com/flaky' });
+    const secondErr = await handleX402Pay({ url: 'https://api.example.com/flaky' });
+
+    expect(firstFree.content[0]!.text).toContain('{"v":1}');
+    expect(secondFree.content[0]!.text).toContain('{"v":2}');
+    expect(secondFree.content[0]!.text).not.toContain('Idempotent retry');
+    expect(firstErr.content[0]!.text).toContain('503');
+    expect(secondErr.content[0]!.text).toContain('200');
+    expect(secondErr.content[0]!.text).not.toContain('Idempotent retry');
+    expect(mockX402Fetch).toHaveBeenCalledTimes(4);
+  });
+
+  it('replays a paid result even when skip_session_check is set on the retry', async () => {
+    let fetches = 0;
+    mockCreateX402Client.mockImplementation((_wallet, config) => ({
+      fetch: async (url: string) => {
+        fetches += 1;
+        config?.onPaymentComplete?.({
+          timestamp: Date.now(),
+          service: 'api.example.com',
+          url,
+          amount: 1_000_000n,
+          token: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913' as `0x${string}`,
+          recipient: '0xfeedfacefeedfacefeedfacefeedfacefeedface' as `0x${string}`,
+          txHash: '0xc480941a588f513a6f4ecbcee0826ea66147b0f68488131572522830b4ac60fb' as `0x${string}`,
+          network: 'base:8453',
+          scheme: 'exact',
+          success: true,
+        });
+        return new Response('{"access":"granted"}', { status: 200 });
+      },
+      getTransactionLog: vi.fn(() => []),
+      getDailySpendSummary: vi.fn(() => ({ global: 0n, byService: {}, resetsAt: 0 })),
+      budgetTracker: {},
+    }));
+
+    const first = await handleX402Pay({ url: 'https://api.example.com/skip-replay' });
+    const retry = await handleX402Pay({
+      url: 'https://api.example.com/skip-replay',
+      skip_session_check: true,
+    });
+
+    expect(first.isError).toBeFalsy();
+    expect(retry.isError).toBeFalsy();
+    expect(retry.content[0]!.text).toContain('Idempotent retry');
+    expect(fetches).toBe(1);
+  });
+
+  it('rejects an invalid max_payment_eth before replaying a cached paid result', async () => {
+    let fetches = 0;
+    mockCreateX402Client.mockImplementation((_wallet, config) => ({
+      fetch: async (url: string) => {
+        fetches += 1;
+        config?.onPaymentComplete?.({
+          timestamp: Date.now(),
+          service: 'api.example.com',
+          url,
+          amount: 1_000_000n,
+          token: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913' as `0x${string}`,
+          recipient: '0xfeedfacefeedfacefeedfacefeedfacefeedface' as `0x${string}`,
+          txHash: '0xc480941a588f513a6f4ecbcee0826ea66147b0f68488131572522830b4ac60fb' as `0x${string}`,
+          network: 'base:8453',
+          scheme: 'exact',
+          success: true,
+        });
+        return new Response('{"access":"granted"}', { status: 200 });
+      },
+      getTransactionLog: vi.fn(() => []),
+      getDailySpendSummary: vi.fn(() => ({ global: 0n, byService: {}, resetsAt: 0 })),
+      budgetTracker: {},
+    }));
+
+    const first = await handleX402Pay({ url: 'https://api.example.com/cap-before-cache' });
+    const invalid = await handleX402Pay({
+      url: 'https://api.example.com/cap-before-cache',
+      max_payment_eth: 'invalid',
+    });
+    const negative = await handleX402Pay({
+      url: 'https://api.example.com/cap-before-cache',
+      max_payment_eth: '-1',
+    });
+
+    expect(first.isError).toBeFalsy();
+    expect(invalid.isError).toBe(true);
+    expect(invalid.content[0]!.text).toContain('Invalid max_payment_eth');
+    expect(negative.isError).toBe(true);
+    expect(negative.content[0]!.text).toContain('Invalid max_payment_eth');
+    expect(fetches).toBe(1);
+  });
+
+  it('does not replay a paid result when request-affecting headers change', async () => {
+    let fetches = 0;
+    mockCreateX402Client.mockImplementation((_wallet, config) => ({
+      fetch: async (url: string) => {
+        fetches += 1;
+        const txHash = fetches === 1
+          ? '0xc480941a588f513a6f4ecbcee0826ea66147b0f68488131572522830b4ac60fb'
+          : '0x66e6299fee8deb3c350e639edf1de966dbbf639b0a4834080e9a98c438b60340';
+        config?.onPaymentComplete?.({
+          timestamp: Date.now(),
+          service: 'api.example.com',
+          url,
+          amount: 1_000_000n,
+          token: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913' as `0x${string}`,
+          recipient: '0xfeedfacefeedfacefeedfacefeedfacefeedface' as `0x${string}`,
+          txHash: txHash as `0x${string}`,
+          network: 'base:8453',
+          scheme: 'exact',
+          success: true,
+        });
+        return new Response(`{"n":${fetches}}`, { status: 200 });
+      },
+      getTransactionLog: vi.fn(() => []),
+      getDailySpendSummary: vi.fn(() => ({ global: 0n, byService: {}, resetsAt: 0 })),
+      budgetTracker: {},
+    }));
+
+    const first = await handleX402Pay({
+      url: 'https://api.example.com/header-intent',
+      headers: { Authorization: 'Bearer alice' },
+    });
+    const second = await handleX402Pay({
+      url: 'https://api.example.com/header-intent',
+      headers: { Authorization: 'Bearer bob' },
+    });
+
+    expect(first.isError).toBeFalsy();
+    expect(second.isError).toBeFalsy();
+    expect(second.content[0]!.text).not.toContain('Idempotent retry');
+    expect(second.content[0]!.text).toContain(
+      '0x66e6299fee8deb3c350e639edf1de966dbbf639b0a4834080e9a98c438b60340'
+    );
+    expect(fetches).toBe(2);
+  });
+
+  it('fail-closes when the same idempotency key is reused with different headers', async () => {
+    let fetches = 0;
+    mockCreateX402Client.mockImplementation((_wallet, config) => ({
+      fetch: async (url: string) => {
+        fetches += 1;
+        config?.onPaymentComplete?.({
+          timestamp: Date.now(),
+          service: 'api.example.com',
+          url,
+          amount: 1_000_000n,
+          token: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913' as `0x${string}`,
+          recipient: '0xfeedfacefeedfacefeedfacefeedfacefeedface' as `0x${string}`,
+          txHash: '0xc480941a588f513a6f4ecbcee0826ea66147b0f68488131572522830b4ac60fb' as `0x${string}`,
+          network: 'base:8453',
+          scheme: 'exact',
+          success: true,
+        });
+        return new Response('{"ok":true}', { status: 200 });
+      },
+      getTransactionLog: vi.fn(() => []),
+      getDailySpendSummary: vi.fn(() => ({ global: 0n, byService: {}, resetsAt: 0 })),
+      budgetTracker: {},
+    }));
+
+    const first = await handleX402Pay({
+      url: 'https://api.example.com/keyed-headers',
+      headers: { Authorization: 'Bearer alice' },
+      idempotencyKey: 'invoice-1',
+    });
+    const conflict = await handleX402Pay({
+      url: 'https://api.example.com/keyed-headers',
+      headers: { Authorization: 'Bearer bob' },
+      idempotencyKey: 'invoice-1',
+    });
+
+    expect(first.isError).toBeFalsy();
+    expect(conflict.isError).toBe(true);
+    expect(conflict.content[0]!.text).toContain(
+      'already used with a different spend payload'
+    );
+    expect(fetches).toBe(1);
+  });
+
+  it('does not collide keyless x402 intents when url and body contain colons', async () => {
+    let fetches = 0;
+    mockCreateX402Client.mockImplementation((_wallet, config) => ({
+      fetch: async (url: string) => {
+        fetches += 1;
+        const txHash = fetches === 1
+          ? '0xc480941a588f513a6f4ecbcee0826ea66147b0f68488131572522830b4ac60fb'
+          : '0x66e6299fee8deb3c350e639edf1de966dbbf639b0a4834080e9a98c438b60340';
+        config?.onPaymentComplete?.({
+          timestamp: Date.now(),
+          service: 'api.example.com',
+          url,
+          amount: 1_000_000n,
+          token: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913' as `0x${string}`,
+          recipient: '0xfeedfacefeedfacefeedfacefeedfacefeedface' as `0x${string}`,
+          txHash: txHash as `0x${string}`,
+          network: 'base:8453',
+          scheme: 'exact',
+          success: true,
+        });
+        return new Response(`{"n":${fetches}}`, { status: 200 });
+      },
+      getTransactionLog: vi.fn(() => []),
+      getDailySpendSummary: vi.fn(() => ({ global: 0n, byService: {}, resetsAt: 0 })),
+      budgetTracker: {},
+    }));
+
+    const first = await handleX402Pay({
+      url: 'https://example.com/a',
+      method: 'POST',
+      body: 'b:c',
+    });
+    const second = await handleX402Pay({
+      url: 'https://example.com/a:b',
+      method: 'POST',
+      body: 'c',
+    });
+
+    expect(first.isError).toBeFalsy();
+    expect(second.isError).toBeFalsy();
+    expect(second.content[0]!.text).not.toContain('Idempotent retry');
+    expect(fetches).toBe(2);
+  });
+
   // ─── Happy path: POST request ──────────────────────────────────────────
 
   it('sends POST requests correctly', async () => {
