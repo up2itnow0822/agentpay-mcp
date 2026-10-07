@@ -1,9 +1,10 @@
 {
   "_comment": "Copy this snippet into ~/Library/Application Support/Claude/claude_desktop_config.json (macOS) or %APPDATA%\\Claude\\claude_desktop_config.json (Windows). Then restart Claude Desktop.",
   "mcpServers": {
-    "clawpay": {
-      "command": "clawpay-mcp",
-      "_install": "Run: npm install -g clawpay-mcp",
+    "agentpay": {
+      "command": "npx",
+      "args": ["-y", "agentpay-mcp"],
+      "_install": "Run: npx -y agentpay-mcp",
       "env": {
         "AGENT_PRIVATE_KEY": "0xYOUR_AGENT_PRIVATE_KEY_HERE",
         "AGENT_WALLET_ADDRESS": "0xYOUR_AGENT_WALLET_ADDRESS_HERE",
