@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [4.1.18] — 2026-10-07
+
+Docs and metadata only. The shipped code (`dist/`) is byte-identical to 4.1.17, so the server still reports `v4.1.17` at startup.
+
+### Changed
+
+- README: start on Base Sepolia, and remove claims the 4.1.x code does not back (the `MAX_TRANSACTION_USDC` / `DAILY_LIMIT_USDC` env caps, OAuth 2.1 + PKCE, SSE transport, Stripe MPP, and compliance/validation claims).
+- `claude_desktop_config.json` now runs `npx -y agentpay-mcp` instead of the deprecated `clawpay-mcp`.
+- `.env.example` is retitled AgentPay MCP.
+- package.json description synced with the README.
+
+---
+
 ## [4.0.0] — 2026-03-22
 
 ### Added
