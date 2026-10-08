@@ -8,6 +8,8 @@
  * replayed that settlement instead of broadcasting again.
  *
  * Same lifetime as spend-intent. Not a durable cross-process ledger.
+ * Keyless spend intents may settle again after SEND_TOKEN_INTENT_TTL_MS
+ * with the same intent key; each distinct tx hash is its own generation.
  */
 
 export const X402_SETTLEMENT_LOG_MAX = 256
@@ -24,14 +26,29 @@ export interface X402SettlementReceipt {
   lastReplayAt?: number
 }
 
-const byKey = new Map<string, X402SettlementReceipt>()
-const order: string[] = []
+const receipts: X402SettlementReceipt[] = []
+const latestByIntent = new Map<string, X402SettlementReceipt>()
+
+function sameTxHash(a: string, b: string): boolean {
+  return a.toLowerCase() === b.toLowerCase()
+}
 
 function evictIfNeeded(): void {
-  while (order.length > X402_SETTLEMENT_LOG_MAX) {
-    const evicted = order.shift()
-    if (evicted) {
-      byKey.delete(evicted)
+  while (receipts.length > X402_SETTLEMENT_LOG_MAX) {
+    const evicted = receipts.shift()
+    if (!evicted) {
+      continue
+    }
+    if (latestByIntent.get(evicted.intentKey) !== evicted) {
+      continue
+    }
+    latestByIntent.delete(evicted.intentKey)
+    for (let i = receipts.length - 1; i >= 0; i--) {
+      const candidate = receipts[i]
+      if (candidate?.intentKey === evicted.intentKey) {
+        latestByIntent.set(evicted.intentKey, candidate)
+        break
+      }
     }
   }
 }
@@ -44,17 +61,22 @@ export function recordX402Settlement(entry: {
   recipient: string
   txHash: string
 }): X402SettlementReceipt {
-  const existing = byKey.get(entry.intentKey)
-  if (existing) {
-    return existing
+  const existingSameHash = receipts.find(
+    (receipt) =>
+      receipt.intentKey === entry.intentKey &&
+      sameTxHash(receipt.txHash, entry.txHash)
+  )
+  if (existingSameHash) {
+    return existingSameHash
   }
+
   const receipt: X402SettlementReceipt = {
     ...entry,
     settledAt: Date.now(),
     replayCount: 0,
   }
-  byKey.set(entry.intentKey, receipt)
-  order.push(entry.intentKey)
+  receipts.push(receipt)
+  latestByIntent.set(entry.intentKey, receipt)
   evictIfNeeded()
   return receipt
 }
@@ -62,7 +84,7 @@ export function recordX402Settlement(entry: {
 export function recordX402SettlementReplay(
   intentKey: string
 ): X402SettlementReceipt | undefined {
-  const existing = byKey.get(intentKey)
+  const existing = latestByIntent.get(intentKey)
   if (!existing) {
     return undefined
   }
@@ -72,12 +94,10 @@ export function recordX402SettlementReplay(
 }
 
 export function listX402Settlements(): X402SettlementReceipt[] {
-  return order
-    .map((key) => byKey.get(key))
-    .filter((entry): entry is X402SettlementReceipt => entry !== undefined)
+  return receipts.slice()
 }
 
 export function _resetX402SettlementLog(): void {
-  byKey.clear()
-  order.length = 0
+  receipts.length = 0
+  latestByIntent.clear()
 }

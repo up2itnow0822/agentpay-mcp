@@ -82,7 +82,10 @@ import {
   UNTRUSTED_BODY_WARNING,
 } from '../src/utils/format.js';
 import { _resetSpendIntentStore } from '../src/utils/spend-intent.js';
-import { _resetX402SettlementLog } from '../src/utils/x402-receipt-log.js';
+import {
+  _resetX402SettlementLog,
+  recordX402Settlement,
+} from '../src/utils/x402-receipt-log.js';
 import { createX402Client, getActivityHistory, SpendingPolicy } from 'agentwallet-sdk';
 
 const mockGetActivityHistory = vi.mocked(getActivityHistory);
@@ -342,6 +345,13 @@ describe('x402_pay tool', () => {
     expect(retry.isError).toBe(true);
     expect(retry.content[0]!.text).toContain('did not return a transaction hash');
     expect(fetches).toBe(1);
+
+    mockGetActivityHistory.mockResolvedValueOnce([]);
+    const history = await handleGetTransactionHistory({});
+    expect(history.content[0]!.text).toContain('x402 Settlements');
+    expect(history.content[0]!.text).toContain(
+      '0xc480941a588f513a6f4ecbcee0826ea66147b0f68488131572522830b4ac60fb'
+    );
   });
 
   it('locks when a wallet write starts before onPaymentComplete', async () => {
@@ -1738,5 +1748,33 @@ describe('get_transaction_history tool', () => {
 
     expect(result.content[0]!.text).toContain('No transactions found');
     expect(result.content[0]!.text).not.toContain('x402 Settlements');
+  });
+
+  it('applies limit across on-chain activity and x402 receipts', async () => {
+    recordX402Settlement({
+      intentKey: 'x402_pay#limit-a',
+      url: 'https://api.example.com/a',
+      method: 'GET',
+      amount: '1',
+      recipient: '0xfeedfacefeedfacefeedfacefeedfacefeedface',
+      txHash: '0xc480941a588f513a6f4ecbcee0826ea66147b0f68488131572522830b4ac60fb',
+    });
+    recordX402Settlement({
+      intentKey: 'x402_pay#limit-b',
+      url: 'https://api.example.com/b',
+      method: 'GET',
+      amount: '2',
+      recipient: '0xfeedfacefeedfacefeedfacefeedfacefeedface',
+      txHash: '0x66e6299fee8deb3c350e639edf1de966dbbf639b0a4834080e9a98c438b60340',
+    });
+
+    const result = await handleGetTransactionHistory({ limit: 2 });
+    const text = result.content[0]!.text;
+    const onChainCount = (text.match(/Transaction Executed|Spend Policy Updated/g) ?? []).length;
+    const x402Count = (text.match(/\*\*x402 Payment\*\*/g) ?? []).length;
+
+    expect(onChainCount + x402Count).toBeLessThanOrEqual(2);
+    expect(x402Count).toBe(2);
+    expect(text).not.toContain('Transaction Executed');
   });
 });

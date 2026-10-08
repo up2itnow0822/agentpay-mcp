@@ -123,11 +123,13 @@ export async function handleGetTransactionHistory(
       ? allEntries
       : allEntries.filter((e) => e.type === eventType);
 
-    // Apply limit (most recent first after sort)
+    // Apply one shared limit across on-chain events and x402 receipts.
     const limit = input.limit ?? 20;
-    const recent = filtered.slice(-limit).reverse();
-    const x402Receipts =
-      eventType === 'all' ? listX402Settlements().slice(-limit).reverse() : [];
+    const x402All = eventType === 'all' ? listX402Settlements() : [];
+    const x402Kept = x402All.slice(-limit);
+    const remaining = Math.max(0, limit - x402Kept.length);
+    const recent = remaining > 0 ? filtered.slice(-remaining).reverse() : [];
+    const x402Receipts = x402Kept.reverse();
 
     if (recent.length === 0 && x402Receipts.length === 0) {
       return {

@@ -63,6 +63,26 @@ class X402UnsupportedRequirementError extends DefiniteSpendFailure {
   }
 }
 
+function persistX402Settlement(entry: {
+  intentKey: string;
+  url: string;
+  method: string;
+  amount: bigint | string;
+  recipient: string;
+  txHash: string;
+}): string {
+  const txHash = requireSettlementHash(entry.txHash, 'x402_pay');
+  recordX402Settlement({
+    intentKey: entry.intentKey,
+    url: entry.url,
+    method: entry.method,
+    amount: typeof entry.amount === 'bigint' ? entry.amount.toString() : entry.amount,
+    recipient: entry.recipient,
+    txHash,
+  });
+  return txHash;
+}
+
 type X402PaymentAccept = {
   scheme?: string;
   network?: string;
@@ -471,6 +491,19 @@ export async function handleX402Pay(
           responseText = paid.responseText;
         } catch (error: unknown) {
           if (paymentMade) {
+            try {
+              paymentTxHash = persistX402Settlement({
+                intentKey: intent.key,
+                url: input.url,
+                method,
+                amount: paymentAmount,
+                recipient: paymentRecipient,
+                txHash: paymentTxHash,
+              });
+            } catch {
+              // Still fail closed on the post-settlement error even if the
+              // callback hash cannot be recorded as a history receipt.
+            }
             throw new PostSettlementSpendError({
               txHash: paymentTxHash,
               amount: paymentAmount,
@@ -497,12 +530,11 @@ export async function handleX402Pay(
         }
 
         if (paymentMade) {
-          paymentTxHash = requireSettlementHash(paymentTxHash, 'x402_pay');
-          recordX402Settlement({
+          paymentTxHash = persistX402Settlement({
             intentKey: intent.key,
             url: input.url,
             method,
-            amount: paymentAmount.toString(),
+            amount: paymentAmount,
             recipient: paymentRecipient,
             txHash: paymentTxHash,
           });

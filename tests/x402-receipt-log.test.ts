@@ -15,7 +15,7 @@ describe('x402 settlement receipt log', () => {
     _resetX402SettlementLog();
   });
 
-  it('records a settlement once per intent key', () => {
+  it('deduplicates the same settlement tx hash for an intent key', () => {
     recordX402Settlement({
       intentKey: 'x402_pay#invoice-1',
       url: 'https://api.example.com/premium',
@@ -30,12 +30,40 @@ describe('x402 settlement receipt log', () => {
       method: 'POST',
       amount: '2',
       recipient: '0xdead',
-      txHash: TX_B,
+      txHash: TX_A,
     });
 
     expect(listX402Settlements()).toHaveLength(1);
     expect(second.txHash).toBe(TX_A);
     expect(second.url).toBe('https://api.example.com/premium');
+  });
+
+  it('records a new generation when the same intent settles with a new tx hash', () => {
+    recordX402Settlement({
+      intentKey: 'x402_pay#invoice-1',
+      url: 'https://api.example.com/premium',
+      method: 'GET',
+      amount: '1000000',
+      recipient: '0xfeedfacefeedfacefeedfacefeedfacefeedface',
+      txHash: TX_A,
+    });
+    const second = recordX402Settlement({
+      intentKey: 'x402_pay#invoice-1',
+      url: 'https://api.example.com/premium',
+      method: 'GET',
+      amount: '1000000',
+      recipient: '0xfeedfacefeedfacefeedfacefeedfacefeedface',
+      txHash: TX_B,
+    });
+    const replayed = recordX402SettlementReplay('x402_pay#invoice-1');
+    const receipts = listX402Settlements();
+
+    expect(receipts).toHaveLength(2);
+    expect(receipts[0]?.txHash).toBe(TX_A);
+    expect(receipts[0]?.replayCount).toBe(0);
+    expect(second.txHash).toBe(TX_B);
+    expect(replayed?.txHash).toBe(TX_B);
+    expect(replayed?.replayCount).toBe(1);
   });
 
   it('increments replay count without adding a second tx', () => {
