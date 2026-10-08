@@ -11,8 +11,15 @@ import {
   chainName,
   formatEth,
   formatError,
+  sanitizeUntrustedInline,
+  sanitizeUntrustedUrl,
 } from '../utils/format.js';
 import type { ActivityEntry } from 'agentwallet-sdk';
+import {
+  listX402Settlements,
+  type X402SettlementReceipt,
+} from '../utils/x402-receipt-log.js';
+import type { Hash } from 'viem';
 
 // ─── Schema ────────────────────────────────────────────────────────────────
 
@@ -47,10 +54,12 @@ export type GetTransactionHistoryInput = z.infer<typeof GetTransactionHistorySch
 export const getTransactionHistoryTool = {
   name: 'get_transaction_history',
   description:
-    'Retrieve the wallet\'s recent on-chain transaction history from event logs. ' +
+    'Retrieve the wallet\'s recent on-chain transaction history from event logs, ' +
+    'plus process-lifetime x402_pay settlements (tx hash, payee, amount, URL, replay count). ' +
     'Shows executions, queued transactions, approvals, cancellations, ' +
     'spend policy updates, and operator changes. ' +
-    'Filter by event type or block range for targeted queries.',
+    'Filter by event type or block range for targeted queries. ' +
+    'x402 settlement rows appear when event_type is all.',
   inputSchema: {
     type: 'object' as const,
     properties: {
@@ -117,8 +126,10 @@ export async function handleGetTransactionHistory(
     // Apply limit (most recent first after sort)
     const limit = input.limit ?? 20;
     const recent = filtered.slice(-limit).reverse();
+    const x402Receipts =
+      eventType === 'all' ? listX402Settlements().slice(-limit).reverse() : [];
 
-    if (recent.length === 0) {
+    if (recent.length === 0 && x402Receipts.length === 0) {
       return {
         content: [
           textContent(
@@ -132,14 +143,29 @@ export async function handleGetTransactionHistory(
       };
     }
 
-    let out = `📜 **Transaction History** (${recent.length} entries)\n`;
+    let out = `📜 **Transaction History** (${recent.length} on-chain` +
+      (x402Receipts.length > 0 ? `, ${x402Receipts.length} x402` : '') +
+      `)\n`;
     out += `  Chain:       ${chainName(config.chainId)}\n`;
     out += `  Block range: ${fromBlock?.toString() ?? '0'} → ${toBlock?.toString() ?? 'latest'}\n`;
     out += `  Filter:      ${eventType}\n\n`;
 
-    for (const entry of recent) {
-      out += formatActivityEntry(entry, config.chainId);
-      out += '\n';
+    if (recent.length === 0) {
+      out += `No on-chain AgentAccount events in the queried range.\n\n`;
+    } else {
+      for (const entry of recent) {
+        out += formatActivityEntry(entry, config.chainId);
+        out += '\n';
+      }
+    }
+
+    if (x402Receipts.length > 0) {
+      out += `💳 **x402 Settlements** (process lifetime, ${x402Receipts.length})\n`;
+      out += `   Identical MCP retries increment Replay; they do not add a second tx.\n\n`;
+      for (const receipt of x402Receipts) {
+        out += formatX402Settlement(receipt, config.chainId);
+        out += '\n';
+      }
     }
 
     return { content: [textContent(out)] };
@@ -152,6 +178,19 @@ export async function handleGetTransactionHistory(
 }
 
 // ─── Entry formatter ───────────────────────────────────────────────────────
+
+function formatX402Settlement(receipt: X402SettlementReceipt, chainId: number): string {
+  const txUrl = explorerTxUrl(receipt.txHash as Hash, chainId);
+  let out = `💳 **x402 Payment**\n`;
+  out += `   URL:     ${sanitizeUntrustedUrl(receipt.url)}\n`;
+  out += `   Method:  ${sanitizeUntrustedInline(receipt.method, 16)}\n`;
+  out += `   Amount:  ${sanitizeUntrustedInline(receipt.amount, 64)} (base units)\n`;
+  out += `   Payee:   ${sanitizeUntrustedInline(receipt.recipient, 64)}\n`;
+  out += `   TX:      ${sanitizeUntrustedInline(receipt.txHash, 80)}\n`;
+  out += `   🔗 ${txUrl}\n`;
+  out += `   Replay:  ${receipt.replayCount}\n`;
+  return out;
+}
 
 function formatActivityEntry(entry: ActivityEntry, chainId: number): string {
   const emoji = typeEmoji(entry.type);

@@ -50,6 +50,10 @@ import {
   withSpendIntent,
   x402PayIntentIdentity,
 } from '../utils/spend-intent.js';
+import {
+  recordX402Settlement,
+  recordX402SettlementReplay,
+} from '../utils/x402-receipt-log.js';
 
 /** 402 offers no payable Base option. Retryable; nothing was broadcast. */
 class X402UnsupportedRequirementError extends DefiniteSpendFailure {
@@ -493,7 +497,15 @@ export async function handleX402Pay(
         }
 
         if (paymentMade) {
-          requireSettlementHash(paymentTxHash, 'x402_pay');
+          paymentTxHash = requireSettlementHash(paymentTxHash, 'x402_pay');
+          recordX402Settlement({
+            intentKey: intent.key,
+            url: input.url,
+            method,
+            amount: paymentAmount.toString(),
+            recipient: paymentRecipient,
+            txHash: paymentTxHash,
+          });
         }
 
         let out = `🌐 **x402 Fetch Result**\n\n`;
@@ -527,6 +539,10 @@ export async function handleX402Pay(
         shouldSettle: (result) => result.charged,
       }
     );
+
+    if (replayed && value.charged) {
+      recordX402SettlementReplay(intent.key);
+    }
 
     const text = replayed
       ? `${value.text}\n♻️ Idempotent retry: original x402 result replayed; no second settlement.\n`

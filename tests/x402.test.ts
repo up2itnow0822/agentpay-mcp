@@ -82,6 +82,7 @@ import {
   UNTRUSTED_BODY_WARNING,
 } from '../src/utils/format.js';
 import { _resetSpendIntentStore } from '../src/utils/spend-intent.js';
+import { _resetX402SettlementLog } from '../src/utils/x402-receipt-log.js';
 import { createX402Client, getActivityHistory, SpendingPolicy } from 'agentwallet-sdk';
 
 const mockGetActivityHistory = vi.mocked(getActivityHistory);
@@ -97,6 +98,7 @@ describe('x402_pay tool', () => {
     mockCreateX402Client.mockImplementation(() => mockX402Client);
     _resetPolicyStore();
     _resetSpendIntentStore();
+    _resetX402SettlementLog();
   });
 
   afterEach(() => {
@@ -1554,6 +1556,10 @@ describe('get_transaction_history tool', () => {
     vi.clearAllMocks();
     MOCK_WALLET.publicClient.getBlockNumber.mockResolvedValue(5000n);
     mockGetActivityHistory.mockResolvedValue(MOCK_ENTRIES);
+    _resetSpendIntentStore();
+    _resetX402SettlementLog();
+    mockCreateX402Client.mockReset();
+    mockCreateX402Client.mockImplementation(() => mockX402Client);
   });
 
   // ─── Happy path ────────────────────────────────────────────────────────
@@ -1651,5 +1657,86 @@ describe('get_transaction_history tool', () => {
     // Either succeeds with fallback or fails cleanly
     expect(result.content).toHaveLength(1);
     expect(result.content[0]!.text).toBeTruthy();
+  });
+
+  it('shows a process-lifetime x402 settlement when on-chain history is empty', async () => {
+    mockGetActivityHistory.mockResolvedValueOnce([]);
+    mockCreateX402Client.mockImplementation((_wallet, config) => ({
+      fetch: async (url: string) => {
+        config?.onPaymentComplete?.({
+          timestamp: Date.now(),
+          service: 'api.example.com',
+          url,
+          amount: 1_000_000n,
+          token: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913' as `0x${string}`,
+          recipient: '0xfeedfacefeedfacefeedfacefeedfacefeedface' as `0x${string}`,
+          txHash: '0xc480941a588f513a6f4ecbcee0826ea66147b0f68488131572522830b4ac60fb' as `0x${string}`,
+          network: 'base:8453',
+          scheme: 'exact',
+          success: true,
+        });
+        return new Response('{"ok":true}', { status: 200 });
+      },
+      getTransactionLog: vi.fn(() => []),
+      getDailySpendSummary: vi.fn(() => ({ global: 0n, byService: {}, resetsAt: 0 })),
+      budgetTracker: {},
+    }));
+
+    await handleX402Pay({ url: 'https://api.example.com/premium-history' });
+    const result = await handleGetTransactionHistory({});
+    const text = result.content[0]!.text;
+
+    expect(result.isError).toBeFalsy();
+    expect(text).not.toContain('No transactions found');
+    expect(text).toContain('x402 Settlements');
+    expect(text).toContain('https://api.example.com/premium-history');
+    expect(text).toContain('0xc480941a588f513a6f4ecbcee0826ea66147b0f68488131572522830b4ac60fb');
+    expect(text).toContain('Replay:  0');
+  });
+
+  it('increments x402 replay count on an identical retry without a second tx', async () => {
+    mockGetActivityHistory.mockResolvedValue([]);
+    mockCreateX402Client.mockImplementation((_wallet, config) => ({
+      fetch: async (url: string) => {
+        config?.onPaymentComplete?.({
+          timestamp: Date.now(),
+          service: 'api.example.com',
+          url,
+          amount: 1_000_000n,
+          token: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913' as `0x${string}`,
+          recipient: '0xfeedfacefeedfacefeedfacefeedfacefeedface' as `0x${string}`,
+          txHash: '0xc480941a588f513a6f4ecbcee0826ea66147b0f68488131572522830b4ac60fb' as `0x${string}`,
+          network: 'base:8453',
+          scheme: 'exact',
+          success: true,
+        });
+        return new Response('{"ok":true}', { status: 200 });
+      },
+      getTransactionLog: vi.fn(() => []),
+      getDailySpendSummary: vi.fn(() => ({ global: 0n, byService: {}, resetsAt: 0 })),
+      budgetTracker: {},
+    }));
+
+    await handleX402Pay({ url: 'https://api.example.com/premium-replay-history' });
+    await handleX402Pay({ url: 'https://api.example.com/premium-replay-history' });
+    const result = await handleGetTransactionHistory({});
+    const text = result.content[0]!.text;
+    const txMatches = text.match(/0xc480941a588f513a6f4ecbcee0826ea66147b0f68488131572522830b4ac60fb/g) ?? [];
+
+    expect(text).toContain('Replay:  1');
+    expect(text).not.toContain('Replay:  0');
+    expect(txMatches.length).toBeGreaterThanOrEqual(1);
+    expect((text.match(/\*\*x402 Payment\*\*/g) ?? []).length).toBe(1);
+  });
+
+  it('does not record an x402 settlement when no payment was made', async () => {
+    mockGetActivityHistory.mockResolvedValueOnce([]);
+    mockX402Fetch.mockResolvedValueOnce(new Response('ok', { status: 200 }));
+
+    await handleX402Pay({ url: 'https://api.example.com/free' });
+    const result = await handleGetTransactionHistory({});
+
+    expect(result.content[0]!.text).toContain('No transactions found');
+    expect(result.content[0]!.text).not.toContain('x402 Settlements');
   });
 });
