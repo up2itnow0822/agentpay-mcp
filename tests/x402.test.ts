@@ -1777,4 +1777,49 @@ describe('get_transaction_history tool', () => {
     expect(x402Count).toBe(2);
     expect(text).not.toContain('Transaction Executed');
   });
+
+  it('returns cached x402 settlements when the RPC history query fails', async () => {
+    recordX402Settlement({
+      intentKey: 'x402_pay#rpc-outage',
+      url: 'https://api.example.com/paid-during-outage',
+      method: 'GET',
+      amount: '1000000',
+      recipient: '0xfeedfacefeedfacefeedfacefeedfacefeedface',
+      txHash: '0xc480941a588f513a6f4ecbcee0826ea66147b0f68488131572522830b4ac60fb',
+    });
+    mockGetActivityHistory.mockRejectedValueOnce(new Error('RPC timeout'));
+
+    const result = await handleGetTransactionHistory({});
+    const text = result.content[0]!.text;
+
+    expect(result.isError).toBeFalsy();
+    expect(text).toContain('x402 Settlements');
+    expect(text).toContain('https://api.example.com/paid-during-outage');
+    expect(text).toContain('0xc480941a588f513a6f4ecbcee0826ea66147b0f68488131572522830b4ac60fb');
+    expect(text).toContain('On-chain AgentAccount history unavailable');
+    expect(text).toContain('RPC timeout');
+    expect(text).not.toContain('Transaction Executed');
+  });
+
+  it('returns cached x402 settlements when getBlockNumber fails', async () => {
+    recordX402Settlement({
+      intentKey: 'x402_pay#block-outage',
+      url: 'https://api.example.com/paid-without-head',
+      method: 'GET',
+      amount: '2',
+      recipient: '0xfeedfacefeedfacefeedfacefeedfacefeedface',
+      txHash: '0x66e6299fee8deb3c350e639edf1de966dbbf639b0a4834080e9a98c438b60340',
+    });
+    MOCK_WALLET.publicClient.getBlockNumber.mockRejectedValueOnce(new Error('RPC unavailable'));
+
+    const result = await handleGetTransactionHistory({});
+    const text = result.content[0]!.text;
+
+    expect(result.isError).toBeFalsy();
+    expect(text).toContain('x402 Settlements');
+    expect(text).toContain('https://api.example.com/paid-without-head');
+    expect(text).toContain('0x66e6299fee8deb3c350e639edf1de966dbbf639b0a4834080e9a98c438b60340');
+    expect(text).toContain('On-chain AgentAccount history unavailable');
+    expect(text).toContain('RPC unavailable');
+  });
 });

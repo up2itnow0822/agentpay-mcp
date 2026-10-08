@@ -93,43 +93,50 @@ export async function handleGetTransactionHistory(
   input: GetTransactionHistoryInput
 ): Promise<{ content: Array<{ type: 'text'; text: string }>; isError?: boolean }> {
   try {
-    const wallet = getWallet();
     const config = getConfig();
+    const eventType = input.event_type ?? 'all';
+    const limit = input.limit ?? 20;
+    const x402Receipts =
+      eventType === 'all' ? listX402Settlements().slice(-limit).reverse() : [];
+    const remaining = Math.max(0, limit - x402Receipts.length);
 
-    // Default: look back ~1000 blocks if no range specified
     let fromBlock: bigint | undefined;
     let toBlock: bigint | undefined;
-
     if (input.from_block) {
       fromBlock = BigInt(input.from_block);
-    } else {
-      // Get current block and look back ~1000 blocks
-      const latest = await wallet.publicClient.getBlockNumber();
-      fromBlock = latest > 1000n ? latest - 1000n : 0n;
     }
-
     if (input.to_block) {
       toBlock = BigInt(input.to_block);
     }
 
-    const allEntries = await getActivityHistory(wallet, {
-      fromBlock,
-      toBlock,
-    });
+    let recent: ActivityEntry[] = [];
+    let onChainUnavailable: string | undefined;
 
-    // Filter by event type
-    const eventType = input.event_type ?? 'all';
-    const filtered = eventType === 'all'
-      ? allEntries
-      : allEntries.filter((e) => e.type === eventType);
-
-    // Apply one shared limit across on-chain events and x402 receipts.
-    const limit = input.limit ?? 20;
-    const x402All = eventType === 'all' ? listX402Settlements() : [];
-    const x402Kept = x402All.slice(-limit);
-    const remaining = Math.max(0, limit - x402Kept.length);
-    const recent = remaining > 0 ? filtered.slice(-remaining).reverse() : [];
-    const x402Receipts = x402Kept.reverse();
+    try {
+      const wallet = getWallet();
+      if (fromBlock === undefined) {
+        const latest = await wallet.publicClient.getBlockNumber();
+        fromBlock = latest > 1000n ? latest - 1000n : 0n;
+      }
+      const allEntries = await getActivityHistory(wallet, {
+        fromBlock,
+        toBlock,
+      });
+      const filtered =
+        eventType === 'all'
+          ? allEntries
+          : allEntries.filter((entry) => entry.type === eventType);
+      recent = remaining > 0 ? filtered.slice(-remaining).reverse() : [];
+    } catch (error: unknown) {
+      if (x402Receipts.length === 0) {
+        return {
+          content: [textContent(formatError(error, 'get_transaction_history'))],
+          isError: true,
+        };
+      }
+      onChainUnavailable =
+        error instanceof Error ? error.message : String(error);
+    }
 
     if (recent.length === 0 && x402Receipts.length === 0) {
       return {
@@ -145,15 +152,27 @@ export async function handleGetTransactionHistory(
       };
     }
 
+    const fromLabel =
+      fromBlock?.toString() ?? (onChainUnavailable ? 'unavailable' : '0');
+    const toLabel =
+      toBlock?.toString() ?? (onChainUnavailable && !input.to_block ? 'unavailable' : 'latest');
+
     let out = `📜 **Transaction History** (${recent.length} on-chain` +
       (x402Receipts.length > 0 ? `, ${x402Receipts.length} x402` : '') +
       `)\n`;
     out += `  Chain:       ${chainName(config.chainId)}\n`;
-    out += `  Block range: ${fromBlock?.toString() ?? '0'} → ${toBlock?.toString() ?? 'latest'}\n`;
-    out += `  Filter:      ${eventType}\n\n`;
+    out += `  Block range: ${fromLabel} → ${toLabel}\n`;
+    out += `  Filter:      ${eventType}\n`;
+    if (onChainUnavailable) {
+      out += `  ⚠️ On-chain AgentAccount history unavailable; showing process-lifetime x402 settlements only.\n`;
+      out += `  Reason: ${sanitizeUntrustedInline(onChainUnavailable, 160)}\n`;
+    }
+    out += '\n';
 
     if (recent.length === 0) {
-      out += `No on-chain AgentAccount events in the queried range.\n\n`;
+      out += onChainUnavailable
+        ? `On-chain AgentAccount events were not loaded.\n\n`
+        : `No on-chain AgentAccount events in the queried range.\n\n`;
     } else {
       for (const entry of recent) {
         out += formatActivityEntry(entry, config.chainId);
