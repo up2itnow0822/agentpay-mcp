@@ -4,7 +4,7 @@
  * createX402Client is constructed per x402_pay call, so the SDK
  * transaction log is discarded when the handler returns. This log keeps
  * the last settled x402 payments so get_transaction_history can show the
- * golden path (tx hash, payee, amount, URL) and whether MCP retries
+ * golden path (tx hash, payee, amount, token, URL) and whether MCP retries
  * replayed that settlement instead of broadcasting again.
  *
  * Same lifetime as spend-intent. Not a durable cross-process ledger.
@@ -19,6 +19,7 @@ export interface X402SettlementReceipt {
   url: string
   method: string
   amount: string
+  token: string
   recipient: string
   txHash: string
   settledAt: number
@@ -58,6 +59,7 @@ export function recordX402Settlement(entry: {
   url: string
   method: string
   amount: string
+  token: string
   recipient: string
   txHash: string
 }): X402SettlementReceipt {

@@ -56,7 +56,7 @@ export const getTransactionHistoryTool = {
   name: 'get_transaction_history',
   description:
     'Retrieve the wallet\'s recent on-chain transaction history from event logs, ' +
-    'plus process-lifetime x402_pay settlements (tx hash, payee, amount, URL, replay count). ' +
+    'plus process-lifetime x402_pay settlements (tx hash, payee, amount, token, URL, replay count). ' +
     'Shows executions, queued transactions, approvals, cancellations, ' +
     'spend policy updates, and operator changes. ' +
     'Filter by event type or block range for targeted queries. ' +
@@ -208,6 +208,7 @@ function formatX402Settlement(receipt: X402SettlementReceipt, chainId: number): 
   out += `   URL:     ${sanitizeUntrustedUrl(receipt.url)}\n`;
   out += `   Method:  ${sanitizeUntrustedInline(receipt.method, 16)}\n`;
   out += `   Amount:  ${sanitizeUntrustedInline(receipt.amount, 64)} (base units)\n`;
+  out += `   Token:   ${sanitizeUntrustedInline(receipt.token || 'unknown', 64)}\n`;
   out += `   Payee:   ${sanitizeUntrustedInline(receipt.recipient, 64)}\n`;
   out += `   TX:      ${sanitizeUntrustedInline(receipt.txHash, 80)}\n`;
   out += `   🔗 ${txUrl}\n`;

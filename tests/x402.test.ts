@@ -1702,6 +1702,42 @@ describe('get_transaction_history tool', () => {
     expect(text).toContain('https://api.example.com/premium-history');
     expect(text).toContain('0xc480941a588f513a6f4ecbcee0826ea66147b0f68488131572522830b4ac60fb');
     expect(text).toContain('Replay:  0');
+    expect(text).toContain('Token:   0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913');
+  });
+
+  it('records the paid asset so DAI amounts are reconcilable in history', async () => {
+    const dai = '0x50c5725949A6F0c72E6C4a641F24049A917Db0Cb' as `0x${string}`;
+    mockGetActivityHistory.mockResolvedValueOnce([]);
+    mockCreateX402Client.mockImplementation((_wallet, config) => ({
+      fetch: async (url: string) => {
+        config?.onPaymentComplete?.({
+          timestamp: Date.now(),
+          service: 'api.example.com',
+          url,
+          amount: 1_000_000n,
+          token: dai,
+          recipient: '0xfeedfacefeedfacefeedfacefeedfacefeedface' as `0x${string}`,
+          txHash: '0xc480941a588f513a6f4ecbcee0826ea66147b0f68488131572522830b4ac60fb' as `0x${string}`,
+          network: 'base:8453',
+          scheme: 'exact',
+          success: true,
+        });
+        return new Response('{"ok":true}', { status: 200 });
+      },
+      getTransactionLog: vi.fn(() => []),
+      getDailySpendSummary: vi.fn(() => ({ global: 0n, byService: {}, resetsAt: 0 })),
+      budgetTracker: {},
+    }));
+
+    await handleX402Pay({ url: 'https://api.example.com/premium-dai' });
+    const result = await handleGetTransactionHistory({});
+    const text = result.content[0]!.text;
+
+    expect(result.isError).toBeFalsy();
+    expect(text).toContain('x402 Settlements');
+    expect(text).toContain('Amount:  1000000 (base units)');
+    expect(text).toContain(`Token:   ${dai}`);
+    expect(text).toContain('https://api.example.com/premium-dai');
   });
 
   it('increments x402 replay count on an identical retry without a second tx', async () => {
@@ -1756,6 +1792,7 @@ describe('get_transaction_history tool', () => {
       url: 'https://api.example.com/a',
       method: 'GET',
       amount: '1',
+      token: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913',
       recipient: '0xfeedfacefeedfacefeedfacefeedfacefeedface',
       txHash: '0xc480941a588f513a6f4ecbcee0826ea66147b0f68488131572522830b4ac60fb',
     });
@@ -1764,6 +1801,7 @@ describe('get_transaction_history tool', () => {
       url: 'https://api.example.com/b',
       method: 'GET',
       amount: '2',
+      token: '0x50c5725949A6F0c72E6C4a641F24049A917Db0Cb',
       recipient: '0xfeedfacefeedfacefeedfacefeedfacefeedface',
       txHash: '0x66e6299fee8deb3c350e639edf1de966dbbf639b0a4834080e9a98c438b60340',
     });
@@ -1784,6 +1822,7 @@ describe('get_transaction_history tool', () => {
       url: 'https://api.example.com/paid-during-outage',
       method: 'GET',
       amount: '1000000',
+      token: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913',
       recipient: '0xfeedfacefeedfacefeedfacefeedfacefeedface',
       txHash: '0xc480941a588f513a6f4ecbcee0826ea66147b0f68488131572522830b4ac60fb',
     });
@@ -1813,6 +1852,7 @@ describe('get_transaction_history tool', () => {
       url: 'https://api.example.com/paid-without-head',
       method: 'GET',
       amount: '2',
+      token: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913',
       recipient: '0xfeedfacefeedfacefeedfacefeedfacefeedface',
       txHash: '0x66e6299fee8deb3c350e639edf1de966dbbf639b0a4834080e9a98c438b60340',
     });
@@ -1843,6 +1883,7 @@ describe('get_transaction_history tool', () => {
       url: 'https://api.example.com/paid-hostile-rpc',
       method: 'GET',
       amount: '3',
+      token: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913',
       recipient: '0xfeedfacefeedfacefeedfacefeedfacefeedface',
       txHash: '0xc480941a588f513a6f4ecbcee0826ea66147b0f68488131572522830b4ac60fb',
     });

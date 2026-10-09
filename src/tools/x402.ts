@@ -68,6 +68,7 @@ function persistX402Settlement(entry: {
   url: string;
   method: string;
   amount: bigint | string;
+  token: string;
   recipient: string;
   txHash: string;
 }): string {
@@ -77,6 +78,7 @@ function persistX402Settlement(entry: {
     url: entry.url,
     method: entry.method,
     amount: typeof entry.amount === 'bigint' ? entry.amount.toString() : entry.amount,
+    token: entry.token,
     recipient: entry.recipient,
     txHash,
   });
@@ -399,6 +401,7 @@ export async function handleX402Pay(
         let paymentAmount = 0n;
         let paymentTxHash = '';
         let paymentRecipient = '';
+        let paymentToken = '';
 
         // Cap enforcement happens in onBeforePayment using the selected asset's
         // decimals — never compare USDC base units against ETH-wei.
@@ -455,6 +458,7 @@ export async function handleX402Pay(
             paymentAmount = log.amount;
             paymentTxHash = log.txHash;
             paymentRecipient = log.recipient;
+            paymentToken = log.token;
           },
         });
 
@@ -497,6 +501,7 @@ export async function handleX402Pay(
                 url: input.url,
                 method,
                 amount: paymentAmount,
+                token: paymentToken,
                 recipient: paymentRecipient,
                 txHash: paymentTxHash,
               });
@@ -535,6 +540,7 @@ export async function handleX402Pay(
             url: input.url,
             method,
             amount: paymentAmount,
+            token: paymentToken,
             recipient: paymentRecipient,
             txHash: paymentTxHash,
           });
