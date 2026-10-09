@@ -50,6 +50,10 @@ import {
   withSpendIntent,
   x402PayIntentIdentity,
 } from '../utils/spend-intent.js';
+import {
+  recordX402Settlement,
+  recordX402SettlementReplay,
+} from '../utils/x402-receipt-log.js';
 
 /** 402 offers no payable Base option. Retryable; nothing was broadcast. */
 class X402UnsupportedRequirementError extends DefiniteSpendFailure {
@@ -57,6 +61,28 @@ class X402UnsupportedRequirementError extends DefiniteSpendFailure {
     super(body);
     this.name = 'X402UnsupportedRequirementError';
   }
+}
+
+function persistX402Settlement(entry: {
+  intentKey: string;
+  url: string;
+  method: string;
+  amount: bigint | string;
+  token: string;
+  recipient: string;
+  txHash: string;
+}): string {
+  const txHash = requireSettlementHash(entry.txHash, 'x402_pay');
+  recordX402Settlement({
+    intentKey: entry.intentKey,
+    url: entry.url,
+    method: entry.method,
+    amount: typeof entry.amount === 'bigint' ? entry.amount.toString() : entry.amount,
+    token: entry.token,
+    recipient: entry.recipient,
+    txHash,
+  });
+  return txHash;
 }
 
 type X402PaymentAccept = {
@@ -375,6 +401,7 @@ export async function handleX402Pay(
         let paymentAmount = 0n;
         let paymentTxHash = '';
         let paymentRecipient = '';
+        let paymentToken = '';
 
         // Cap enforcement happens in onBeforePayment using the selected asset's
         // decimals — never compare USDC base units against ETH-wei.
@@ -431,6 +458,7 @@ export async function handleX402Pay(
             paymentAmount = log.amount;
             paymentTxHash = log.txHash;
             paymentRecipient = log.recipient;
+            paymentToken = log.token;
           },
         });
 
@@ -467,6 +495,20 @@ export async function handleX402Pay(
           responseText = paid.responseText;
         } catch (error: unknown) {
           if (paymentMade) {
+            try {
+              paymentTxHash = persistX402Settlement({
+                intentKey: intent.key,
+                url: input.url,
+                method,
+                amount: paymentAmount,
+                token: paymentToken,
+                recipient: paymentRecipient,
+                txHash: paymentTxHash,
+              });
+            } catch {
+              // Still fail closed on the post-settlement error even if the
+              // callback hash cannot be recorded as a history receipt.
+            }
             throw new PostSettlementSpendError({
               txHash: paymentTxHash,
               amount: paymentAmount,
@@ -493,7 +535,15 @@ export async function handleX402Pay(
         }
 
         if (paymentMade) {
-          requireSettlementHash(paymentTxHash, 'x402_pay');
+          paymentTxHash = persistX402Settlement({
+            intentKey: intent.key,
+            url: input.url,
+            method,
+            amount: paymentAmount,
+            token: paymentToken,
+            recipient: paymentRecipient,
+            txHash: paymentTxHash,
+          });
         }
 
         let out = `🌐 **x402 Fetch Result**\n\n`;
@@ -527,6 +577,10 @@ export async function handleX402Pay(
         shouldSettle: (result) => result.charged,
       }
     );
+
+    if (replayed && value.charged) {
+      recordX402SettlementReplay(intent.key);
+    }
 
     const text = replayed
       ? `${value.text}\n♻️ Idempotent retry: original x402 result replayed; no second settlement.\n`
