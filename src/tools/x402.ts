@@ -11,7 +11,6 @@
  * cache; use a new idempotencyKey for a second settlement.
  */
 import { z } from 'zod';
-import { createX402Client } from 'agentwallet-sdk';
 import { getWallet, getConfig } from '../utils/client.js';
 import {
   textContent,
@@ -28,18 +27,11 @@ import {
 import {
   describeSupportedX402Networks,
   isTvmOrTonNetwork,
-  supportedX402NetworksForChainId,
 } from '../utils/x402-networks.js';
-import {
-  assertPayableX402Recipient,
-  assertParsableX402Amount,
-  maxPaymentBaseUnits,
-  resolveX402AssetDecimals,
-} from '../utils/payment-cap.js';
+import { createAgentPayX402Client } from '../utils/x402-client.js';
 import { findSessionForUrl, buildSessionHeaders } from './session.js';
 import { fetchWithSessionCredentials } from '../utils/session-fetch.js';
 import { recordSessionCall } from '../session/manager.js';
-import { enforceSpendPolicy } from './budget.js';
 import {
   DefiniteSpendFailure,
   IDEMPOTENCY_KEY_JSON_SCHEMA,
@@ -420,64 +412,24 @@ export async function handleX402Pay(
 
         // Cap enforcement happens in onBeforePayment using the selected asset's
         // decimals — never compare USDC base units against ETH-wei.
-        const x402Client = createX402Client(wallet, {
-          autoPay: true,
-          maxRetries: 1,
-          supportedNetworks: supportedX402NetworksForChainId(config.chainId),
-          onBeforePayment: async (req, _url) => {
-            // The 402's payTo is remote-controlled and ends up inside error
-            // messages (SDK allowlist rejection, viem InvalidAddressError).
-            // Reject non-addresses before signing or interpolating.
-            const merchant = assertPayableX402Recipient(req.payTo);
-            // req.amount is remote-controlled; a raw BigInt() here would put the
-            // whole value verbatim into V8's "Cannot convert <amount> to a
-            // BigInt" message.
-            const amount = assertParsableX402Amount(req.amount);
-            if (input.max_payment_eth) {
-              const maxRaw = maxPaymentBaseUnits(
-                input.max_payment_eth,
-                req.asset,
-                config.chainId
-              );
-              if (amount > maxRaw) {
-                throw new Error(
-                  `Payment required (${amount} base units) exceeds max_payment_eth cap ` +
-                  `(${maxRaw} base units for asset ${req.asset} = ${input.max_payment_eth}). ` +
-                  `Increase max_payment_eth or the payment will not proceed.`
-                );
-              }
-            }
-
-            // amount is in the offered asset's base units; the decimals thunk
-            // only runs when a policy is configured, and resolution failures
-            // reject (fail closed) inside enforceSpendPolicy.
-            const policyDecision = await enforceSpendPolicy({
-              merchant,
-              amount,
-              decimals: () =>
-                resolveX402AssetDecimals(
-                  req.asset ?? '0x0000000000000000000000000000000000000000',
-                  config.chainId
-                ),
-            });
-            if (policyDecision.status !== 'approved') {
-              throw new Error(
-                policyDecision.reason ??
-                  `x402 payment blocked by spend policy (${policyDecision.status}).`
-              );
-            }
-            return true;
-          },
-          onPaymentComplete: (log) => {
-            paymentMade = true;
-            paymentAmount = log.amount;
-            paymentTxHash = log.txHash;
-            paymentRecipient = log.recipient;
-            paymentToken = log.token;
-            paymentSeq = nextX402SettlementSeq();
-            paymentSettledAt = log.timestamp;
-          },
-        });
+        const paidClient = createAgentPayX402Client(
+          wallet,
+          {
+            chainId: config.chainId,
+            maxPaymentEth: input.max_payment_eth,
+            kind: 'payment',
+            onPaymentComplete: (log) => {
+              paymentMade = true;
+              paymentAmount = log.amount;
+              paymentTxHash = log.txHash;
+              paymentRecipient = log.recipient;
+              paymentToken = log.token;
+              paymentSeq = nextX402SettlementSeq();
+              paymentSettledAt = log.timestamp;
+            },
+          }
+        );
+        const x402Client = paidClient.client;
 
         const headers: Record<string, string> = {
           'Accept': 'application/json, text/plain, */*',
@@ -514,6 +466,9 @@ export async function handleX402Pay(
           response = paid.response;
           responseText = paid.responseText;
         } catch (error: unknown) {
+          if (!paymentMade) {
+            paidClient.disposeUnusedReservation(error);
+          }
           if (paymentMade) {
             try {
               paymentTxHash = persistX402Settlement({
@@ -555,6 +510,7 @@ export async function handleX402Pay(
         }
 
         if (response.status === 402 && !paymentMade) {
+          paidClient.releaseUnusedReservation();
           throw new X402UnsupportedRequirementError(
             describeUnsupported402(input, response, responseText, config.chainId)
           );
@@ -596,6 +552,7 @@ export async function handleX402Pay(
           out += `  TX Hash:   ${sanitizeUntrustedInline(paymentTxHash, 80)}\n`;
           out += `\n💡 Tip: Use x402_session_start to pay once for a session and skip per-call payments.\n`;
         } else {
+          paidClient.releaseUnusedReservation();
           out += `\n✅ No payment required\n`;
         }
 

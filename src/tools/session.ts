@@ -15,7 +15,6 @@
  */
 
 import { z } from 'zod';
-import { createX402Client } from 'agentwallet-sdk';
 import { getWallet, getConfig } from '../utils/client.js';
 import {
   textContent,
@@ -28,14 +27,7 @@ import {
   noControlChars,
   chainName,
 } from '../utils/format.js';
-import { supportedX402NetworksForChainId } from '../utils/x402-networks.js';
-import {
-  assertPayableX402Recipient,
-  assertParsableX402Amount,
-  maxPaymentBaseUnits,
-  resolveX402AssetDecimals,
-} from '../utils/payment-cap.js';
-import { enforceSpendPolicy } from './budget.js';
+import { createAgentPayX402Client } from '../utils/x402-client.js';
 import { fetchWithSessionCredentials } from '../utils/session-fetch.js';
 import {
   createSession,
@@ -175,6 +167,9 @@ export const x402SessionStartTool = {
 export async function handleX402SessionStart(
   input: X402SessionStartInput
 ): Promise<{ content: Array<{ type: 'text'; text: string }>; isError?: boolean }> {
+  let paymentMade = false;
+  let releaseUnusedReservation = (): void => undefined;
+  let disposeUnusedReservation = (_error?: unknown): void => undefined;
   try {
     const config = getConfig();
     const timeoutMs = input.timeout_ms ?? 30000;
@@ -217,70 +212,30 @@ export async function handleX402SessionStart(
     const wallet = getWallet();
 
     // Track payment
-    let paymentMade = false;
     let paymentAmount = 0n;
     let paymentTxHash = '';
     let paymentRecipient = '';
     let paymentToken = '0x0000000000000000000000000000000000000000';
 
-    // x402 client to handle the one-time session payment.
-    // Cap uses the selected asset's decimals (not ETH-wei).
-    const x402Client = createX402Client(wallet, {
-      autoPay: true,
-      maxRetries: 1,
-      supportedNetworks: supportedX402NetworksForChainId(config.chainId),
-      onBeforePayment: async (req) => {
-        // The 402's payTo is remote-controlled and ends up inside error
-        // messages (SDK allowlist rejection, viem InvalidAddressError).
-        // Reject non-addresses before signing or interpolating.
-        const merchant = assertPayableX402Recipient(req.payTo);
-        // req.amount is remote-controlled; a raw BigInt() here would put the
-        // whole value verbatim into V8's "Cannot convert <amount> to a
-        // BigInt" message.
-        const amount = assertParsableX402Amount(req.amount);
-        if (input.max_payment_eth) {
-          const maxRaw = maxPaymentBaseUnits(
-            input.max_payment_eth,
-            req.asset,
-            config.chainId
-          );
-          if (amount > maxRaw) {
-            throw new Error(
-              `Session payment (${amount} base units) exceeds max_payment_eth cap ` +
-              `(${maxRaw} base units for asset ${req.asset} = ${input.max_payment_eth}). ` +
-              `Set a higher max_payment_eth to proceed.`
-            );
-          }
-        }
-
-        // amount is in the offered asset's base units; the decimals thunk
-        // only runs when a policy is configured, and resolution failures
-        // reject (fail closed) inside enforceSpendPolicy.
-        const policyDecision = await enforceSpendPolicy({
-          merchant,
-          amount,
-          decimals: () =>
-            resolveX402AssetDecimals(
-              req.asset ?? '0x0000000000000000000000000000000000000000',
-              config.chainId
-            ),
-        });
-        if (policyDecision.status !== 'approved') {
-          throw new Error(
-            policyDecision.reason ??
-              `Session payment blocked by spend policy (${policyDecision.status}).`
-          );
-        }
-        return true;
-      },
-      onPaymentComplete: (log) => {
-        paymentMade = true;
-        paymentAmount = log.amount;
-        paymentTxHash = log.txHash;
-        paymentRecipient = log.recipient;
-        paymentToken = log.token ?? '0x0000000000000000000000000000000000000000';
-      },
-    });
+    // Shared x402 client: cap uses the selected asset's decimals (not ETH-wei).
+    const paidClient = createAgentPayX402Client(
+      wallet,
+      {
+        chainId: config.chainId,
+        maxPaymentEth: input.max_payment_eth,
+        kind: 'session',
+        onPaymentComplete: (log) => {
+          paymentMade = true;
+          paymentAmount = log.amount;
+          paymentTxHash = log.txHash;
+          paymentRecipient = log.recipient;
+          paymentToken = log.token ?? '0x0000000000000000000000000000000000000000';
+        },
+      }
+    );
+    const x402Client = paidClient.client;
+    releaseUnusedReservation = paidClient.releaseUnusedReservation;
+    disposeUnusedReservation = paidClient.disposeUnusedReservation;
 
     const method = input.method ?? 'GET';
     const reqHeaders: Record<string, string> = {
@@ -306,6 +261,25 @@ export async function handleX402SessionStart(
     const responseText = await response.text();
 
     if (!paymentMade) {
+      releaseUnusedReservation();
+      if (response.status === 402) {
+        return {
+          content: [
+            textContent(
+              `❌ **Unsupported x402 Payment Requirement - Failed Closed**\n\n` +
+              `  Endpoint: ${sanitizeUntrustedUrl(input.endpoint)}\n` +
+              describeFinalUrl(input.endpoint, response) +
+              `  Status:   ${formatHttpStatus(response.status)}\n\n` +
+              `AgentPay failed closed and did not sign a payment. The endpoint returned ` +
+              `HTTP 402, but no payment was completed. A 402 without a completed payment ` +
+              `is not treated as a free endpoint.\n\n` +
+              `📄 **402 Response Body**\n` +
+              formatUntrustedBody(responseText, 4000)
+            ),
+          ],
+          isError: true,
+        };
+      }
       // Endpoint didn't require payment — still create a session if response was OK
       // This allows agents to pre-establish sessions for endpoints that may start
       // requiring payment, or to track usage even for free endpoints.
@@ -374,6 +348,9 @@ export async function handleX402SessionStart(
 
     return { content: [textContent(out)] };
   } catch (error: unknown) {
+    if (!paymentMade) {
+      disposeUnusedReservation(error);
+    }
     if (error instanceof Error && error.name === 'AbortError') {
       return {
         content: [textContent(`❌ x402_session_start failed: Request timed out after ${input.timeout_ms ?? 30000}ms`)],

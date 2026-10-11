@@ -123,7 +123,7 @@ export async function handleSwapTokens(
       async () => {
       // Enforce the in-process spend policy on the amount sold before swapping.
       // rawAmountIn is in fromToken base units (e.g. 6 decimals for USDC);
-      // enforceSpendPolicy normalises it to the policy's 18-decimal
+      // enforceSpendPolicy normalises it to the policy's 9-decimal
       // ETH-equivalent caps (1 whole token counts as 1 ETH-equivalent). The SDK
       // SwapModule custodies tokens at — and sends swap proceeds to — the agent
       // smart-account address (attachSwap passes wallet.address as

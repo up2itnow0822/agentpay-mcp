@@ -3,9 +3,18 @@
  *
  * set_spend_policy: configure a SpendingPolicy (in-process, persists for server lifetime).
  * check_budget: query on-chain remaining budget via checkBudget().
+ *
+ * Payment flow uses the SDK 6.3.0 reserve → execute → commit | release | lock
+ * surface. `check()` is the backward-compatible reserve-then-commit wrapper
+ * and is not used on the payment path.
  */
 import { z } from 'zod'
-import { SpendingPolicy, checkBudget } from 'agentwallet-sdk'
+import {
+  SpendingPolicy,
+  checkBudget,
+  type SpendOutcome,
+  type SpendReservation as SdkSpendReservation,
+} from 'agentwallet-sdk'
 import { parseEther, zeroAddress, type Address } from 'viem'
 import { getWallet } from '../utils/client.js'
 import { textContent, formatError } from '../utils/format.js'
@@ -20,6 +29,8 @@ interface PolicyConfig {
 }
 
 const DEFAULT_POLICY_SCOPE = 'global'
+/** 1 whole token = 1e9 policy units. SpendingPolicy 6.3.0 rejects > MAX_SAFE_INTEGER. */
+export const POLICY_SCALE_DECIMALS = 9
 const _policyConfigByScope = new Map<string, PolicyConfig>()
 const _spendingPolicyByScope = new Map<string, InstanceType<typeof SpendingPolicy>>()
 
@@ -28,52 +39,109 @@ export function _resetPolicyStore(): void {
   _spendingPolicyByScope.clear()
 }
 
+function scaleToPolicyUnits(baseUnits: bigint, decimals: number): bigint {
+  if (decimals === POLICY_SCALE_DECIMALS) {
+    return baseUnits
+  }
+  if (decimals < POLICY_SCALE_DECIMALS) {
+    return baseUnits * 10n ** BigInt(POLICY_SCALE_DECIMALS - decimals)
+  }
+  const divisor = 10n ** BigInt(decimals - POLICY_SCALE_DECIMALS)
+  const scaled = baseUnits / divisor
+  return baseUnits % divisor === 0n ? scaled : scaled + 1n
+}
+
+function toSafePolicyNumber(scaled: bigint): number | null {
+  if (scaled > BigInt(Number.MAX_SAFE_INTEGER)) {
+    return null
+  }
+  const amountNumber = Number(scaled)
+  if (!Number.isFinite(amountNumber) || BigInt(amountNumber) !== scaled) {
+    return null
+  }
+  return amountNumber
+}
+
 export type SpendPolicyDecision =
   | { status: 'approved' }
   | { status: 'rejected' | 'draft'; reason?: string; draftId?: string }
 
+export interface SpendReservationItem {
+  policy: InstanceType<typeof SpendingPolicy>
+  held: SdkSpendReservation
+}
+
 export interface SpendReservation {
   amount: number
-  policies: Array<InstanceType<typeof SpendingPolicy>>
+  items: SpendReservationItem[]
 }
 
-type SpendWindowEntry = { amount: number; ts: number }
-
-function getSpendWindow(
-  policy: InstanceType<typeof SpendingPolicy>
-): SpendWindowEntry[] | undefined {
-  const window = (policy as unknown as { spendWindow?: SpendWindowEntry[] }).spendWindow
-  return Array.isArray(window) ? window : undefined
-}
-
-/**
- * Undo a reservation recorded by SpendingPolicy.check() on approve.
- * Pops the last matching rolling-window entry from each reserved policy.
- */
-export function releaseSpendReservation(
-  reservation: SpendReservation | null | undefined
+function forEachHeld(
+  reservation: SpendReservation | null | undefined,
+  apply: (
+    policy: InstanceType<typeof SpendingPolicy>,
+    held: SdkSpendReservation
+  ) => void
 ): void {
   if (!reservation) {
     return
   }
-  for (const policy of reservation.policies) {
-    const window = getSpendWindow(policy)
-    if (!window || window.length === 0) {
-      continue
-    }
-    for (let i = window.length - 1; i >= 0; i--) {
-      if (window[i]!.amount === reservation.amount) {
-        window.splice(i, 1)
-        break
-      }
-    }
+  for (const item of reservation.items) {
+    apply(item.policy, item.held)
   }
 }
 
 /**
- * Reserve spend (policy.check records on approve), run the attempt, then
- * settle | release | hold-unknown. Definite not-charged failures release
- * the reservation so a retry can use the same remaining cap.
+ * Return held capacity after a definite not-charged outcome.
+ * Uses SpendingPolicy.release — locked (hold-unknown) reservations refuse.
+ */
+export function releaseSpendReservation(
+  reservation: SpendReservation | null | undefined
+): void {
+  forEachHeld(reservation, (policy, held) => {
+    policy.release(held)
+  })
+}
+
+/**
+ * Finalize held capacity after a settled outcome.
+ */
+export function commitSpendReservation(
+  reservation: SpendReservation | null | undefined
+): void {
+  forEachHeld(reservation, (policy, held) => {
+    policy.commit(held)
+  })
+}
+
+/**
+ * Keep held capacity after a hold-unknown outcome. A timer never unlocks.
+ */
+export function lockSpendReservation(
+  reservation: SpendReservation | null | undefined
+): void {
+  forEachHeld(reservation, (policy, held) => {
+    policy.lock(held)
+  })
+}
+
+/**
+ * Apply a classified SDK spend outcome to every held reservation.
+ * settled → commit; released → release; hold-unknown → lock.
+ */
+export function applySpendOutcome(
+  reservation: SpendReservation | null | undefined,
+  outcome: SpendOutcome
+): void {
+  forEachHeld(reservation, (policy, held) => {
+    policy.applyOutcome(held, outcome)
+  })
+}
+
+/**
+ * Reserve spend, run the attempt, then commit | release | lock.
+ * Definite not-charged failures release so a retry can use the same cap.
+ * Unclear post-broadcast errors lock the hold (never auto-unlock).
  */
 export async function withReservedSpend<T>(
   input: {
@@ -97,10 +165,16 @@ export async function withReservedSpend<T>(
     )
   }
   try {
-    return await run()
+    const value = await run()
+    commitSpendReservation(reservation)
+    return value
   } catch (error: unknown) {
     if (error instanceof DefiniteSpendFailure) {
       releaseSpendReservation(reservation)
+    } else {
+      // After execute, only lock. classifySpendError treats unknown errors
+      // as released (pre-broadcast); that is unsafe once a write may exist.
+      lockSpendReservation(reservation)
     }
     throw error
   }
@@ -118,13 +192,13 @@ export async function withReservedSpend<T>(
  *
  * Units: `amount` is in the asset's own base units (wei for ETH, 1e-6 for
  * USDC), with `decimals` naming that asset's decimals. Policy caps from
- * set_spend_policy are stored in 18-decimal "ETH-equivalent" units
- * (parseEther of the human string), so the amount is normalised here by
- * scaling base units × 10^(18 - decimals) before comparison. One whole token
- * therefore counts as 1 ETH-equivalent: with perTxCapEth "5", a 10 USDC
- * payment (10_000_000 base units → 1e19) is over the 5e18 cap and blocked.
- * Never compare 6-decimal USDC base units against wei-scale caps directly —
- * that silently loosens every cap by a factor of 1e12.
+ * set_spend_policy are stored in 9-decimal ETH-equivalent policy units
+ * (parseEther of the human string / 1e9). SpendingPolicy 6.3.0 requires a
+ * safe integer, so 18-decimal wei cannot be the engine unit: 10 USDC would
+ * become 1e19. One whole token still counts as 1 ETH-equivalent: with
+ * perTxCapEth "5", a 10 USDC payment (10_000_000 base units → 1e10) is over
+ * the 5e9 cap and blocked. Never compare 6-decimal USDC base units against
+ * wei-scale caps directly — that silently loosens every cap by 1e12.
  *
  * `decimals` may be a thunk so that asset-decimal resolution (which can throw
  * for unregistered assets) only runs when a policy is actually configured.
@@ -132,6 +206,11 @@ export async function withReservedSpend<T>(
  * Fail closed: ANY error while evaluating the policy — decimals resolution,
  * numeric conversion, or the policy engine itself — rejects the payment, and
  * unrecognised policy statuses are treated as rejections.
+ *
+ * Payment-path callers that still use `enforceSpendPolicy` get reserve-then
+ * commit (the same net effect as the legacy `check()` wrapper). Prefer
+ * `withReservedSpend` or explicit reserve/commit/release when the outcome
+ * is known after execute.
  */
 export async function reserveSpendPolicy(input: {
   merchant: string
@@ -145,6 +224,7 @@ export async function reserveSpendPolicy(input: {
     return { decision: { status: 'approved' }, reservation: null }
   }
 
+  const reservedItems: SpendReservationItem[] = []
   try {
     const decimals =
       typeof input.decimals === 'function' ? input.decimals() : input.decimals
@@ -172,15 +252,11 @@ export async function reserveSpendPolicy(input: {
       }
     }
 
-    // Normalise to the policy's canonical 18-decimal ETH-equivalent scale.
-    const scaled = baseUnits * 10n ** BigInt(18 - decimals)
-
-    // SpendingPolicy tracks amounts as JS numbers. Convert exactly where
-    // possible; when the bigint exceeds float precision and rounds down,
-    // bias one ULP upward so boundary comparisons fail closed (the policy
-    // must never see less than the true amount).
-    let amountNumber = Number(scaled)
-    if (!Number.isFinite(amountNumber)) {
+    // Normalise to 9-decimal ETH-equivalent policy units (safe integers).
+    // 18-decimal wei overflows Number.MAX_SAFE_INTEGER for ordinary USDC sizes.
+    const scaled = scaleToPolicyUnits(baseUnits, decimals)
+    const amountNumber = toSafePolicyNumber(scaled)
+    if (amountNumber === null) {
       return {
         decision: {
           status: 'rejected',
@@ -191,38 +267,26 @@ export async function reserveSpendPolicy(input: {
         reservation: null,
       }
     }
-    if (BigInt(amountNumber) < scaled) {
-      amountNumber *= 1 + Number.EPSILON
-    }
-
-    const snapshots = policies.map(([, policy]) => ({
-      policy,
-      beforeLength: getSpendWindow(policy)?.length ?? 0,
-    }))
-    const reservedPolicies: Array<InstanceType<typeof SpendingPolicy>> = []
 
     for (const [scope, policy] of policies) {
-      const result = await policy.check({
+      const result = await policy.reserve({
         merchant: input.merchant,
         amount: amountNumber,
       })
 
-      if (result.status === 'approved') {
-        const afterLength = getSpendWindow(policy)?.length ?? 0
-        if (afterLength > (snapshots.find((s) => s.policy === policy)?.beforeLength ?? 0)) {
-          reservedPolicies.push(policy)
-        }
+      if (result.status === 'reserved' && result.reservation) {
+        reservedItems.push({ policy, held: result.reservation })
         continue
       }
       if (result.status === 'draft') {
-        releaseSpendReservation({ amount: amountNumber, policies: reservedPolicies })
+        releaseSpendReservation({ amount: amountNumber, items: reservedItems })
         return {
           decision: { status: 'draft', reason: result.reason, draftId: result.draftId },
           reservation: null,
         }
       }
-      // 'rejected' and anything unrecognised both deny.
-      releaseSpendReservation({ amount: amountNumber, policies: reservedPolicies })
+      // 'rejected', reserved-without-handle, and anything unrecognised deny.
+      releaseSpendReservation({ amount: amountNumber, items: reservedItems })
       return {
         decision: {
           status: 'rejected',
@@ -237,11 +301,12 @@ export async function reserveSpendPolicy(input: {
     return {
       decision: { status: 'approved' },
       reservation:
-        reservedPolicies.length > 0
-          ? { amount: amountNumber, policies: reservedPolicies }
+        reservedItems.length > 0
+          ? { amount: amountNumber, items: reservedItems }
           : null,
     }
   } catch (error: unknown) {
+    releaseSpendReservation({ amount: 0, items: reservedItems })
     return {
       decision: {
         status: 'rejected',
@@ -261,7 +326,11 @@ export async function enforceSpendPolicy(input: {
   /** Decimals of the asset `amount` is denominated in (0–18), or a thunk. */
   decimals: number | (() => number)
 }): Promise<SpendPolicyDecision> {
-  return (await reserveSpendPolicy(input)).decision
+  const { decision, reservation } = await reserveSpendPolicy(input)
+  if (decision.status === 'approved') {
+    commitSpendReservation(reservation)
+  }
+  return decision
 }
 
 // ─── set_spend_policy ──────────────────────────────────────────────────────
@@ -329,18 +398,18 @@ export async function handleSetSpendPolicy(
   input: SetSpendPolicyInput
 ): Promise<{ content: Array<{ type: 'text'; text: string }>; isError?: boolean }> {
   try {
-    const ethToWeiNumber = (eth: string): number => {
+    const ethToPolicyUnits = (eth: string): number => {
       const normalized = eth.trim()
       if (normalized.length === 0) throw new Error(`Invalid ETH amount: "${eth}"`)
       if (!/^\d*\.?\d+$/.test(normalized)) throw new Error(`Invalid ETH amount: "${eth}"`)
 
       const wei = parseEther(normalized)
       if (wei <= 0n) throw new Error(`Invalid ETH amount: "${eth}"`)
-      const weiAsNumber = Number(wei)
-      if (!Number.isFinite(weiAsNumber)) {
+      const policyUnits = toSafePolicyNumber(scaleToPolicyUnits(wei, 18))
+      if (policyUnits === null) {
         throw new Error(`ETH amount is too large: "${eth}"`)
       }
-      return weiAsNumber
+      return policyUnits
     }
 
     const scopeKey = input.scopeKey?.trim() || DEFAULT_POLICY_SCOPE
@@ -350,14 +419,14 @@ export async function handleSetSpendPolicy(
     // rollingCap uses a 24-hour window for dailyLimitEth
     const rollingCap = input.dailyLimitEth
       ? {
-          maxAmount: ethToWeiNumber(input.dailyLimitEth),
+          maxAmount: ethToPolicyUnits(input.dailyLimitEth),
           windowMs: 86_400_000, // 24 hours
         }
       : undefined
 
     // draftThreshold maps to perTxCap — payments above this go to draft
     const draftThreshold = input.perTxCapEth
-      ? ethToWeiNumber(input.perTxCapEth)
+      ? ethToPolicyUnits(input.perTxCapEth)
       : undefined
 
     _spendingPolicyByScope.set(scopeKey, new SpendingPolicy({

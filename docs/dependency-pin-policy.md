@@ -7,15 +7,14 @@ a payment, verifies a receipt, or maps a chain.
 
 ## Current pin
 
-- `viem`: pinned exactly to `2.56.0`
-- `package.json` dependency: `"viem": "2.56.0"`
-- root npm override: `"viem": "2.56.0"`
-- reason: `viem` `2.48.8` exposed a broken `@noble/curves` import path in the
-  x402 payment ecosystem, which is why AgentPay previously held `2.48.7`
-  exactly. The `2.56.0` pin includes `ws` `8.21.0`, which clears the
-  memory-exhaustion advisory affecting the prior `2.52.2` pin. Pins age: when
-  the security gate flags a transitive advisory, bump the pin through the
-  upgrade process below rather than relaxing it to a range.
+- `viem`: pinned exactly to `2.57.4`
+- `package.json` dependency: `"viem": "2.57.4"`
+- root npm override: `"viem": "2.57.4"`
+- reason: `agentwallet-sdk` `6.3.0` ships `viem` `2.57.4`. The pin replaces
+  `2.56.0` so the x402 verifier path and the SDK share one install, and so
+  the `ws` advisory that affected older `viem` trees stays cleared. Pins age:
+  when the security gate flags a transitive advisory, bump the pin through
+  the upgrade process below rather than relaxing it to a range.
 
 ## Libraries covered by this policy
 
@@ -47,7 +46,7 @@ npm run smoke:clean-install
 The clean-install smoke creates a fresh temporary consumer project, installs the
 packed AgentPay MCP tarball, imports `viem`, `viem/accounts`, `viem/chains`,
 AgentPay's packaged `x402_pay` tool, and AgentPay's wallet client utility, then
-confirms the resolved `viem` version is exactly `2.56.0`.
+confirms the resolved `viem` version is exactly `2.57.4`.
 
 A release must fail if:
 

@@ -119,7 +119,7 @@ export async function handleCreateEscrow(
     // buyer commits paymentAmount plus an equal buyerStake, so the policy is
     // checked against the total buyer commitment (2× paymentAmount) in USDC
     // 6-decimal base units; enforceSpendPolicy normalises that to the
-    // policy's 18-decimal ETH-equivalent caps (1 USDC counts as
+    // policy's 9-decimal ETH-equivalent caps (1 USDC counts as
     // 1 ETH-equivalent) — never compare 6-decimal base units against
     // wei-scale caps directly. The merchant is the escrow counterparty.
     const buyerCommitment = paymentAmount * 2n // paymentAmount + buyerStake

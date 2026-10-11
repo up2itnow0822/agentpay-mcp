@@ -8,7 +8,7 @@ AgentPay MCP is a stdio Model Context Protocol server for x402 payments and
 wallet operations. It exposes Agent Wallet SDK functions as MCP tools and loads
 a caller-controlled signing key from the local process environment.
 
-The current npm package is `agentpay-mcp` v4.1.17.
+The current npm package is `agentpay-mcp` v4.2.0.
 
 ## Start without funds
 
@@ -142,7 +142,7 @@ versioned documents:
 - [`docs/dependency-pin-policy.md`](docs/dependency-pin-policy.md) defines the
   release gate for payment-critical packages.
 
-AgentPay pins `viem` exactly at `2.56.0`.
+AgentPay pins `viem` exactly at `2.57.4`.
 
 The directory comparison was captured against `agentpay-mcp@4.1.9`; the
 package version at the top of this README is the current release.

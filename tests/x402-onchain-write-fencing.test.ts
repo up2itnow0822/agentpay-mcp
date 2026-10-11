@@ -6,8 +6,8 @@
  * two invariants below, because both live on the seam between our validator
  * and the SDK:
  *
- *   1. `X402Client.executePayment` (agentwallet-sdk 6.2.1,
- *      dist/x402/client.js:177-193) transfers the 0.77% protocol fee to
+ *   1. `X402Client.executePayment` (agentwallet-sdk 6.3.0,
+ *      dist/x402/client.js) transfers the 0.77% protocol fee to
  *      FEE_COLLECTOR *before* it encodes the payee. So a `payTo` we accept but
  *      viem's ABI encoder later rejects costs the buyer the fee with nothing
  *      bought — the fee write has already been broadcast when the payee
@@ -44,7 +44,7 @@ import { AgentAccountV2Abi } from 'agentwallet-sdk';
 
 const USDC_BASE = '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913';
 const PAYEE = '0x1111111111111111111111111111111111111111';
-/** agentwallet-sdk 6.2.1 dist/x402/client.js — X402_PROTOCOL_FEE_BPS collector. */
+/** agentwallet-sdk 6.3.0 X402_PROTOCOL_FEE_COLLECTOR. */
 const FEE_COLLECTOR = '0xff86829393C6C26A4EC122bE0Cc3E466Ef876AdD';
 const ACCOUNT_ADDRESS = '0x9999999999999999999999999999999999999999' as Address;
 const AGENT_KEY = ('0x' + '11'.repeat(32)) as `0x${string}`;
@@ -123,6 +123,36 @@ async function request({
       });
       return '0x' + 'ab'.repeat(32);
     }
+    case 'eth_getTransactionReceipt':
+    case 'eth_getTransactionByHash': {
+      // SDK 6.3.0 waits for a receipt after each broadcast. A success
+      // receipt lets the control case finish; hostile cases never reach it.
+      const hash = (params?.[0] as string | undefined) ?? ('0x' + 'ab'.repeat(32));
+      return {
+        transactionHash: hash,
+        hash,
+        transactionIndex: '0x0',
+        blockHash: STUB_BLOCK.hash,
+        blockNumber: STUB_BLOCK.number,
+        from: ACCOUNT_ADDRESS,
+        to: ACCOUNT_ADDRESS,
+        cumulativeGasUsed: '0x5208',
+        gasUsed: '0x5208',
+        contractAddress: null,
+        logs: [],
+        logsBloom: STUB_BLOCK.logsBloom,
+        status: '0x1',
+        effectiveGasPrice: '0x3b9aca00',
+        type: '0x2',
+        input: '0x',
+        nonce: '0x0',
+        value: '0x0',
+        gas: '0x186a0',
+        r: '0x' + '11'.repeat(32),
+        s: '0x' + '22'.repeat(32),
+        v: '0x1',
+      };
+    }
     default:
       throw new Error(`unstubbed RPC in x402 write-fencing harness: ${method}`);
   }
@@ -166,6 +196,7 @@ import { _resetSpendIntentStore } from '../src/utils/spend-intent.js';
 function serve402(payTo: unknown, extra: Record<string, unknown> = {}): void {
   const body = JSON.stringify({
     x402Version: 1,
+    resource: { url: PAY_INPUT.url },
     accepts: [
       {
         scheme: 'exact',
@@ -173,6 +204,7 @@ function serve402(payTo: unknown, extra: Record<string, unknown> = {}): void {
         asset: USDC_BASE,
         amount: '1000000',
         payTo,
+        maxTimeoutSeconds: 60,
         ...extra,
       },
     ],
@@ -180,11 +212,14 @@ function serve402(payTo: unknown, extra: Record<string, unknown> = {}): void {
   let call = 0;
   vi.stubGlobal(
     'fetch',
-    vi.fn(async () => {
+    vi.fn(async (input: RequestInfo | URL) => {
       call += 1;
-      return call === 1
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+      const response = call === 1
         ? new Response(body, { status: 402, headers: { 'content-type': 'application/json' } })
         : new Response('paid content', { status: 200 });
+      Object.defineProperty(response, 'url', { value: url });
+      return response;
     })
   );
 }
@@ -249,7 +284,7 @@ describe('x402 on-chain write fencing (real agentwallet-sdk)', () => {
       // executePayment — so not even the fee transfer is broadcast.
       expect(writes).toEqual([]);
       expect(result.isError).toBe(true);
-      expect(result.content[0]!.text).toContain('did not sign a payment');
+      expect(result.content[0]!.text).toContain('did not sign');
     });
 
     it(`x402_session_start: ${label} payTo produces zero on-chain writes`, async () => {
@@ -259,7 +294,7 @@ describe('x402 on-chain write fencing (real agentwallet-sdk)', () => {
 
       expect(writes).toEqual([]);
       expect(result.isError).toBe(true);
-      expect(result.content[0]!.text).toContain('did not sign a payment');
+      expect(result.content[0]!.text).toContain('did not sign');
     });
   }
 

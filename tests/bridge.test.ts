@@ -42,6 +42,7 @@ import { handleSetSpendPolicy, _resetPolicyStore } from '../src/tools/budget.js'
 import { _resetSpendIntentStore } from '../src/utils/spend-intent.js'
 import { getWallet } from '../src/utils/client.js'
 import { createBridge, SpendingPolicy } from 'agentwallet-sdk'
+import { policyEngine, reservedResult } from './helpers/policy-engine.js'
 
 const mockCreateBridge = vi.mocked(createBridge)
 const MockSpendingPolicy = vi.mocked(SpendingPolicy)
@@ -233,7 +234,7 @@ describe('bridge_usdc', () => {
       status: 'rejected',
       reason: 'Merchant "0xagent" is not on the allowlist.',
     })
-    MockSpendingPolicy.mockImplementation(function () { return { check } } as any)
+    MockSpendingPolicy.mockImplementation(function () { return policyEngine(check) } as any)
 
     await handleSetSpendPolicy({
       allowedRecipients: ['0x0000000000000000000000000000000000000001'],
@@ -249,16 +250,16 @@ describe('bridge_usdc', () => {
     expect(result.content[0].text).toContain('allowlist')
     expect(mockCreateBridge).not.toHaveBeenCalled()
     // Merchant is the bridging wallet itself (CCTP mints back to it), and
-    // 100 USDC (6 decimals) is normalised to 1e20 ETH-equivalent wei.
-    expect(check).toHaveBeenCalledWith({ merchant: '0xagent', amount: 1e20 })
+    // 100 USDC (6 decimals) is normalised to 1e11 9-decimal policy units.
+    expect(check).toHaveBeenCalledWith({ merchant: '0xagent', amount: 1e11 })
   })
 
   it('blocks bridging when the spend policy cap is exceeded', async () => {
     const check = vi.fn().mockResolvedValue({
       status: 'rejected',
-      reason: 'Rolling spend cap exceeded: spent 0, cap 5e19, attempted 1e20.',
+      reason: 'Rolling spend cap exceeded: spent 0, cap 5e10, attempted 1e11.',
     })
-    MockSpendingPolicy.mockImplementation(function () { return { check } } as any)
+    MockSpendingPolicy.mockImplementation(function () { return policyEngine(check) } as any)
 
     await handleSetSpendPolicy({ dailyLimitEth: '50' })
 
@@ -279,7 +280,7 @@ describe('bridge_usdc', () => {
       reason: 'Amount meets draft threshold. Awaiting approval.',
       draftId: 'draft-123',
     })
-    MockSpendingPolicy.mockImplementation(function () { return { check } } as any)
+    MockSpendingPolicy.mockImplementation(function () { return policyEngine(check) } as any)
 
     await handleSetSpendPolicy({ perTxCapEth: '10' })
 
@@ -296,8 +297,8 @@ describe('bridge_usdc', () => {
   })
 
   it('bridges normally when the spend policy approves', async () => {
-    const check = vi.fn().mockResolvedValue({ status: 'approved' })
-    MockSpendingPolicy.mockImplementation(function () { return { check } } as any)
+    const check = vi.fn().mockResolvedValue(reservedResult())
+    MockSpendingPolicy.mockImplementation(function () { return policyEngine(check) } as any)
 
     await handleSetSpendPolicy({ dailyLimitEth: '1000' })
 

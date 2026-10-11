@@ -94,7 +94,7 @@ export async function handleSendToken(
 
     const { value, replayed } = await withSpendIntent(intent.key, async () => {
       // rawAmount is in the token's base units; decimals lets the policy
-      // normalise to its 18-decimal ETH-equivalent caps.
+      // normalise to its 9-decimal ETH-equivalent caps.
       const policyDecision = await enforceSpendPolicy({
         merchant: input.recipientAddress,
         amount: rawAmount,

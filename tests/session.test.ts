@@ -13,6 +13,14 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 const mockX402ClientFetch = vi.fn();
 
 vi.mock('agentwallet-sdk', () => ({
+  isEvmTxHash: (value: unknown) =>
+    typeof value === 'string' && /^0x[a-fA-F0-9]{64}$/.test(value),
+  classifySpendError: (error: unknown) => ({
+    status: 'released' as const,
+    retrySafe: true,
+    txHashes: [] as string[],
+    reason: error instanceof Error ? error.message : String(error ?? ''),
+  }),
   createX402Client: vi.fn(() => ({
     fetch: mockX402ClientFetch,
     getTransactionLog: vi.fn(() => []),
