@@ -1,0 +1,16 @@
+---
+description: Use when writing or reviewing tools that call agentwallet-sdk v6 (TokenRegistry, transfers, swap, bridge, identity, reputation, escrow, x402).
+globs: src/tools/**
+alwaysApply: false
+---
+
+# agentwallet-sdk v6.0.0 exports
+- **TokenRegistry:** `getGlobalRegistry()`, `.getToken(symbol, chainId)`, `.listTokens(chainId)`, `.addToken()`
+- **Transfers:** `agentTransferToken()`, `encodeERC20Transfer()`
+- **Decimals:** `toRaw()`, `toHuman()`, `formatBalance()`
+- **Swap:** `SwapModule`, `attachSwap()` (Uniswap V3)
+- **Bridge:** `BridgeClient` (CCTP V2)
+- **Identity:** `IdentityClient`, `ReputationClient`, `ValidationClient` (ERC-8004)
+- **Escrow:** `MutualStakeEscrow`
+- **x402:** multi-asset resolution
+- Handlers return `{ content: [{ type: "text", text: JSON.stringify(result) }] }`.

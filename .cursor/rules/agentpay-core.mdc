@@ -1,0 +1,12 @@
+---
+description: agentpay-mcp core conventions and quality gates (money repo, fail-closed)
+globs:
+alwaysApply: true
+---
+
+`agentpay-mcp` is an MCP server that wraps `agentwallet-sdk` to give agents financial capabilities. It is a **money repo: fail closed.** If anything about funds, keys, limits or signing is in doubt, stop and ask Bill. Never weaken a spend-policy check to make tests pass.
+
+- Tools live in `src/tools/`. Each exports `toolDefinition`, `handleFunction` and a Zod schema, and is registered in `src/index.ts` (in `ALL_TOOLS` and the CallToolRequest handler).
+- Gates: all tests pass, new tools have tests in `tests/`, and `npm run build` gives 0 errors. Style: no semicolons, single quotes.
+- Handoff needs green checks **and** resolved review threads. No squash merges. Bill's explicit approval is required for merges and `npm publish`.
+- For SDK exports, use the `agentpay-sdk-reference` rule.
