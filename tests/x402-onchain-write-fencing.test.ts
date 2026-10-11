@@ -196,6 +196,7 @@ import { _resetSpendIntentStore } from '../src/utils/spend-intent.js';
 function serve402(payTo: unknown, extra: Record<string, unknown> = {}): void {
   const body = JSON.stringify({
     x402Version: 1,
+    resource: { url: PAY_INPUT.url },
     accepts: [
       {
         scheme: 'exact',
@@ -203,6 +204,7 @@ function serve402(payTo: unknown, extra: Record<string, unknown> = {}): void {
         asset: USDC_BASE,
         amount: '1000000',
         payTo,
+        maxTimeoutSeconds: 60,
         ...extra,
       },
     ],
@@ -210,11 +212,14 @@ function serve402(payTo: unknown, extra: Record<string, unknown> = {}): void {
   let call = 0;
   vi.stubGlobal(
     'fetch',
-    vi.fn(async () => {
+    vi.fn(async (input: RequestInfo | URL) => {
       call += 1;
-      return call === 1
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+      const response = call === 1
         ? new Response(body, { status: 402, headers: { 'content-type': 'application/json' } })
         : new Response('paid content', { status: 200 });
+      Object.defineProperty(response, 'url', { value: url });
+      return response;
     })
   );
 }
