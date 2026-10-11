@@ -61,7 +61,7 @@ MCP 2026 roadmap requires OAuth 2.1 with PKCE for server authentication in enter
 
 > **Correction (2026-08-16):** an earlier revision of this section stated that every tool invocation is logged with an ISO 8601 timestamp, tool name and parameters, outcome, and policy-evaluation result. That was inaccurate — AgentPay MCP has no per-tool-invocation audit log. This section now describes what is actually recorded.
 
-**What is recorded — on-chain event history only.** The `get_transaction_history` tool replays AgentAccountV2 contract events for the wallet:
+**What is recorded — on-chain event history, plus in-memory x402 settlement receipts.** The `get_transaction_history` tool replays AgentAccountV2 contract events for the wallet:
 
 - Transaction executions (recipient, value, executor)
 - Queued transactions (queue ID, recipient, value)
@@ -69,11 +69,15 @@ MCP 2026 roadmap requires OAuth 2.1 with PKCE for server authentication in enter
 - On-chain spend-policy updates (token, per-tx limit, period limit)
 - Operator changes
 
-Each entry carries the event type, block number, and transaction hash. These records are immutable and independently verifiable on any node or block explorer for the configured chain (Base by default), and can be exported to enterprise SIEM systems by querying the chain directly or via `get_transaction_history`.
+Each entry carries the event type, block number, and transaction hash. These on-chain event records are immutable and independently verifiable on any node or block explorer for the configured chain (Base by default), and can be exported to enterprise SIEM systems by querying the chain directly or via `get_transaction_history`.
+
+**Process-lifetime x402 settlement receipts.** For unscoped `event_type: all` queries, `get_transaction_history` also lists successful `x402_pay` settlements made by the running server process: the final URL that served the paid response (this may differ from the endpoint that issued the 402 if redirects differ between the two requests), plus the caller's requested URL when different, HTTP method, amount in base units, token, payee, tx hash, and replay count. These receipts live in memory only (at most 256), are lost on restart, are not shared across processes, and are omitted from queries scoped by `from_block`/`to_block` because they carry no block position. Each is labeled `broadcast (unconfirmed)`: it is recorded when the wallet returns a tx hash, without waiting for a receipt, so a dropped or reverted transfer can still appear. They are a convenience view, not an audit log; confirm the tx hash on-chain. Only the tx hash, amount, token and payee can be checked against the chain; the URL, method and replay count are process-local metadata, the replay count changes on retries, and none of it survives a restart.
+
+
 
 **What is NOT recorded:**
 
-- Tool invocations, tool names, or tool parameters — no MCP-level request log exists
+- Tool invocations, tool names, or tool parameters — no MCP-level request log exists (the in-memory x402 settlement receipts above are the only process-local record, and cover settled payments only)
 - In-process policy evaluation results (approvals/rejections by the `set_spend_policy` engine)
 - Payment attempts rejected or failed before a transaction reached the chain
 - **Reverted on-chain transactions** — a mined-but-reverted attempt rolls back its event logs, so event-based history cannot show it; auditors needing reverted attempts must consult transaction receipts or an external indexer

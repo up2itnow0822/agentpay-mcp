@@ -50,6 +50,11 @@ import {
   withSpendIntent,
   x402PayIntentIdentity,
 } from '../utils/spend-intent.js';
+import {
+  recordX402Settlement,
+  nextX402SettlementSeq,
+  recordX402SettlementReplay,
+} from '../utils/x402-receipt-log.js';
 
 /** 402 offers no payable Base option. Retryable; nothing was broadcast. */
 class X402UnsupportedRequirementError extends DefiniteSpendFailure {
@@ -57,6 +62,40 @@ class X402UnsupportedRequirementError extends DefiniteSpendFailure {
     super(body);
     this.name = 'X402UnsupportedRequirementError';
   }
+}
+
+function persistX402Settlement(entry: {
+  intentKey: string;
+  url: string;
+  requestedUrl?: string;
+  settledAt?: number;
+  seq?: number;
+  finalUrlUnknown?: boolean;
+  method: string;
+  amount: bigint | string;
+  token: string;
+  recipient: string;
+  txHash: string;
+}): string {
+  const txHash = requireSettlementHash(entry.txHash, 'x402_pay');
+  recordX402Settlement({
+    intentKey: entry.intentKey,
+    url: entry.url,
+    ...(entry.requestedUrl && entry.requestedUrl !== entry.url
+      ? { requestedUrl: entry.requestedUrl }
+      : {}),
+    ...(typeof entry.seq === 'number' ? { seq: entry.seq } : {}),
+    ...(entry.finalUrlUnknown ? { finalUrlUnknown: true } : {}),
+    ...(typeof entry.settledAt === 'number' && Number.isFinite(entry.settledAt)
+      ? { settledAt: entry.settledAt }
+      : {}),
+    method: entry.method,
+    amount: typeof entry.amount === 'bigint' ? entry.amount.toString() : entry.amount,
+    token: entry.token,
+    recipient: entry.recipient,
+    txHash,
+  });
+  return txHash;
 }
 
 type X402PaymentAccept = {
@@ -375,6 +414,9 @@ export async function handleX402Pay(
         let paymentAmount = 0n;
         let paymentTxHash = '';
         let paymentRecipient = '';
+        let paymentToken = '';
+        let paymentSettledAt: number | undefined;
+        let paymentSeq: number | undefined;
 
         // Cap enforcement happens in onBeforePayment using the selected asset's
         // decimals — never compare USDC base units against ETH-wei.
@@ -431,6 +473,9 @@ export async function handleX402Pay(
             paymentAmount = log.amount;
             paymentTxHash = log.txHash;
             paymentRecipient = log.recipient;
+            paymentToken = log.token;
+            paymentSeq = nextX402SettlementSeq();
+            paymentSettledAt = log.timestamp;
           },
         });
 
@@ -454,11 +499,14 @@ export async function handleX402Pay(
 
         let response: Response;
         let responseText: string;
+        // Captured before the body read so a body-read failure keeps the paid-response URL.
+        let paidResponseUrl: string | undefined;
         try {
           const paid = await runClassifiedSpend(
             wallet.walletClient,
             async () => {
               const next = await x402Client.fetch(input.url, requestInit);
+              paidResponseUrl = next.url || undefined;
               return { response: next, responseText: await next.text() };
             },
             { lockAfterBroadcast: true }
@@ -467,6 +515,26 @@ export async function handleX402Pay(
           responseText = paid.responseText;
         } catch (error: unknown) {
           if (paymentMade) {
+            try {
+              paymentTxHash = persistX402Settlement({
+                intentKey: intent.key,
+                // If the paid response arrived but its body read failed, keep its URL;
+                // otherwise the redirect target that issued the 402 is unknown.
+                url: paidResponseUrl ?? input.url,
+                ...(paidResponseUrl ? {} : { finalUrlUnknown: true }),
+                requestedUrl: input.url,
+                settledAt: paymentSettledAt,
+                seq: paymentSeq,
+                method,
+                amount: paymentAmount,
+                token: paymentToken,
+                recipient: paymentRecipient,
+                txHash: paymentTxHash,
+              });
+            } catch {
+              // Still fail closed on the post-settlement error even if the
+              // callback hash cannot be recorded as a history receipt.
+            }
             throw new PostSettlementSpendError({
               txHash: paymentTxHash,
               amount: paymentAmount,
@@ -493,7 +561,21 @@ export async function handleX402Pay(
         }
 
         if (paymentMade) {
-          requireSettlementHash(paymentTxHash, 'x402_pay');
+          paymentTxHash = persistX402Settlement({
+            intentKey: intent.key,
+            // Record the URL that issued the paid 402 (after redirects).
+            // response.url is the final URL of the paid response; under
+            // redirects it may differ from the endpoint that issued the 402.
+            url: response.url || input.url,
+            requestedUrl: input.url,
+            settledAt: paymentSettledAt,
+            seq: paymentSeq,
+            method,
+            amount: paymentAmount,
+            token: paymentToken,
+            recipient: paymentRecipient,
+            txHash: paymentTxHash,
+          });
         }
 
         let out = `🌐 **x402 Fetch Result**\n\n`;
@@ -527,6 +609,10 @@ export async function handleX402Pay(
         shouldSettle: (result) => result.charged,
       }
     );
+
+    if (replayed && value.charged) {
+      recordX402SettlementReplay(intent.key);
+    }
 
     const text = replayed
       ? `${value.text}\n♻️ Idempotent retry: original x402 result replayed; no second settlement.\n`
