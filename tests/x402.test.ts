@@ -1786,7 +1786,7 @@ describe('get_transaction_history tool', () => {
     expect(result.content[0]!.text).not.toContain('x402 Settlements');
   });
 
-  it('applies limit across on-chain activity and x402 receipts', async () => {
+  it('applies limit per source so x402 receipts cannot starve on-chain events', async () => {
     recordX402Settlement({
       intentKey: 'x402_pay#limit-a',
       url: 'https://api.example.com/a',
@@ -1811,9 +1811,41 @@ describe('get_transaction_history tool', () => {
     const onChainCount = (text.match(/Transaction Executed|Spend Policy Updated/g) ?? []).length;
     const x402Count = (text.match(/\*\*x402 Payment\*\*/g) ?? []).length;
 
-    expect(onChainCount + x402Count).toBeLessThanOrEqual(2);
     expect(x402Count).toBe(2);
-    expect(text).not.toContain('Transaction Executed');
+    expect(onChainCount).toBeGreaterThan(0);
+    expect(onChainCount).toBeLessThanOrEqual(2);
+    expect(text).toContain('up to 2 on-chain + up to 2 x402');
+  });
+
+  it('omits x402 receipts from block-scoped queries and says so', async () => {
+    recordX402Settlement({
+      intentKey: 'x402_pay#scoped',
+      url: 'https://api.example.com/scoped',
+      method: 'GET',
+      amount: '1',
+      token: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913',
+      recipient: '0xfeedfacefeedfacefeedfacefeedfacefeedface',
+      txHash: '0xc480941a588f513a6f4ecbcee0826ea66147b0f68488131572522830b4ac60fb',
+    });
+    const result = await handleGetTransactionHistory({ from_block: '1', to_block: '2' });
+    const text = result.content[0]!.text;
+    expect(text).not.toContain('**x402 Payment**');
+  });
+
+  it('shows the requested URL when the paid 402 came from a redirect target', async () => {
+    recordX402Settlement({
+      intentKey: 'x402_pay#redirect',
+      url: 'https://pay.other.example/final',
+      requestedUrl: 'https://api.example.com/start',
+      method: 'GET',
+      amount: '1',
+      token: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913',
+      recipient: '0xfeedfacefeedfacefeedfacefeedfacefeedface',
+      txHash: '0x66e6299fee8deb3c350e639edf1de966dbbf639b0a4834080e9a98c438b60340',
+    });
+    const text = (await handleGetTransactionHistory({})).content[0]!.text;
+    expect(text).toContain('pay.other.example/final');
+    expect(text).toContain('Requested:');
   });
 
   it('returns cached x402 settlements when the RPC history query fails', async () => {

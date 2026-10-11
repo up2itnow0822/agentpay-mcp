@@ -66,6 +66,7 @@ class X402UnsupportedRequirementError extends DefiniteSpendFailure {
 function persistX402Settlement(entry: {
   intentKey: string;
   url: string;
+  requestedUrl?: string;
   method: string;
   amount: bigint | string;
   token: string;
@@ -76,6 +77,9 @@ function persistX402Settlement(entry: {
   recordX402Settlement({
     intentKey: entry.intentKey,
     url: entry.url,
+    ...(entry.requestedUrl && entry.requestedUrl !== entry.url
+      ? { requestedUrl: entry.requestedUrl }
+      : {}),
     method: entry.method,
     amount: typeof entry.amount === 'bigint' ? entry.amount.toString() : entry.amount,
     token: entry.token,
@@ -537,7 +541,9 @@ export async function handleX402Pay(
         if (paymentMade) {
           paymentTxHash = persistX402Settlement({
             intentKey: intent.key,
-            url: input.url,
+            // Record the URL that issued the paid 402 (after redirects).
+            url: response.url || input.url,
+            requestedUrl: input.url,
             method,
             amount: paymentAmount,
             token: paymentToken,
