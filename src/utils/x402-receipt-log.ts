@@ -16,7 +16,7 @@ export const X402_SETTLEMENT_LOG_MAX = 256
 
 export interface X402SettlementReceipt {
   intentKey: string
-  /** URL whose 402 response was paid (final URL after redirects). */
+  /** Final URL of the paid response. Under redirects this may differ from the endpoint that issued the 402. */
   url: string
   /** Caller-supplied URL, when it differs from `url`. */
   requestedUrl?: string

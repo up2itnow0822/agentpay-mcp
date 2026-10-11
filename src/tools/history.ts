@@ -222,7 +222,7 @@ export async function handleGetTransactionHistory(
 function formatX402Settlement(receipt: X402SettlementReceipt, chainId: number): string {
   const txUrl = explorerTxUrl(receipt.txHash as Hash, chainId);
   let out = `💳 **x402 Payment**\n`;
-  out += `   URL:     ${sanitizeUntrustedUrl(receipt.url)}\n`;
+  out += `   URL:     ${sanitizeUntrustedUrl(receipt.url)} (final URL of paid response)\n`;
   if (receipt.finalUrlUnknown) {
     out += `   Note:    requested URL; the paid retry failed, so the redirect target that issued the 402 is unknown\n`;
   }

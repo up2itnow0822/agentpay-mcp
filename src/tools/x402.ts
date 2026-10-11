@@ -560,8 +560,8 @@ export async function handleX402Pay(
           paymentTxHash = persistX402Settlement({
             intentKey: intent.key,
             // Record the URL that issued the paid 402 (after redirects).
-            // The SDK's log.url is the pre-redirect URL; response.url is the
-            // final URL that served the paid response.
+            // response.url is the final URL of the paid response; under
+            // redirects it may differ from the endpoint that issued the 402.
             url: response.url || input.url,
             requestedUrl: input.url,
             settledAt: paymentSettledAt,
