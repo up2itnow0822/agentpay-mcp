@@ -20,6 +20,10 @@ export interface X402SettlementReceipt {
   url: string
   /** Caller-supplied URL, when it differs from `url`. */
   requestedUrl?: string
+  /** Paid retry failed, so the redirect target that issued the 402 is unknown. */
+  finalUrlUnknown?: boolean
+  /** Monotonic order captured when the payment callback ran. */
+  seq?: number
   method: string
   amount: string
   token: string
@@ -31,6 +35,13 @@ export interface X402SettlementReceipt {
 }
 
 const receipts: X402SettlementReceipt[] = []
+let seqCounter = 0
+
+/** Call from onPaymentComplete to capture callback order (timestamps are whole seconds). */
+export function nextX402SettlementSeq(): number {
+  seqCounter += 1
+  return seqCounter
+}
 const latestByIntent = new Map<string, X402SettlementReceipt>()
 
 function sameTxHash(a: string, b: string): boolean {
@@ -61,6 +72,10 @@ export function recordX402Settlement(entry: {
   intentKey: string
   url: string
   requestedUrl?: string
+  /** Paid retry failed, so the redirect target that issued the 402 is unknown. */
+  finalUrlUnknown?: boolean
+  /** Monotonic order captured when the payment callback ran. */
+  seq?: number
   method: string
   amount: string
   token: string
@@ -106,7 +121,12 @@ export function recordX402SettlementReplay(
 export function listX402Settlements(): X402SettlementReceipt[] {
   return receipts
     .map((receipt, index) => ({ receipt, index }))
-    .sort((a, b) => a.receipt.settledAt - b.receipt.settledAt || a.index - b.index)
+    .sort(
+      (a, b) =>
+        a.receipt.settledAt - b.receipt.settledAt ||
+        (a.receipt.seq ?? Number.MAX_SAFE_INTEGER) - (b.receipt.seq ?? Number.MAX_SAFE_INTEGER) ||
+        a.index - b.index
+    )
     .map(({ receipt }) => receipt)
 }
 

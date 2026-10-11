@@ -52,6 +52,7 @@ import {
 } from '../utils/spend-intent.js';
 import {
   recordX402Settlement,
+  nextX402SettlementSeq,
   recordX402SettlementReplay,
 } from '../utils/x402-receipt-log.js';
 
@@ -68,6 +69,8 @@ function persistX402Settlement(entry: {
   url: string;
   requestedUrl?: string;
   settledAt?: number;
+  seq?: number;
+  finalUrlUnknown?: boolean;
   method: string;
   amount: bigint | string;
   token: string;
@@ -81,6 +84,8 @@ function persistX402Settlement(entry: {
     ...(entry.requestedUrl && entry.requestedUrl !== entry.url
       ? { requestedUrl: entry.requestedUrl }
       : {}),
+    ...(typeof entry.seq === 'number' ? { seq: entry.seq } : {}),
+    ...(entry.finalUrlUnknown ? { finalUrlUnknown: true } : {}),
     ...(typeof entry.settledAt === 'number' && Number.isFinite(entry.settledAt)
       ? { settledAt: entry.settledAt }
       : {}),
@@ -410,8 +415,8 @@ export async function handleX402Pay(
         let paymentTxHash = '';
         let paymentRecipient = '';
         let paymentToken = '';
-        let paymentUrl: string | undefined;
         let paymentSettledAt: number | undefined;
+        let paymentSeq: number | undefined;
 
         // Cap enforcement happens in onBeforePayment using the selected asset's
         // decimals — never compare USDC base units against ETH-wei.
@@ -469,7 +474,7 @@ export async function handleX402Pay(
             paymentTxHash = log.txHash;
             paymentRecipient = log.recipient;
             paymentToken = log.token;
-            paymentUrl = log.url;
+            paymentSeq = nextX402SettlementSeq();
             paymentSettledAt = log.timestamp;
           },
         });
@@ -510,9 +515,12 @@ export async function handleX402Pay(
             try {
               paymentTxHash = persistX402Settlement({
                 intentKey: intent.key,
-                url: paymentUrl || input.url,
+                // No paid response: the redirect target that issued the 402 is unknown.
+                url: input.url,
+                finalUrlUnknown: true,
                 requestedUrl: input.url,
                 settledAt: paymentSettledAt,
+                seq: paymentSeq,
                 method,
                 amount: paymentAmount,
                 token: paymentToken,
@@ -552,7 +560,9 @@ export async function handleX402Pay(
           paymentTxHash = persistX402Settlement({
             intentKey: intent.key,
             // Record the URL that issued the paid 402 (after redirects).
-            url: paymentUrl || response.url || input.url,
+            // The SDK's log.url is the pre-redirect URL; response.url is the
+            // final URL that served the paid response.
+            url: response.url || input.url,
             requestedUrl: input.url,
             settledAt: paymentSettledAt,
             method,

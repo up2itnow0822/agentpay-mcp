@@ -69,9 +69,11 @@ MCP 2026 roadmap requires OAuth 2.1 with PKCE for server authentication in enter
 - On-chain spend-policy updates (token, per-tx limit, period limit)
 - Operator changes
 
-Each entry carries the event type, block number, and transaction hash.
+Each entry carries the event type, block number, and transaction hash. These on-chain event records are immutable and independently verifiable on any node or block explorer for the configured chain (Base by default), and can be exported to enterprise SIEM systems by querying the chain directly or via `get_transaction_history`.
 
-**Process-lifetime x402 settlement receipts.** For unscoped `event_type: all` queries, `get_transaction_history` also lists successful `x402_pay` settlements made by the running server process: the URL whose 402 was paid (after redirects, with the caller's requested URL when different), HTTP method, amount in base units, token, payee, tx hash, and replay count. These receipts live in memory only (at most 256), are lost on restart, are not shared across processes, and are omitted from queries scoped by `from_block`/`to_block` because they carry no block position. Each is labeled `broadcast (unconfirmed)`: it is recorded when the wallet returns a tx hash, without waiting for a receipt, so a dropped or reverted transfer can still appear. They are a convenience view, not an audit log; confirm the tx hash on-chain. These records are immutable and independently verifiable on any node or block explorer for the configured chain (Base by default), and can be exported to enterprise SIEM systems by querying the chain directly or via `get_transaction_history`.
+**Process-lifetime x402 settlement receipts.** For unscoped `event_type: all` queries, `get_transaction_history` also lists successful `x402_pay` settlements made by the running server process: the URL whose 402 was paid (after redirects, with the caller's requested URL when different), HTTP method, amount in base units, token, payee, tx hash, and replay count. These receipts live in memory only (at most 256), are lost on restart, are not shared across processes, and are omitted from queries scoped by `from_block`/`to_block` because they carry no block position. Each is labeled `broadcast (unconfirmed)`: it is recorded when the wallet returns a tx hash, without waiting for a receipt, so a dropped or reverted transfer can still appear. They are a convenience view, not an audit log; confirm the tx hash on-chain. Only the tx hash, amount, token and payee can be checked against the chain; the URL, method and replay count are process-local metadata, the replay count changes on retries, and none of it survives a restart.
+
+
 
 **What is NOT recorded:**
 

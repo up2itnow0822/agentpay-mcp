@@ -1844,6 +1844,22 @@ describe('get_transaction_history tool', () => {
     expect(text).toContain('broadcast (unconfirmed)');
   });
 
+  it('breaks same-second ties by callback sequence', async () => {
+    recordX402Settlement({
+      intentKey: 'x402_pay#seq-late', url: 'https://api.example.com/later', method: 'GET', amount: '1',
+      token: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913', recipient: '0xfeedfacefeedfacefeedfacefeedfacefeedface',
+      txHash: '0xc480941a588f513a6f4ecbcee0826ea66147b0f68488131572522830b4ac60fb', settledAt: 5, seq: 2,
+    });
+    recordX402Settlement({
+      intentKey: 'x402_pay#seq-early', url: 'https://api.example.com/earlier', method: 'GET', amount: '2',
+      token: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913', recipient: '0xfeedfacefeedfacefeedfacefeedfacefeedface',
+      txHash: '0x66e6299fee8deb3c350e639edf1de966dbbf639b0a4834080e9a98c438b60340', settledAt: 5, seq: 1,
+    });
+    const text = (await handleGetTransactionHistory({ limit: 1 })).content[0]!.text;
+    expect(text).toContain('api.example.com/later');
+    expect(text).not.toContain('api.example.com/earlier');
+  });
+
   it('omits x402 receipts from block-scoped queries and says so', async () => {
     recordX402Settlement({
       intentKey: 'x402_pay#scoped',

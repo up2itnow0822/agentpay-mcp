@@ -219,6 +219,9 @@ function formatX402Settlement(receipt: X402SettlementReceipt, chainId: number): 
   const txUrl = explorerTxUrl(receipt.txHash as Hash, chainId);
   let out = `💳 **x402 Payment**\n`;
   out += `   URL:     ${sanitizeUntrustedUrl(receipt.url)}\n`;
+  if (receipt.finalUrlUnknown) {
+    out += `   Note:    requested URL; the paid retry failed, so the redirect target that issued the 402 is unknown\n`;
+  }
   if (receipt.requestedUrl && receipt.requestedUrl !== receipt.url) {
     out += `   Requested: ${sanitizeUntrustedUrl(receipt.requestedUrl)}\n`;
   }
