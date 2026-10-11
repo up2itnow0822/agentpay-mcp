@@ -32,7 +32,7 @@ export const GetTransactionHistorySchema = z.object({
     .max(100)
     .optional()
     .default(20)
-    .describe('Maximum number of entries to return (default: 20, max: 100)'),
+    .describe('Maximum entries per source: up to this many on-chain events plus up to this many x402 receipts (default: 20, max: 100)'),
   from_block: z
     .string()
     .optional()
@@ -66,7 +66,7 @@ export const getTransactionHistoryTool = {
     properties: {
       limit: {
         type: 'number',
-        description: 'Max entries to return (default: 20, max: 100)',
+        description: 'Max entries per source (on-chain events and x402 receipts each; default: 20, max: 100)',
         default: 20,
       },
       from_block: {
