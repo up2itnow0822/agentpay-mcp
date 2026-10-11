@@ -1,0 +1,690 @@
+# review-gate — required status check that fails until Codex has finished
+# reviewing the current head commit (or Bill applied the codex-waived label).
+#
+# Why: CI goes green minutes before chatgpt-codex-connector posts. Agents
+# merging on Bill's token (and cursor[bot]) were landing money-rail PRs in
+# that window. Thread-resolution rules cannot block on threads that do not
+# exist yet. This check is published as github-actions (app id 15368) so a
+# PAT cannot fake it.
+#
+# Pass conditions (any one):
+#   1. A non-dismissed, non-pending chatgpt-codex-connector[bot]
+#      (user.type == Bot) review exists with commit_id exactly equal to the
+#      full 40-character head SHA, submitted after the PR's most recent
+#      base-branch change; or, for a clean pass (Codex submits no review when
+#      it has no findings), the Codex bot's own review-summary comment reports
+#      `Code Review | Completed | <full 40-char head sha>` and was updated
+#      after the last base change. Short SHAs are never accepted. A dismissed
+#      Codex review on this head never counts, including via the summary
+#      shortcut. Findings arrive as review threads, which the ruleset's
+#      thread-resolution rule blocks separately.
+#   2. Waiver bound to THIS PR's label event and current base: an allow-listed
+#      actor (WAIVER_ACTORS) applied `codex-waived` while this exact head SHA
+#      was current. The labeled event publishes a "Codex waived" check whose
+#      summary attests {pr, head, base, base_ref, label_event_id, actor}.
+#      Later evaluations honor that check only when the attestation matches
+#      this PR number, this full head SHA, the current base SHA+ref, and the
+#      current LabeledEvent id, and that event still post-dates the last base
+#      change. A check waived for another PR (or an earlier visit to the same
+#      SHA) does not transfer. Any push or retarget needs a new review or a
+#      freshly applied waiver.
+#
+# A check run belongs to a commit, not a PR, so the verdict for a SHA is
+# success only if EVERY open PR whose head is that SHA passes. Immediately
+# before posting success, review evidence is re-fetched and open PRs sharing
+# the head SHA are re-listed.
+#
+# Concurrency is per-PR (plus a shared `sweep` group for schedule /
+# check_suite / unscoped dispatch). A comment on PR B cannot replace a
+# queued unlabeled/edited run for PR A. cancel-in-progress is false.
+#
+# The first step posts an in-progress `review-gate` on the event's head SHA
+# (from the payload, no PR/timeline/review/comment reads). Evaluation then
+# updates that same check. Any error path completes it as failure so a prior
+# success cannot linger after a failed invalidation.
+#
+# Draft PRs get a failing gate (not neutral), so marking a draft ready can
+# never expose an already-satisfied required check.
+#
+# Commit statuses are deliberately NOT accepted as Codex evidence: anyone with
+# statuses:write can post a status with any context name.
+#
+# Fail-closed: Codex usage-limit comments without a head review keep the
+# gate red. Do NOT enable repo allow_auto_merge until this check is required.
+#
+# Trigger hardening: every trigger here runs the workflow definition from the
+# default branch, never from the PR (pull_request_target instead of
+# pull_request; no pull_request_review, which would execute the PR's copy).
+# A PR that edits this file therefore cannot change how its own gate is
+# evaluated. The workflow never checks out or executes PR content. Codex
+# reviews (and review dismissals) are picked up by the 10-minute schedule, the
+# next PR comment, or a manual workflow_dispatch. Base retargets re-run via
+# the `edited` action.
+#
+# Residual risk (GitHub platform limit): any other workflow that runs from PR
+# code with `checks: write` can also create a check run named `review-gate`
+# as github-actions. Keep repository default workflow permissions read-only
+# and review changes under .github/workflows/ with that in mind.
+
+name: review-gate
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened, ready_for_review, labeled, unlabeled, edited]
+  issue_comment:
+    types: [created]
+  check_suite:
+    types: [completed]
+  schedule:
+    - cron: "*/10 * * * *"
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: "PR number to evaluate (optional; schedule evaluates all open)"
+        required: false
+
+permissions:
+  contents: read
+  checks: write
+  issues: read
+  pull-requests: read
+
+concurrency:
+  group: review-gate-${{ github.repository }}-pr-${{ github.event.pull_request.number || github.event.issue.number || github.event.inputs.pr_number || 'sweep' }}
+  cancel-in-progress: false
+
+jobs:
+  # Job name is NOT the required check name. The required context is the
+  # Check Run named "review-gate" created below, pinned to the PR head SHA.
+  publish:
+    if: >
+      github.event_name == 'pull_request_target' ||
+      github.event_name == 'workflow_dispatch' ||
+      github.event_name == 'schedule' ||
+      github.event_name == 'check_suite' ||
+      (github.event_name == 'issue_comment' && github.event.issue.pull_request != null)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Mark review-gate pending
+        id: pending
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const CHECK_NAME = 'review-gate';
+            const FULL_SHA = /^[0-9a-f]{40}$/i;
+            const pr = context.payload.pull_request;
+            const sha = pr && pr.head && pr.head.sha;
+            if (!sha || !FULL_SHA.test(sha)) {
+              core.setOutput('sha', '');
+              core.setOutput('check_id', '');
+              return;
+            }
+            const { data } = await github.rest.checks.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              name: CHECK_NAME,
+              head_sha: sha,
+              status: 'in_progress',
+              output: {
+                title: 'Evaluating review-gate',
+                summary: 'Blocking this head until evaluation finishes. A prior success is no longer current.',
+              },
+            });
+            core.setOutput('sha', sha);
+            core.setOutput('check_id', String(data.id));
+            core.info(`Marked ${sha} pending as check ${data.id}`);
+
+      - name: Evaluate and publish review-gate
+        id: gate
+        uses: actions/github-script@v7
+        env:
+          PENDING_SHA: ${{ steps.pending.outputs.sha }}
+          PENDING_CHECK_ID: ${{ steps.pending.outputs.check_id }}
+        with:
+          script: |
+            const CODEX_LOGINS = new Set([
+              'chatgpt-codex-connector',
+              'chatgpt-codex-connector[bot]',
+            ]);
+            const WAIVE_LABEL = 'codex-waived';
+            const WAIVER_ACTORS = new Set(['up2itnow0822']);
+            const CHECK_NAME = 'review-gate';
+            const SUMMARY_MARKER = '<!-- codex-pull-request-review-summary -->';
+            const FULL_SHA = /^[0-9a-f]{40}$/i;
+            const WAIVER_PREFIX = '<!-- review-gate-waiver:';
+            const WAIVER_SUFFIX = ' -->';
+
+            function isFullSha(value) {
+              return typeof value === 'string' && FULL_SHA.test(value);
+            }
+
+            function isCodexLogin(login) {
+              return !!login && CODEX_LOGINS.has(login);
+            }
+
+            function isCodexUser(user) {
+              return !!user && user.type === 'Bot' && isCodexLogin(user.login);
+            }
+
+            function waiverEventId(event) {
+              if (!event) return '';
+              if (event.id != null && event.id !== '') return String(event.id);
+              if (event.node_id) return String(event.node_id);
+              return '';
+            }
+
+            function encodeWaiverAttestation(att) {
+              return WAIVER_PREFIX + JSON.stringify({
+                pr: Number(att.pr),
+                head: String(att.head).toLowerCase(),
+                base: String(att.base).toLowerCase(),
+                base_ref: String(att.base_ref),
+                label_event_id: String(att.label_event_id),
+                labeled_at: String(att.labeled_at),
+                actor: String(att.actor),
+              }) + WAIVER_SUFFIX;
+            }
+
+            function parseWaiverAttestation(summary) {
+              if (typeof summary !== 'string' || summary.length > 20000) return null;
+              const start = summary.indexOf(WAIVER_PREFIX);
+              if (start < 0) return null;
+              const jsonStart = start + WAIVER_PREFIX.length;
+              const end = summary.indexOf(WAIVER_SUFFIX, jsonStart);
+              if (end < 0 || end - jsonStart > 2000) return null;
+              try {
+                const att = JSON.parse(summary.slice(jsonStart, end));
+                if (!att || typeof att !== 'object') return null;
+                if (!Number.isFinite(Number(att.pr))) return null;
+                if (!isFullSha(att.head) || !isFullSha(att.base)) return null;
+                if (att.label_event_id == null || att.label_event_id === '') return null;
+                if (!att.base_ref || !att.actor) return null;
+                return {
+                  pr: Number(att.pr),
+                  head: String(att.head).toLowerCase(),
+                  base: String(att.base).toLowerCase(),
+                  base_ref: String(att.base_ref),
+                  label_event_id: String(att.label_event_id),
+                  labeled_at: String(att.labeled_at || ''),
+                  actor: String(att.actor),
+                };
+              } catch {
+                return null;
+              }
+            }
+
+            function attestationMatches(att, expected) {
+              return !!att &&
+                att.pr === expected.prNumber &&
+                att.head === expected.headSha.toLowerCase() &&
+                att.base === expected.baseSha.toLowerCase() &&
+                att.base_ref === expected.baseRef &&
+                att.label_event_id === expected.labelEventId &&
+                WAIVER_ACTORS.has(att.actor);
+            }
+
+            const pendingBySha = new Map();
+            const envSha = process.env.PENDING_SHA || '';
+            const envId = process.env.PENDING_CHECK_ID || '';
+            if (isFullSha(envSha) && envId) {
+              pendingBySha.set(envSha.toLowerCase(), { id: Number(envId), sha: envSha });
+            }
+
+            async function createPendingCheck(headSha) {
+              const { data } = await github.rest.checks.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                name: CHECK_NAME,
+                head_sha: headSha,
+                status: 'in_progress',
+                output: {
+                  title: 'Evaluating review-gate',
+                  summary: 'Blocking this head until evaluation finishes. A prior success is no longer current.',
+                },
+              });
+              return data;
+            }
+
+            async function ensurePending(headSha) {
+              if (!isFullSha(headSha)) {
+                throw new Error(`refusing to publish review-gate for non-full SHA: ${headSha}`);
+              }
+              const key = headSha.toLowerCase();
+              if (pendingBySha.has(key)) return pendingBySha.get(key);
+              const data = await createPendingCheck(headSha);
+              const rec = { id: data.id, sha: headSha };
+              pendingBySha.set(key, rec);
+              return rec;
+            }
+
+            async function completeCheck(checkRunId, conclusion, title, summary) {
+              await github.rest.checks.update({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                check_run_id: checkRunId,
+                status: 'completed',
+                conclusion,
+                output: { title, summary },
+              });
+            }
+
+            async function failClosePending(reason) {
+              for (const rec of pendingBySha.values()) {
+                try {
+                  const { data } = await github.rest.checks.get({
+                    owner: context.repo.owner,
+                    repo: context.repo.repo,
+                    check_run_id: rec.id,
+                  });
+                  if (data.status === 'completed') continue;
+                  await completeCheck(
+                    rec.id,
+                    'failure',
+                    'Evaluation failed',
+                    `review-gate failed closed: ${reason}`,
+                  );
+                } catch (err) {
+                  core.error(`failed to fail-close check ${rec.id}: ${err}`);
+                }
+              }
+            }
+
+            async function timelineFacts(prNumber) {
+              const events = await github.paginate(github.rest.issues.listEventsForTimeline, {
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: prNumber,
+                per_page: 100,
+              });
+              let baseChangedMs = 0;
+              let lastWaiverEvent = null;
+              for (const event of events) {
+                if (event.event === 'base_ref_changed' && event.created_at) {
+                  baseChangedMs = Math.max(baseChangedMs, Date.parse(event.created_at));
+                }
+                if ((event.event === 'labeled' || event.event === 'unlabeled') &&
+                    event.label && event.label.name === WAIVE_LABEL) {
+                  lastWaiverEvent = event;
+                }
+              }
+              return { baseChangedMs, lastWaiverEvent };
+            }
+
+            async function waitForLabeledEvent(prNumber) {
+              for (let attempt = 0; attempt < 3; attempt++) {
+                const facts = await timelineFacts(prNumber);
+                const id = waiverEventId(facts.lastWaiverEvent);
+                if (facts.lastWaiverEvent && facts.lastWaiverEvent.event === 'labeled' && id) {
+                  return { ...facts, id };
+                }
+                if (attempt < 2) {
+                  await new Promise(resolve => setTimeout(resolve, 1000));
+                }
+              }
+              return null;
+            }
+
+            async function findMatchingWaiverCheck(expected) {
+              const runs = await github.paginate(github.rest.checks.listForRef, {
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                ref: expected.headSha,
+                check_name: CHECK_NAME,
+                filter: 'all',
+                per_page: 100,
+              });
+              return runs.some(run => {
+                if (!(run.app && run.app.slug === 'github-actions')) return false;
+                if (run.conclusion !== 'success') return false;
+                if (!(run.output && run.output.title === 'Codex waived')) return false;
+                const att = parseWaiverAttestation(run.output.summary || '');
+                return attestationMatches(att, expected);
+              });
+            }
+
+            async function listOpenPulls() {
+              return github.paginate(github.rest.pulls.list, {
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                state: 'open',
+                per_page: 100,
+              });
+            }
+
+            function prsSharingSha(openPrs, headSha) {
+              const want = headSha.toLowerCase();
+              return openPrs.filter(pr => isFullSha(pr.head.sha) && pr.head.sha.toLowerCase() === want);
+            }
+
+            async function resolvePrNumbers(openPrs) {
+              if (context.payload.pull_request) {
+                return [context.payload.pull_request.number];
+              }
+              if (context.payload.issue && context.payload.issue.pull_request) {
+                return [context.payload.issue.number];
+              }
+              if (context.payload.inputs && context.payload.inputs.pr_number) {
+                const n = parseInt(context.payload.inputs.pr_number, 10);
+                if (!Number.isFinite(n)) throw new Error(`bad pr_number: ${context.payload.inputs.pr_number}`);
+                return [n];
+              }
+              return openPrs.filter(pr => !pr.draft).map(pr => pr.number);
+            }
+
+            async function evaluate(prNumber) {
+              const { data: pr } = await github.rest.pulls.get({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                pull_number: prNumber,
+              });
+              const headSha = pr.head.sha;
+              const baseSha = pr.base.sha;
+              const baseRef = pr.base.ref;
+              if (!isFullSha(headSha)) {
+                throw new Error(`PR #${prNumber} head is not a full SHA: ${headSha}`);
+              }
+              if (!isFullSha(baseSha)) {
+                throw new Error(`PR #${prNumber} base is not a full SHA: ${baseSha}`);
+              }
+              await ensurePending(headSha);
+              const labels = (pr.labels || []).map(l => l.name);
+              const { baseChangedMs, lastWaiverEvent } = await timelineFacts(prNumber);
+
+              if (labels.includes(WAIVE_LABEL)) {
+                const payload = context.payload;
+                const sender = (payload.sender && payload.sender.login) || '';
+                const payloadHead = payload.pull_request && payload.pull_request.head && payload.pull_request.head.sha;
+                const payloadBase = payload.pull_request && payload.pull_request.base && payload.pull_request.base.sha;
+                const payloadBaseRef = payload.pull_request && payload.pull_request.base && payload.pull_request.base.ref;
+                const freshWaiver =
+                  context.eventName === 'pull_request_target' &&
+                  payload.action === 'labeled' &&
+                  payload.label && payload.label.name === WAIVE_LABEL &&
+                  payload.pull_request && payload.pull_request.number === prNumber &&
+                  isFullSha(payloadHead) && payloadHead.toLowerCase() === headSha.toLowerCase() &&
+                  isFullSha(payloadBase) && payloadBase.toLowerCase() === baseSha.toLowerCase() &&
+                  payloadBaseRef === baseRef;
+                if (freshWaiver && WAIVER_ACTORS.has(sender)) {
+                  const labeled = await waitForLabeledEvent(prNumber);
+                  if (
+                    labeled &&
+                    WAIVER_ACTORS.has((labeled.lastWaiverEvent.actor && labeled.lastWaiverEvent.actor.login) || '') &&
+                    Date.parse(labeled.lastWaiverEvent.created_at || 0) > labeled.baseChangedMs
+                  ) {
+                    const att = {
+                      pr: prNumber,
+                      head: headSha,
+                      base: baseSha,
+                      base_ref: baseRef,
+                      label_event_id: labeled.id,
+                      labeled_at: labeled.lastWaiverEvent.created_at,
+                      actor: sender,
+                    };
+                    return {
+                      prNumber, headSha, baseSha, baseRef, baseChangedMs: labeled.baseChangedMs,
+                      conclusion: 'success',
+                      title: 'Codex waived',
+                      summary: `Label \`${WAIVE_LABEL}\` applied by @${sender} on head \`${headSha}\` for PR #${prNumber} (base \`${baseRef}\` \`${baseSha}\`). ` +
+                        'The waiver covers this PR, this SHA, and this base only; any new push or retarget needs a new review or waiver.\n\n' +
+                        encodeWaiverAttestation(att),
+                    };
+                  }
+                  core.warning(`Label ${WAIVE_LABEL} on #${prNumber} could not be bound to a timeline LabeledEvent on the current head/base; not waiving.`);
+                } else if (freshWaiver) {
+                  core.warning(`Label ${WAIVE_LABEL} on #${prNumber} applied by ${sender || 'unknown'}; not an allow-listed waiver actor, ignoring.`);
+                } else {
+                  const labelId = waiverEventId(lastWaiverEvent);
+                  const actorLogin = lastWaiverEvent && lastWaiverEvent.actor && lastWaiverEvent.actor.login;
+                  if (
+                    lastWaiverEvent && lastWaiverEvent.event === 'labeled' &&
+                    actorLogin && WAIVER_ACTORS.has(actorLogin) &&
+                    Date.parse(lastWaiverEvent.created_at || 0) > baseChangedMs &&
+                    labelId &&
+                    await findMatchingWaiverCheck({
+                      prNumber,
+                      headSha,
+                      baseSha,
+                      baseRef,
+                      labelEventId: labelId,
+                    })
+                  ) {
+                    return {
+                      prNumber, headSha, baseSha, baseRef, baseChangedMs,
+                      conclusion: 'success',
+                      title: 'Codex waived',
+                      summary: `Waiver previously recorded for PR #${prNumber} head \`${headSha}\` (base \`${baseRef}\` \`${baseSha}\`, label event ${labelId}).`,
+                    };
+                  }
+                  core.warning(`Label ${WAIVE_LABEL} on #${prNumber} is not bound to this PR's current head/base label event; re-apply it to waive this head.`);
+                }
+              }
+              if (pr.draft) {
+                return {
+                  prNumber, headSha, baseSha, baseRef, baseChangedMs,
+                  conclusion: 'failure',
+                  title: 'Draft PR',
+                  summary: 'Draft PRs stay blocked; mark ready for review and wait for Codex on the head.',
+                };
+              }
+
+              const reviews = await github.paginate(github.rest.pulls.listReviews, {
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                pull_number: prNumber,
+                per_page: 100,
+              });
+              const reviewOnHead = (review) => {
+                const commitId = review.commit_id || '';
+                return isCodexUser(review.user) &&
+                  isFullSha(commitId) &&
+                  commitId.toLowerCase() === headSha.toLowerCase();
+              };
+              const dismissedOnHead = reviews.filter(review =>
+                reviewOnHead(review) && review.state === 'DISMISSED'
+              );
+              const codexOnHead = reviews.filter(review =>
+                reviewOnHead(review) &&
+                review.state !== 'DISMISSED' &&
+                review.state !== 'PENDING' &&
+                Date.parse(review.submitted_at || 0) > baseChangedMs
+              );
+
+              const comments = await github.paginate(github.rest.issues.listComments, {
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: prNumber,
+                per_page: 100,
+              });
+              const usageLimited = comments.some(comment => {
+                const body = comment.body || '';
+                return isCodexUser(comment.user) && /usage limits?/i.test(body);
+              });
+
+              // Dismissed reviews never count as clean, including via the
+              // summary-comment shortcut. The bot must attest the complete
+              // 40-character SHA; abbreviations are ignored.
+              const cleanPassOnHead = dismissedOnHead.length === 0 && comments.some(comment => {
+                const body = comment.body || '';
+                if (!isCodexUser(comment.user) || !body.includes(SUMMARY_MARKER)) return false;
+                if (!(Date.parse(comment.updated_at || comment.created_at || 0) > baseChangedMs)) return false;
+                const row = /^\|[^|\n]*\bCode Review\b[^|\n]*\|[^|\n]*\bCompleted\b[^|\n]*\|\s*`([0-9a-f]{40})`\s*\|/gim;
+                let match;
+                while ((match = row.exec(body)) !== null) {
+                  if (match[1].toLowerCase() === headSha.toLowerCase()) return true;
+                }
+                return false;
+              });
+
+              if (codexOnHead.length > 0 || cleanPassOnHead) {
+                return {
+                  prNumber, headSha, baseSha, baseRef, baseChangedMs,
+                  conclusion: 'success',
+                  title: 'Codex reviewed head',
+                  summary: codexOnHead.length > 0
+                    ? `chatgpt-codex-connector reviewed \`${headSha}\` (${codexOnHead.length} review(s)).`
+                    : `chatgpt-codex-connector completed a clean review of \`${headSha}\` (no findings).`,
+                };
+              }
+
+              if (usageLimited) {
+                return {
+                  prNumber, headSha, baseSha, baseRef, baseChangedMs,
+                  conclusion: 'failure',
+                  title: 'Codex unavailable (usage limit)',
+                  summary: `Codex hit usage limits and has not reviewed \`${headSha}\`. ` +
+                    `Fail-closed: apply \`${WAIVE_LABEL}\` only with Bill's explicit GO, or wait for quota.`,
+                };
+              }
+
+              return {
+                prNumber, headSha, baseSha, baseRef, baseChangedMs,
+                conclusion: 'failure',
+                title: 'Waiting for Codex on head',
+                summary: `No chatgpt-codex-connector review on \`${headSha}\` yet. ` +
+                  `CI alone is not enough. Gate stays red until Codex finishes or \`${WAIVE_LABEL}\` is applied.`,
+              };
+            }
+
+            function sameHead(result, headSha) {
+              return result && isFullSha(result.headSha) && result.headSha.toLowerCase() === headSha.toLowerCase();
+            }
+
+            function sortedNumbers(values) {
+              return [...values].sort((a, b) => a - b);
+            }
+
+            async function recheckEvidenceAndSharers(headSha) {
+              const listed = prsSharingSha(await listOpenPulls(), headSha);
+              for (const pr of listed) await ensurePending(pr.head.sha);
+              const results = [];
+              for (const pr of listed) {
+                const result = await evaluate(pr.number);
+                if (sameHead(result, headSha)) results.push(result);
+              }
+              const listedAgain = prsSharingSha(await listOpenPulls(), headSha).map(pr => pr.number);
+              return { results, listedNumbers: sortedNumbers(listed.map(pr => pr.number)), relistedNumbers: sortedNumbers(listedAgain) };
+            }
+
+            try {
+              const openPrs = await listOpenPulls();
+              const payloadSha = context.payload.pull_request && context.payload.pull_request.head && context.payload.pull_request.head.sha;
+              if (isFullSha(payloadSha)) {
+                for (const pr of prsSharingSha(openPrs, payloadSha)) await ensurePending(pr.head.sha);
+              }
+              const numbers = await resolvePrNumbers(openPrs);
+              if (numbers.length === 0) {
+                core.info('No open non-draft PRs to evaluate.');
+                return;
+              }
+
+              for (const n of numbers) {
+                const { data: pr } = await github.rest.pulls.get({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  pull_number: n,
+                });
+                if (isFullSha(pr.head.sha)) await ensurePending(pr.head.sha);
+              }
+
+              const done = new Set();
+              for (const n of numbers) {
+                const first = await evaluate(n);
+                const headSha = first.headSha;
+                const key = headSha.toLowerCase();
+                if (done.has(key)) continue;
+                done.add(key);
+
+                const initialSharers = prsSharingSha(await listOpenPulls(), headSha);
+                for (const pr of initialSharers) await ensurePending(pr.head.sha);
+                const results = [];
+                for (const pr of initialSharers) {
+                  const result = pr.number === n ? first : await evaluate(pr.number);
+                  if (sameHead(result, headSha)) results.push(result);
+                }
+                if (!results.some(result => result.prNumber === n) && sameHead(first, headSha)) {
+                  results.push(first);
+                }
+
+                let failing = results.find(result => result.conclusion !== 'success');
+                let verdict = failing || results[0] || first;
+                let publishedResults = results;
+                if (!sameHead(verdict, headSha)) {
+                  const rec = await ensurePending(headSha);
+                  await completeCheck(rec.id, 'failure', 'Head moved', `PR head moved away from \`${headSha}\` during evaluation. Fail-closed.`);
+                  continue;
+                }
+
+                // Immediately before posting success: re-fetch review/waiver
+                // evidence and re-list every open PR that still shares this SHA.
+                if (verdict.conclusion === 'success') {
+                  let pass = await recheckEvidenceAndSharers(headSha);
+                  if (pass.listedNumbers.join(',') !== pass.relistedNumbers.join(',')) {
+                    pass = await recheckEvidenceAndSharers(headSha);
+                  }
+                  if (pass.listedNumbers.join(',') !== pass.relistedNumbers.join(',')) {
+                    const rec = await ensurePending(headSha);
+                    await completeCheck(
+                      rec.id,
+                      'failure',
+                      'Head sharers moved',
+                      `Open PRs sharing \`${headSha}\` changed immediately before publish. Fail-closed.`,
+                    );
+                    continue;
+                  }
+                  publishedResults = pass.results;
+                  failing = pass.results.find(result => result.conclusion !== 'success');
+                  verdict = failing || pass.results[0] || verdict;
+                  if (!sameHead(verdict, headSha)) {
+                    const rec = await ensurePending(headSha);
+                    await completeCheck(rec.id, 'failure', 'Head moved', `PR head moved away from \`${headSha}\` immediately before publish. Fail-closed.`);
+                    continue;
+                  }
+                }
+
+                const extra = publishedResults.length > 1
+                  ? ` Evaluated ${publishedResults.length} open PRs sharing this head (#${publishedResults.map(r => r.prNumber).join(', #')}).`
+                  : '';
+                const rec = await ensurePending(headSha);
+                await completeCheck(
+                  rec.id,
+                  verdict.conclusion,
+                  verdict.title,
+                  (failing && failing.prNumber !== n
+                    ? `Blocked by PR #${failing.prNumber} (same head): ` : '') + verdict.summary + extra,
+                );
+                core.info(`${headSha} -> ${verdict.conclusion}: ${verdict.title}`);
+              }
+              core.info(`Published review-gate for ${done.size} head SHA(s).`);
+            } catch (err) {
+              await failClosePending(err && err.message ? err.message : String(err));
+              throw err;
+            }
+
+      - name: Fail-close review-gate on error
+        if: failure()
+        uses: actions/github-script@v7
+        env:
+          PENDING_SHA: ${{ steps.pending.outputs.sha }}
+          PENDING_CHECK_ID: ${{ steps.pending.outputs.check_id }}
+        with:
+          script: |
+            const checkId = process.env.PENDING_CHECK_ID;
+            if (!checkId) return;
+            const { data } = await github.rest.checks.get({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              check_run_id: Number(checkId),
+            });
+            if (data.status === 'completed') return;
+            await github.rest.checks.update({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              check_run_id: Number(checkId),
+              status: 'completed',
+              conclusion: 'failure',
+              output: {
+                title: 'Evaluation failed',
+                summary: 'review-gate failed closed after an evaluation error. The prior success (if any) is no longer current.',
+              },
+            });
