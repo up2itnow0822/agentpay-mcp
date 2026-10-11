@@ -1817,6 +1817,33 @@ describe('get_transaction_history tool', () => {
     expect(text).toContain('up to 2 on-chain + up to 2 x402');
   });
 
+  it('orders x402 receipts by payment callback time, not insertion order', async () => {
+    recordX402Settlement({
+      intentKey: 'x402_pay#late-insert',
+      url: 'https://api.example.com/a',
+      method: 'GET',
+      amount: '1',
+      token: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913',
+      recipient: '0xfeedfacefeedfacefeedfacefeedfacefeedface',
+      txHash: '0xc480941a588f513a6f4ecbcee0826ea66147b0f68488131572522830b4ac60fb',
+      settledAt: 2_000,
+    });
+    recordX402Settlement({
+      intentKey: 'x402_pay#early-insert',
+      url: 'https://api.example.com/b',
+      method: 'GET',
+      amount: '2',
+      token: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913',
+      recipient: '0xfeedfacefeedfacefeedfacefeedfacefeedface',
+      txHash: '0x66e6299fee8deb3c350e639edf1de966dbbf639b0a4834080e9a98c438b60340',
+      settledAt: 1_000,
+    });
+    const text = (await handleGetTransactionHistory({ limit: 1 })).content[0]!.text;
+    expect(text).toContain('api.example.com/a');
+    expect(text).not.toContain('api.example.com/b');
+    expect(text).toContain('broadcast (unconfirmed)');
+  });
+
   it('omits x402 receipts from block-scoped queries and says so', async () => {
     recordX402Settlement({
       intentKey: 'x402_pay#scoped',

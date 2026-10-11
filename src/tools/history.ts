@@ -195,8 +195,9 @@ export async function handleGetTransactionHistory(
     }
 
     if (x402Receipts.length > 0) {
-      out += `💳 **x402 Settlements** (process lifetime, ${x402Receipts.length})\n`;
-      out += `   Identical MCP retries increment Replay; they do not add a second tx.\n\n`;
+      out += `💳 **x402 Settlements — broadcast, unconfirmed** (process lifetime, ${x402Receipts.length})\n`;
+      out += `   Status is "broadcast": the wallet returned a tx hash, but this log does not wait for a receipt.\n`;
+      out += `   Confirm each tx hash on-chain before treating it as settled. Identical MCP retries increment Replay; they do not add a second tx.\n\n`;
       for (const receipt of x402Receipts) {
         out += formatX402Settlement(receipt, config.chainId);
         out += '\n';
@@ -227,6 +228,7 @@ function formatX402Settlement(receipt: X402SettlementReceipt, chainId: number): 
   out += `   Payee:   ${sanitizeUntrustedInline(receipt.recipient, 64)}\n`;
   out += `   TX:      ${sanitizeUntrustedInline(receipt.txHash, 80)}\n`;
   out += `   🔗 ${txUrl}\n`;
+  out += `   Status:  broadcast (unconfirmed)\n`;
   out += `   Replay:  ${receipt.replayCount}\n`;
   return out;
 }

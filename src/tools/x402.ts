@@ -67,6 +67,7 @@ function persistX402Settlement(entry: {
   intentKey: string;
   url: string;
   requestedUrl?: string;
+  settledAt?: number;
   method: string;
   amount: bigint | string;
   token: string;
@@ -79,6 +80,9 @@ function persistX402Settlement(entry: {
     url: entry.url,
     ...(entry.requestedUrl && entry.requestedUrl !== entry.url
       ? { requestedUrl: entry.requestedUrl }
+      : {}),
+    ...(typeof entry.settledAt === 'number' && Number.isFinite(entry.settledAt)
+      ? { settledAt: entry.settledAt }
       : {}),
     method: entry.method,
     amount: typeof entry.amount === 'bigint' ? entry.amount.toString() : entry.amount,
@@ -406,6 +410,8 @@ export async function handleX402Pay(
         let paymentTxHash = '';
         let paymentRecipient = '';
         let paymentToken = '';
+        let paymentUrl: string | undefined;
+        let paymentSettledAt: number | undefined;
 
         // Cap enforcement happens in onBeforePayment using the selected asset's
         // decimals — never compare USDC base units against ETH-wei.
@@ -463,6 +469,8 @@ export async function handleX402Pay(
             paymentTxHash = log.txHash;
             paymentRecipient = log.recipient;
             paymentToken = log.token;
+            paymentUrl = log.url;
+            paymentSettledAt = log.timestamp;
           },
         });
 
@@ -502,7 +510,9 @@ export async function handleX402Pay(
             try {
               paymentTxHash = persistX402Settlement({
                 intentKey: intent.key,
-                url: input.url,
+                url: paymentUrl || input.url,
+                requestedUrl: input.url,
+                settledAt: paymentSettledAt,
                 method,
                 amount: paymentAmount,
                 token: paymentToken,
@@ -542,8 +552,9 @@ export async function handleX402Pay(
           paymentTxHash = persistX402Settlement({
             intentKey: intent.key,
             // Record the URL that issued the paid 402 (after redirects).
-            url: response.url || input.url,
+            url: paymentUrl || response.url || input.url,
             requestedUrl: input.url,
+            settledAt: paymentSettledAt,
             method,
             amount: paymentAmount,
             token: paymentToken,

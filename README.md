@@ -96,7 +96,7 @@ These boundaries matter more than the feature list:
 - `get_transaction_history` reads on-chain wallet events and, for unscoped
   `all` queries, also lists x402 settlements made by this server process (final
   paid URL, method, amount, token, payee, tx hash, replay count). Those x402
-  receipts are kept in memory only, capped at 256, and lost on restart. They are
+  receipts mean the payment was broadcast (a tx hash was returned), not that a receipt was confirmed. They are kept in memory only, capped at 256, and lost on restart. They are
   omitted from block-scoped queries. This is not an MCP request log: it does not
   record rejected pre-chain attempts or read-only calls.
 - Runtime wallet configuration currently supports Base mainnet and Base

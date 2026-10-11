@@ -66,6 +66,8 @@ export function recordX402Settlement(entry: {
   token: string
   recipient: string
   txHash: string
+  /** Payment callback time (ms). Defaults to now. */
+  settledAt?: number
 }): X402SettlementReceipt {
   const existingSameHash = receipts.find(
     (receipt) =>
@@ -76,9 +78,10 @@ export function recordX402Settlement(entry: {
     return existingSameHash
   }
 
+  const { settledAt, ...rest } = entry
   const receipt: X402SettlementReceipt = {
-    ...entry,
-    settledAt: Date.now(),
+    ...rest,
+    settledAt: typeof settledAt === 'number' && Number.isFinite(settledAt) ? settledAt : Date.now(),
     replayCount: 0,
   }
   receipts.push(receipt)
@@ -99,8 +102,12 @@ export function recordX402SettlementReplay(
   return existing
 }
 
+/** Receipts ordered oldest → newest by payment callback time (stable). */
 export function listX402Settlements(): X402SettlementReceipt[] {
-  return receipts.slice()
+  return receipts
+    .map((receipt, index) => ({ receipt, index }))
+    .sort((a, b) => a.receipt.settledAt - b.receipt.settledAt || a.index - b.index)
+    .map(({ receipt }) => receipt)
 }
 
 export function _resetX402SettlementLog(): void {
