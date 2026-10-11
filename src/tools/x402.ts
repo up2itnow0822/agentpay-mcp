@@ -499,11 +499,14 @@ export async function handleX402Pay(
 
         let response: Response;
         let responseText: string;
+        // Captured before the body read so a body-read failure keeps the paid-response URL.
+        let paidResponseUrl: string | undefined;
         try {
           const paid = await runClassifiedSpend(
             wallet.walletClient,
             async () => {
               const next = await x402Client.fetch(input.url, requestInit);
+              paidResponseUrl = next.url || undefined;
               return { response: next, responseText: await next.text() };
             },
             { lockAfterBroadcast: true }
@@ -515,9 +518,10 @@ export async function handleX402Pay(
             try {
               paymentTxHash = persistX402Settlement({
                 intentKey: intent.key,
-                // No paid response: the redirect target that issued the 402 is unknown.
-                url: input.url,
-                finalUrlUnknown: true,
+                // If the paid response arrived but its body read failed, keep its URL;
+                // otherwise the redirect target that issued the 402 is unknown.
+                url: paidResponseUrl ?? input.url,
+                ...(paidResponseUrl ? {} : { finalUrlUnknown: true }),
                 requestedUrl: input.url,
                 settledAt: paymentSettledAt,
                 seq: paymentSeq,
