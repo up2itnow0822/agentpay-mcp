@@ -253,17 +253,17 @@ describe('create_escrow', () => {
     expect(result.content[0].text).toContain('allowlist')
     expect(mockCreate).not.toHaveBeenCalled()
     // Total buyer commitment = payment + equal buyer stake = 200 USDC
-    // (6 decimals), normalised to 2e20 ETH-equivalent wei.
+    // (6 decimals), normalised to 2e11 9-decimal policy units.
     expect(check).toHaveBeenCalledWith({
       merchant: '0xseller00000000000000000000000000000000001',
-      amount: 2e20,
+      amount: 2e11,
     })
   })
 
   it('blocks escrow creation when the spend cap is exceeded', async () => {
     const check = vi.fn().mockResolvedValue({
       status: 'rejected',
-      reason: 'Rolling spend cap exceeded: spent 0, cap 1e20, attempted 2e20.',
+      reason: 'Rolling spend cap exceeded: spent 0, cap 1e11, attempted 2e11.',
     })
     MockSpendingPolicy.mockImplementation(function () { return policyEngine(check) } as any)
 

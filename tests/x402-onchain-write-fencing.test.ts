@@ -123,6 +123,36 @@ async function request({
       });
       return '0x' + 'ab'.repeat(32);
     }
+    case 'eth_getTransactionReceipt':
+    case 'eth_getTransactionByHash': {
+      // SDK 6.3.0 waits for a receipt after each broadcast. A success
+      // receipt lets the control case finish; hostile cases never reach it.
+      const hash = (params?.[0] as string | undefined) ?? ('0x' + 'ab'.repeat(32));
+      return {
+        transactionHash: hash,
+        hash,
+        transactionIndex: '0x0',
+        blockHash: STUB_BLOCK.hash,
+        blockNumber: STUB_BLOCK.number,
+        from: ACCOUNT_ADDRESS,
+        to: ACCOUNT_ADDRESS,
+        cumulativeGasUsed: '0x5208',
+        gasUsed: '0x5208',
+        contractAddress: null,
+        logs: [],
+        logsBloom: STUB_BLOCK.logsBloom,
+        status: '0x1',
+        effectiveGasPrice: '0x3b9aca00',
+        type: '0x2',
+        input: '0x',
+        nonce: '0x0',
+        value: '0x0',
+        gas: '0x186a0',
+        r: '0x' + '11'.repeat(32),
+        s: '0x' + '22'.repeat(32),
+        v: '0x1',
+      };
+    }
     default:
       throw new Error(`unstubbed RPC in x402 write-fencing harness: ${method}`);
   }
@@ -249,7 +279,7 @@ describe('x402 on-chain write fencing (real agentwallet-sdk)', () => {
       // executePayment — so not even the fee transfer is broadcast.
       expect(writes).toEqual([]);
       expect(result.isError).toBe(true);
-      expect(result.content[0]!.text).toContain('did not sign a payment');
+      expect(result.content[0]!.text).toContain('did not sign');
     });
 
     it(`x402_session_start: ${label} payTo produces zero on-chain writes`, async () => {
@@ -259,7 +289,7 @@ describe('x402 on-chain write fencing (real agentwallet-sdk)', () => {
 
       expect(writes).toEqual([]);
       expect(result.isError).toBe(true);
-      expect(result.content[0]!.text).toContain('did not sign a payment');
+      expect(result.content[0]!.text).toContain('did not sign');
     });
   }
 

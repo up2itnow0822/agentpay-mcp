@@ -250,14 +250,14 @@ describe('bridge_usdc', () => {
     expect(result.content[0].text).toContain('allowlist')
     expect(mockCreateBridge).not.toHaveBeenCalled()
     // Merchant is the bridging wallet itself (CCTP mints back to it), and
-    // 100 USDC (6 decimals) is normalised to 1e20 ETH-equivalent wei.
-    expect(check).toHaveBeenCalledWith({ merchant: '0xagent', amount: 1e20 })
+    // 100 USDC (6 decimals) is normalised to 1e11 9-decimal policy units.
+    expect(check).toHaveBeenCalledWith({ merchant: '0xagent', amount: 1e11 })
   })
 
   it('blocks bridging when the spend policy cap is exceeded', async () => {
     const check = vi.fn().mockResolvedValue({
       status: 'rejected',
-      reason: 'Rolling spend cap exceeded: spent 0, cap 5e19, attempted 1e20.',
+      reason: 'Rolling spend cap exceeded: spent 0, cap 5e10, attempted 1e11.',
     })
     MockSpendingPolicy.mockImplementation(function () { return policyEngine(check) } as any)
 

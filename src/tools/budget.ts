@@ -29,12 +29,37 @@ interface PolicyConfig {
 }
 
 const DEFAULT_POLICY_SCOPE = 'global'
+/** 1 whole token = 1e9 policy units. SpendingPolicy 6.3.0 rejects > MAX_SAFE_INTEGER. */
+export const POLICY_SCALE_DECIMALS = 9
 const _policyConfigByScope = new Map<string, PolicyConfig>()
 const _spendingPolicyByScope = new Map<string, InstanceType<typeof SpendingPolicy>>()
 
 export function _resetPolicyStore(): void {
   _policyConfigByScope.clear()
   _spendingPolicyByScope.clear()
+}
+
+function scaleToPolicyUnits(baseUnits: bigint, decimals: number): bigint {
+  if (decimals === POLICY_SCALE_DECIMALS) {
+    return baseUnits
+  }
+  if (decimals < POLICY_SCALE_DECIMALS) {
+    return baseUnits * 10n ** BigInt(POLICY_SCALE_DECIMALS - decimals)
+  }
+  const divisor = 10n ** BigInt(decimals - POLICY_SCALE_DECIMALS)
+  const scaled = baseUnits / divisor
+  return baseUnits % divisor === 0n ? scaled : scaled + 1n
+}
+
+function toSafePolicyNumber(scaled: bigint): number | null {
+  if (scaled > BigInt(Number.MAX_SAFE_INTEGER)) {
+    return null
+  }
+  const amountNumber = Number(scaled)
+  if (!Number.isFinite(amountNumber) || BigInt(amountNumber) !== scaled) {
+    return null
+  }
+  return amountNumber
 }
 
 export type SpendPolicyDecision =
@@ -167,13 +192,13 @@ export async function withReservedSpend<T>(
  *
  * Units: `amount` is in the asset's own base units (wei for ETH, 1e-6 for
  * USDC), with `decimals` naming that asset's decimals. Policy caps from
- * set_spend_policy are stored in 18-decimal "ETH-equivalent" units
- * (parseEther of the human string), so the amount is normalised here by
- * scaling base units × 10^(18 - decimals) before comparison. One whole token
- * therefore counts as 1 ETH-equivalent: with perTxCapEth "5", a 10 USDC
- * payment (10_000_000 base units → 1e19) is over the 5e18 cap and blocked.
- * Never compare 6-decimal USDC base units against wei-scale caps directly —
- * that silently loosens every cap by a factor of 1e12.
+ * set_spend_policy are stored in 9-decimal ETH-equivalent policy units
+ * (parseEther of the human string / 1e9). SpendingPolicy 6.3.0 requires a
+ * safe integer, so 18-decimal wei cannot be the engine unit: 10 USDC would
+ * become 1e19. One whole token still counts as 1 ETH-equivalent: with
+ * perTxCapEth "5", a 10 USDC payment (10_000_000 base units → 1e10) is over
+ * the 5e9 cap and blocked. Never compare 6-decimal USDC base units against
+ * wei-scale caps directly — that silently loosens every cap by 1e12.
  *
  * `decimals` may be a thunk so that asset-decimal resolution (which can throw
  * for unregistered assets) only runs when a policy is actually configured.
@@ -226,15 +251,11 @@ export async function reserveSpendPolicy(input: {
       }
     }
 
-    // Normalise to the policy's canonical 18-decimal ETH-equivalent scale.
-    const scaled = baseUnits * 10n ** BigInt(18 - decimals)
-
-    // SpendingPolicy tracks amounts as JS numbers. Convert exactly where
-    // possible; when the bigint exceeds float precision and rounds down,
-    // bias one ULP upward so boundary comparisons fail closed (the policy
-    // must never see less than the true amount).
-    let amountNumber = Number(scaled)
-    if (!Number.isFinite(amountNumber)) {
+    // Normalise to 9-decimal ETH-equivalent policy units (safe integers).
+    // 18-decimal wei overflows Number.MAX_SAFE_INTEGER for ordinary USDC sizes.
+    const scaled = scaleToPolicyUnits(baseUnits, decimals)
+    const amountNumber = toSafePolicyNumber(scaled)
+    if (amountNumber === null) {
       return {
         decision: {
           status: 'rejected',
@@ -244,9 +265,6 @@ export async function reserveSpendPolicy(input: {
         },
         reservation: null,
       }
-    }
-    if (BigInt(amountNumber) < scaled) {
-      amountNumber *= 1 + Number.EPSILON
     }
 
     const reservedItems: SpendReservationItem[] = []
@@ -380,18 +398,18 @@ export async function handleSetSpendPolicy(
   input: SetSpendPolicyInput
 ): Promise<{ content: Array<{ type: 'text'; text: string }>; isError?: boolean }> {
   try {
-    const ethToWeiNumber = (eth: string): number => {
+    const ethToPolicyUnits = (eth: string): number => {
       const normalized = eth.trim()
       if (normalized.length === 0) throw new Error(`Invalid ETH amount: "${eth}"`)
       if (!/^\d*\.?\d+$/.test(normalized)) throw new Error(`Invalid ETH amount: "${eth}"`)
 
       const wei = parseEther(normalized)
       if (wei <= 0n) throw new Error(`Invalid ETH amount: "${eth}"`)
-      const weiAsNumber = Number(wei)
-      if (!Number.isFinite(weiAsNumber)) {
+      const policyUnits = toSafePolicyNumber(scaleToPolicyUnits(wei, 18))
+      if (policyUnits === null) {
         throw new Error(`ETH amount is too large: "${eth}"`)
       }
-      return weiAsNumber
+      return policyUnits
     }
 
     const scopeKey = input.scopeKey?.trim() || DEFAULT_POLICY_SCOPE
@@ -401,14 +419,14 @@ export async function handleSetSpendPolicy(
     // rollingCap uses a 24-hour window for dailyLimitEth
     const rollingCap = input.dailyLimitEth
       ? {
-          maxAmount: ethToWeiNumber(input.dailyLimitEth),
+          maxAmount: ethToPolicyUnits(input.dailyLimitEth),
           windowMs: 86_400_000, // 24 hours
         }
       : undefined
 
     // draftThreshold maps to perTxCap — payments above this go to draft
     const draftThreshold = input.perTxCapEth
-      ? ethToWeiNumber(input.perTxCapEth)
+      ? ethToPolicyUnits(input.perTxCapEth)
       : undefined
 
     _spendingPolicyByScope.set(scopeKey, new SpendingPolicy({

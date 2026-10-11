@@ -1312,7 +1312,7 @@ describe('x402_pay tool', () => {
   it('blocks payment via spend policy using honest USDC units', async () => {
     const reserve = vi.fn().mockResolvedValue({
       status: 'rejected',
-      reason: 'Rolling spend cap exceeded: spent 0, cap 1e20, attempted 5e20.',
+      reason: 'Rolling spend cap exceeded: spent 0, cap 1e11, attempted 5e11.',
     });
     MockSpendingPolicy.mockImplementation(function () {
       return policyEngine(reserve);
@@ -1347,11 +1347,11 @@ describe('x402_pay tool', () => {
 
     expect(result.isError).toBe(true);
     expect(result.content[0]!.text).toContain('Rolling spend cap exceeded');
-    // 500 USDC (6 decimals) must reach the policy as 5e20 ETH-equivalent
-    // wei — not 500_000_000, which slips 1e12 under every cap.
+    // 500 USDC (6 decimals) must reach the policy as 5e11 9-decimal
+    // units — not 500_000_000, which slips 1e3 under every cap.
     expect(reserve).toHaveBeenCalledWith({
       merchant: '0xfeedfacefeedfacefeedfacefeedfacefeedface',
-      amount: 5e20,
+      amount: 5e11,
     });
   });
 

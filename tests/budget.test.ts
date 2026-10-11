@@ -67,8 +67,11 @@ describe('set_spend_policy', () => {
     expect(data.policy.perTxCapEth).toBe('0.01')
     expect(MockSpendingPolicy).toHaveBeenCalledWith(
       expect.objectContaining({
-        rollingCap: expect.objectContaining({ windowMs: 86_400_000 }),
-        draftThreshold: expect.any(Number),
+        rollingCap: expect.objectContaining({
+          maxAmount: 1e8, // 0.1 ETH in 9-decimal policy units
+          windowMs: 86_400_000,
+        }),
+        draftThreshold: 1e7, // 0.01 ETH
       })
     )
   })
@@ -165,19 +168,20 @@ describe('enforceSpendPolicy', () => {
 
     expect(reserve).toHaveBeenCalledWith({
       merchant: '0xattacker',
-      amount: 1000,
+      amount: 1,
     })
     expect(decision).toEqual({ status: 'rejected', reason: 'blocked' })
   })
 
-  it('normalises token base units to 18-decimal ETH-equivalent for the policy', async () => {
+  it('normalises token base units to 9-decimal ETH-equivalent for the policy', async () => {
     const reserve = vi.fn().mockResolvedValue(reservedResult())
     MockSpendingPolicy.mockImplementation(function() { return policyEngine(reserve) } as any)
 
     await handleSetSpendPolicy({ perTxCapEth: '5' })
 
-    // 10 USDC = 10_000_000 base units (6 decimals) → 1e19 ETH-equivalent
-    // wei — NOT 10_000_000, which would slip 1e12 under every cap.
+    // 10 USDC = 10_000_000 base units (6 decimals) → 1e10 policy units
+    // (9-decimal ETH-equivalent) — NOT 10_000_000, which would slip 1e3
+    // under every cap, and not 1e19 wei, which overflows MAX_SAFE_INTEGER.
     const decision = await enforceSpendPolicy({
       merchant: '0xmerchant',
       amount: 10_000_000n,
@@ -187,7 +191,7 @@ describe('enforceSpendPolicy', () => {
     expect(decision).toEqual({ status: 'approved' })
     expect(reserve).toHaveBeenCalledWith({
       merchant: '0xmerchant',
-      amount: 1e19,
+      amount: 1e10,
     })
   })
 
@@ -204,7 +208,7 @@ describe('enforceSpendPolicy', () => {
       decimals: 18,
     })
 
-    expect(reserve).toHaveBeenCalledWith({ merchant: '0xabc', amount: 1e18 })
+    expect(reserve).toHaveBeenCalledWith({ merchant: '0xabc', amount: 1e9 })
     expect(decision).toEqual({ status: 'rejected', reason: 'scoped block' })
   })
 
@@ -229,22 +233,23 @@ describe('enforceSpendPolicy', () => {
     expect(decision).toEqual({ status: 'rejected', reason: 'scoped cap' })
   })
 
-  it('never under-reports amounts that exceed float precision', async () => {
+  it('never under-reports remainders when scaling 18-decimal wei down to 9', async () => {
     const reserve = vi.fn().mockResolvedValue(reservedResult())
     MockSpendingPolicy.mockImplementation(function() { return policyEngine(reserve) } as any)
 
     await handleSetSpendPolicy({ perTxCapEth: '5' })
 
-    // 2^53 + 1 wei rounds DOWN to 2^53 as a float; the fail-closed bias must
-    // round the policy-visible amount up instead.
+    // 1_000_000_001 wei / 1e9 = 1 remainder 1 → fail-closed rounds up to 2.
     await enforceSpendPolicy({
       merchant: '0xmerchant',
-      amount: 2n ** 53n + 1n,
+      amount: 1_000_000_001n,
       decimals: 18,
     })
 
-    const seen = reserve.mock.calls[0]![0].amount as number
-    expect(seen).toBeGreaterThan(Number(2n ** 53n))
+    expect(reserve).toHaveBeenCalledWith({
+      merchant: '0xmerchant',
+      amount: 2,
+    })
   })
 
   // ─── Fail-closed behaviour ─────────────────────────────────────────────

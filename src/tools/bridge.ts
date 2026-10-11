@@ -121,7 +121,7 @@ export async function handleBridgeUsdc(
       async () => {
       // Enforce the in-process spend policy before burning USDC on the source
       // chain. rawAmount is USDC 6-decimal base units; enforceSpendPolicy
-      // normalises it to the policy's 18-decimal ETH-equivalent caps (1 USDC
+      // normalises it to the policy's 9-decimal ETH-equivalent caps (1 USDC
       // counts as 1 ETH-equivalent) — never compare 6-decimal base units
       // against wei-scale caps directly. CCTP mints to the burning wallet's own
       // address, so the policy merchant is the agent wallet itself: allowlist-only

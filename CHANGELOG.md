@@ -20,6 +20,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   instead of a local hash regex and ad-hoc error taxonomy.
 - Route in-process policy through SpendingPolicy `reserve` → `commit` |
   `release` | `lock` instead of `check()` plus a private spend-window pop.
+- Store and compare spend-policy caps in 9-decimal ETH-equivalent units
+  (1 whole token = 1e9). 18-decimal wei overflows `MAX_SAFE_INTEGER` for
+  ordinary USDC sizes under SDK 6.3.0 `toSafeIntegerAmount`.
 - Share one `createAgentPayX402Client` factory between `x402_pay` and
   `x402_session_start` (payTo/amount/cap guards + reservation lifecycle).
 - Runtime MCP / CLI version strings continue to read `package.json` (the

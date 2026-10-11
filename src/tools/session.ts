@@ -260,6 +260,24 @@ export async function handleX402SessionStart(
 
     if (!paymentMade) {
       releaseUnusedReservation();
+      if (response.status === 402) {
+        return {
+          content: [
+            textContent(
+              `❌ **Unsupported x402 Payment Requirement - Failed Closed**\n\n` +
+              `  Endpoint: ${sanitizeUntrustedUrl(input.endpoint)}\n` +
+              describeFinalUrl(input.endpoint, response) +
+              `  Status:   ${formatHttpStatus(response.status)}\n\n` +
+              `AgentPay failed closed and did not sign a payment. The endpoint returned ` +
+              `HTTP 402, but no payment was completed. A 402 without a completed payment ` +
+              `is not treated as a free endpoint.\n\n` +
+              `📄 **402 Response Body**\n` +
+              formatUntrustedBody(responseText, 4000)
+            ),
+          ],
+          isError: true,
+        };
+      }
       // Endpoint didn't require payment — still create a session if response was OK
       // This allows agents to pre-establish sessions for endpoints that may start
       // requiring payment, or to track usage even for free endpoints.

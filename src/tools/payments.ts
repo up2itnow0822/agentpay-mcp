@@ -126,7 +126,7 @@ export async function handleSendPayment(
 
     // Enforce in-process spend policy (set_spend_policy) before any transfer.
     // amountWei is in the token's own base units; decimals lets the policy
-    // normalise to its 18-decimal ETH-equivalent caps.
+    // normalise to its 9-decimal ETH-equivalent caps.
     const policyDecision = await enforceSpendPolicy({
       merchant: toAddress,
       amount: amountWei,

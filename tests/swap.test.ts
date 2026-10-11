@@ -268,17 +268,17 @@ describe('swap_tokens', () => {
     expect(mockSwap).not.toHaveBeenCalled()
     // Merchant is the agent smart-account address (wallet.address — the SDK
     // SwapModule custodies tokens and receives swap proceeds there), and
-    // 100 USDC sold (6 decimals) is normalised to 1e20 ETH-equivalent wei.
+    // 100 USDC sold (6 decimals) is normalised to 1e11 9-decimal policy units.
     expect(check).toHaveBeenCalledWith({
       merchant: '0x1234567890123456789012345678901234567890',
-      amount: 1e20,
+      amount: 1e11,
     })
   })
 
   it('blocks swaps when the spend policy cap is exceeded', async () => {
     const check = vi.fn().mockResolvedValue({
       status: 'rejected',
-      reason: 'Rolling spend cap exceeded: spent 0, cap 5e19, attempted 1e20.',
+      reason: 'Rolling spend cap exceeded: spent 0, cap 5e10, attempted 1e11.',
     })
     MockSpendingPolicy.mockImplementation(function () { return policyEngine(check) } as any)
 
@@ -469,7 +469,7 @@ describe('swap_tokens', () => {
       .fn()
       .mockResolvedValueOnce({
         status: 'rejected',
-        reason: 'Rolling spend cap exceeded: spent 0, cap 5e19, attempted 1e20.',
+        reason: 'Rolling spend cap exceeded: spent 0, cap 5e10, attempted 1e11.',
       })
       .mockResolvedValueOnce(reservedResult())
     MockSpendingPolicy.mockImplementation(function () { return policyEngine(check) } as any)
