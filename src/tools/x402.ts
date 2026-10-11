@@ -565,6 +565,7 @@ export async function handleX402Pay(
             url: response.url || input.url,
             requestedUrl: input.url,
             settledAt: paymentSettledAt,
+            seq: paymentSeq,
             method,
             amount: paymentAmount,
             token: paymentToken,
