@@ -7,6 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [4.2.0] — 2026-10-11
+
+### Changed
+
+- Bump `agentwallet-sdk` to **6.3.0** (outcomes API, SpendingPolicy
+  `reserve` / `commit` / `release` / `lock` / `applyOutcome`, viem 2.57.4).
+- Pin `viem` exactly to **2.57.4** (dependency + override) so the x402
+  verifier path and the SDK share one install. The previous `2.56.0` pin
+  and older `ws` trees are gone; `npm audit --audit-level=high` is clean.
+- Adopt the SDK spend-outcome helpers (`classifySpendError`, `isEvmTxHash`)
+  instead of a local hash regex and ad-hoc error taxonomy.
+- Route in-process policy through SpendingPolicy `reserve` → `commit` |
+  `release` | `lock` instead of `check()` plus a private spend-window pop.
+- Share one `createAgentPayX402Client` factory between `x402_pay` and
+  `x402_session_start` (payTo/amount/cap guards + reservation lifecycle).
+- Runtime MCP / CLI version strings continue to read `package.json` (the
+  `--help` / `--version` path from [#25](https://github.com/up2itnow0822/agentpay-mcp/pull/25)).
+
+### Fixed
+
+- Confirmed on `main` before this release:
+  - [#25](https://github.com/up2itnow0822/agentpay-mcp/pull/25) — `--help` /
+    `--version` exit without starting the stdio server.
+  - [#67](https://github.com/up2itnow0822/agentpay-mcp/pull/67) for
+    [#44](https://github.com/up2itnow0822/agentpay-mcp/issues/44) — value-pack
+    examples do not retry `fetchWithPayment` after settlement.
+  - [#82](https://github.com/up2itnow0822/agentpay-mcp/pull/82) — persist
+    `x402_pay` settlements in `get_transaction_history`.
+
+---
+
 ## [4.0.0] — 2026-03-22
 
 ### Added

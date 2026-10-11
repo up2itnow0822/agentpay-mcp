@@ -9,6 +9,14 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 const USDC_BASE = '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913';
 
 vi.mock('agentwallet-sdk', () => ({
+  isEvmTxHash: (value: unknown) =>
+    typeof value === 'string' && /^0x[a-fA-F0-9]{64}$/.test(value),
+  classifySpendError: (error: unknown) => ({
+    status: 'released' as const,
+    retrySafe: true,
+    txHashes: [] as string[],
+    reason: error instanceof Error ? error.message : String(error ?? ''),
+  }),
   agentExecute: vi.fn(),
   agentTransferToken: vi.fn(),
   checkBudget: vi.fn(),
@@ -77,6 +85,7 @@ import {
   cancelTransaction,
   SpendingPolicy,
 } from 'agentwallet-sdk';
+import { policyEngine, reservedResult } from './helpers/policy-engine.js';
 
 const mockAgentExecute = vi.mocked(agentExecute);
 const mockAgentTransferToken = vi.mocked(agentTransferToken);
@@ -148,7 +157,7 @@ describe('send_payment tool', () => {
     vi.clearAllMocks();
     _resetPolicyStore();
     vi.mocked(SpendingPolicy).mockImplementation(function () {
-      return { check: vi.fn().mockResolvedValue({ status: 'approved' }) };
+      return policyEngine(vi.fn().mockResolvedValue(reservedResult()));
     } as any);
     mockAgentExecute.mockResolvedValue({
       executed: true,
@@ -237,12 +246,12 @@ describe('send_payment tool', () => {
   });
 
   it('blocks payments that violate set_spend_policy allowlists', async () => {
-    const check = vi.fn().mockResolvedValue({
+    const reserve = vi.fn().mockResolvedValue({
       status: 'rejected',
       reason: 'Merchant "0xabcdefabcdefabcdefabcdefabcdefabcdefabcd" is not on the allowlist.',
     });
     vi.mocked(SpendingPolicy).mockImplementation(function () {
-      return { check };
+      return policyEngine(reserve);
     } as any);
 
     await handleSetSpendPolicy({

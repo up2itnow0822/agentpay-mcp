@@ -29,7 +29,7 @@ const ZERO_ADDRESS = '0x0000000000000000000000000000000000000000' as Address
  * *selected* payment requirement object. Approving is not the end of the
  * story: `X402Client.executePayment(req)` then reads `req.payTo` again and
  * hands the RAW string to `agentTransferToken(..., { to: req.payTo })`
- * (agentwallet-sdk 6.2.1, dist/x402/client.js). Nothing this function returns
+ * (agentwallet-sdk 6.3.0, dist/x402/client.js). Nothing this function returns
  * reaches the signer — the callers use the return value only for the spend
  * policy and the cap.
  *

@@ -9,6 +9,14 @@ vi.mock('agentwallet-sdk', () => ({
   MutualStakeEscrow: vi.fn(),
   SpendingPolicy: vi.fn(),
   checkBudget: vi.fn(),
+  isEvmTxHash: (value: unknown) =>
+    typeof value === 'string' && /^0x[a-fA-F0-9]{64}$/.test(value),
+  classifySpendError: (error: unknown) => ({
+    status: 'released' as const,
+    retrySafe: true,
+    txHashes: [] as string[],
+    reason: error instanceof Error ? error.message : String(error ?? ''),
+  }),
 }))
 
 // ─── Mock client utils ─────────────────────────────────────────────────────
@@ -30,6 +38,7 @@ vi.mock('../src/utils/client.js', () => ({
 import { handleCreateEscrow } from '../src/tools/escrow.js'
 import { handleSetSpendPolicy, _resetPolicyStore } from '../src/tools/budget.js'
 import { MutualStakeEscrow, SpendingPolicy } from 'agentwallet-sdk'
+import { policyEngine, reservedResult } from './helpers/policy-engine.js'
 
 const MockMutualStakeEscrow = vi.mocked(MutualStakeEscrow)
 const MockSpendingPolicy = vi.mocked(SpendingPolicy)
@@ -225,7 +234,7 @@ describe('create_escrow', () => {
       reason:
         'Merchant "0xseller00000000000000000000000000000000001" is not on the allowlist.',
     })
-    MockSpendingPolicy.mockImplementation(function () { return { check } } as any)
+    MockSpendingPolicy.mockImplementation(function () { return policyEngine(check) } as any)
 
     const mockCreate = vi.fn()
     MockMutualStakeEscrow.mockImplementation(function() { return { create: mockCreate } } as any)
@@ -256,7 +265,7 @@ describe('create_escrow', () => {
       status: 'rejected',
       reason: 'Rolling spend cap exceeded: spent 0, cap 1e20, attempted 2e20.',
     })
-    MockSpendingPolicy.mockImplementation(function () { return { check } } as any)
+    MockSpendingPolicy.mockImplementation(function () { return policyEngine(check) } as any)
 
     const mockCreate = vi.fn()
     MockMutualStakeEscrow.mockImplementation(function() { return { create: mockCreate } } as any)
@@ -275,8 +284,8 @@ describe('create_escrow', () => {
   })
 
   it('creates the escrow when the spend policy approves', async () => {
-    const check = vi.fn().mockResolvedValue({ status: 'approved' })
-    MockSpendingPolicy.mockImplementation(function () { return { check } } as any)
+    const check = vi.fn().mockResolvedValue(reservedResult())
+    MockSpendingPolicy.mockImplementation(function () { return policyEngine(check) } as any)
 
     const mockCreate = vi.fn().mockResolvedValue({
       address: '0xvault000000000000000000000000000000000003',

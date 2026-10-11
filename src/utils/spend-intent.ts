@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto'
+import { classifySpendError, isEvmTxHash } from 'agentwallet-sdk'
 import { z } from 'zod'
 
 /**
@@ -198,6 +199,11 @@ export function classifyBridgeApproveUsdc<T>(bridge: T): T {
  * revert) also stays definite. Once a write is submitted and the outcome is
  * unclear, the error stays generic so the intent locks.
  *
+ * Taxonomy comes from agentwallet-sdk `classifySpendError`. Wallet-write
+ * instrumentation remains the fail-closed broadcast detector: the SDK
+ * classifier treats unknown errors as released (pre-broadcast), which is
+ * wrong after sendTransaction/writeContract has run.
+ *
  * x402 sends the protocol fee before the merchant transfer. Pass
  * `lockAfterBroadcast: true` so a later revert cannot release the intent
  * and allow a second fee.
@@ -217,9 +223,18 @@ export async function runClassifiedSpend<T>(
     if (error instanceof DefiniteSpendFailure) {
       throw error
     }
+    const outcome = classifySpendError(error)
+    if (!state.broadcastStarted) {
+      throw new DefiniteSpendFailure(
+        error instanceof Error ? error.message : String(error)
+      )
+    }
+    if (options?.lockAfterBroadcast) {
+      throw error
+    }
     if (
-      !state.broadcastStarted ||
-      (!options?.lockAfterBroadcast && isConfirmedUnchargedRevert(error))
+      outcome.status === 'released' &&
+      isConfirmedUnchargedRevert(error)
     ) {
       throw new DefiniteSpendFailure(
         error instanceof Error ? error.message : String(error)
@@ -292,15 +307,15 @@ export class SpendIntentConflictError extends Error {
   }
 }
 
-/** 32-byte 0x-prefixed EVM transaction hash. */
-const EVM_TX_HASH = /^0x[a-fA-F0-9]{64}$/
-
 /**
  * Require a complete EVM settlement hash before a spend callback may resolve
  * into the settled cache. A hashless or malformed SDK result is ambiguous —
  * the transfer may already have been broadcast — so this throws a generic
  * Error and the intent stays locked instead of replaying success:true with
  * a non-usable hash such as "pending" or "0x123".
+ *
+ * Canonical form is lowercase `0x` plus 64 hex chars. The SDK helper accepts
+ * `0X`; that prefix is rejected here so cached hashes stay 0x-prefixed.
  */
 export function requireSettlementHash(hash: unknown, label: string): string {
   if (typeof hash !== 'string' || hash.trim().length === 0) {
@@ -310,7 +325,7 @@ export function requireSettlementHash(hash: unknown, label: string): string {
     )
   }
   const normalized = hash.trim()
-  if (!EVM_TX_HASH.test(normalized)) {
+  if (!normalized.startsWith('0x') || !isEvmTxHash(normalized)) {
     throw new Error(
       `${label} returned a malformed transaction hash. ` +
         'Refusing to cache success without a 32-byte 0x-prefixed hash; ' +

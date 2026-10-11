@@ -19,6 +19,19 @@ const mockX402Client = {
 
 vi.mock('agentwallet-sdk', () => ({
   createX402Client: vi.fn(() => mockX402Client),
+  isEvmTxHash: (value: unknown) =>
+    typeof value === 'string' && /^0x[a-fA-F0-9]{64}$/.test(value),
+  classifySpendError: (error: unknown) => {
+    const message = error instanceof Error ? error.message : String(error ?? '');
+    return {
+      status: /timed out|timeout|ECONNRESET|ETIMEDOUT|network error/i.test(message)
+        ? 'hold-unknown'
+        : 'released',
+      retrySafe: true,
+      txHashes: [],
+      reason: message,
+    };
+  },
   getActivityHistory: vi.fn(),
   createWallet: vi.fn(),
   agentTransferToken: vi.fn(),
@@ -82,6 +95,7 @@ import {
   UNTRUSTED_BODY_WARNING,
 } from '../src/utils/format.js';
 import { _resetSpendIntentStore } from '../src/utils/spend-intent.js';
+import { policyEngine, reservedResult } from './helpers/policy-engine.js';
 import {
   _resetX402SettlementLog,
   recordX402Settlement,
@@ -1173,9 +1187,9 @@ describe('x402_pay tool', () => {
   });
 
   it('rejects a payTo that is not an address before the spend policy sees it', async () => {
-    const check = vi.fn().mockResolvedValue({ status: 'approved' });
+    const reserve = vi.fn().mockResolvedValue(reservedResult());
     MockSpendingPolicy.mockImplementation(function () {
-      return { check };
+      return policyEngine(reserve);
     } as any);
     await handleSetSpendPolicy({ dailyLimitEth: '100' });
 
@@ -1204,7 +1218,7 @@ describe('x402_pay tool', () => {
 
     expect(result.isError).toBe(true);
     expect(result.content[0]!.text).toContain('not a valid EVM address');
-    expect(check).not.toHaveBeenCalled();
+    expect(reserve).not.toHaveBeenCalled();
   });
 
   it('round-trips a normal JSON body readably inside the delimiters', async () => {
@@ -1296,12 +1310,12 @@ describe('x402_pay tool', () => {
   });
 
   it('blocks payment via spend policy using honest USDC units', async () => {
-    const check = vi.fn().mockResolvedValue({
+    const reserve = vi.fn().mockResolvedValue({
       status: 'rejected',
       reason: 'Rolling spend cap exceeded: spent 0, cap 1e20, attempted 5e20.',
     });
     MockSpendingPolicy.mockImplementation(function () {
-      return { check };
+      return policyEngine(reserve);
     } as any);
 
     await handleSetSpendPolicy({ dailyLimitEth: '100' });
@@ -1335,7 +1349,7 @@ describe('x402_pay tool', () => {
     expect(result.content[0]!.text).toContain('Rolling spend cap exceeded');
     // 500 USDC (6 decimals) must reach the policy as 5e20 ETH-equivalent
     // wei — not 500_000_000, which slips 1e12 under every cap.
-    expect(check).toHaveBeenCalledWith({
+    expect(reserve).toHaveBeenCalledWith({
       merchant: '0xfeedfacefeedfacefeedfacefeedfacefeedface',
       amount: 5e20,
     });

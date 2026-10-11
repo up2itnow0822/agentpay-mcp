@@ -6,8 +6,8 @@
  * two invariants below, because both live on the seam between our validator
  * and the SDK:
  *
- *   1. `X402Client.executePayment` (agentwallet-sdk 6.2.1,
- *      dist/x402/client.js:177-193) transfers the 0.77% protocol fee to
+ *   1. `X402Client.executePayment` (agentwallet-sdk 6.3.0,
+ *      dist/x402/client.js) transfers the 0.77% protocol fee to
  *      FEE_COLLECTOR *before* it encodes the payee. So a `payTo` we accept but
  *      viem's ABI encoder later rejects costs the buyer the fee with nothing
  *      bought — the fee write has already been broadcast when the payee
@@ -44,7 +44,7 @@ import { AgentAccountV2Abi } from 'agentwallet-sdk';
 
 const USDC_BASE = '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913';
 const PAYEE = '0x1111111111111111111111111111111111111111';
-/** agentwallet-sdk 6.2.1 dist/x402/client.js — X402_PROTOCOL_FEE_BPS collector. */
+/** agentwallet-sdk 6.3.0 X402_PROTOCOL_FEE_COLLECTOR. */
 const FEE_COLLECTOR = '0xff86829393C6C26A4EC122bE0Cc3E466Ef876AdD';
 const ACCOUNT_ADDRESS = '0x9999999999999999999999999999999999999999' as Address;
 const AGENT_KEY = ('0x' + '11'.repeat(32)) as `0x${string}`;

@@ -3,9 +3,18 @@
  *
  * set_spend_policy: configure a SpendingPolicy (in-process, persists for server lifetime).
  * check_budget: query on-chain remaining budget via checkBudget().
+ *
+ * Payment flow uses the SDK 6.3.0 reserve → execute → commit | release | lock
+ * surface. `check()` is the backward-compatible reserve-then-commit wrapper
+ * and is not used on the payment path.
  */
 import { z } from 'zod'
-import { SpendingPolicy, checkBudget } from 'agentwallet-sdk'
+import {
+  SpendingPolicy,
+  checkBudget,
+  type SpendOutcome,
+  type SpendReservation as SdkSpendReservation,
+} from 'agentwallet-sdk'
 import { parseEther, zeroAddress, type Address } from 'viem'
 import { getWallet } from '../utils/client.js'
 import { textContent, formatError } from '../utils/format.js'
@@ -32,48 +41,82 @@ export type SpendPolicyDecision =
   | { status: 'approved' }
   | { status: 'rejected' | 'draft'; reason?: string; draftId?: string }
 
+export interface SpendReservationItem {
+  policy: InstanceType<typeof SpendingPolicy>
+  held: SdkSpendReservation
+}
+
 export interface SpendReservation {
   amount: number
-  policies: Array<InstanceType<typeof SpendingPolicy>>
+  items: SpendReservationItem[]
 }
 
-type SpendWindowEntry = { amount: number; ts: number }
-
-function getSpendWindow(
-  policy: InstanceType<typeof SpendingPolicy>
-): SpendWindowEntry[] | undefined {
-  const window = (policy as unknown as { spendWindow?: SpendWindowEntry[] }).spendWindow
-  return Array.isArray(window) ? window : undefined
-}
-
-/**
- * Undo a reservation recorded by SpendingPolicy.check() on approve.
- * Pops the last matching rolling-window entry from each reserved policy.
- */
-export function releaseSpendReservation(
-  reservation: SpendReservation | null | undefined
+function forEachHeld(
+  reservation: SpendReservation | null | undefined,
+  apply: (
+    policy: InstanceType<typeof SpendingPolicy>,
+    held: SdkSpendReservation
+  ) => void
 ): void {
   if (!reservation) {
     return
   }
-  for (const policy of reservation.policies) {
-    const window = getSpendWindow(policy)
-    if (!window || window.length === 0) {
-      continue
-    }
-    for (let i = window.length - 1; i >= 0; i--) {
-      if (window[i]!.amount === reservation.amount) {
-        window.splice(i, 1)
-        break
-      }
-    }
+  for (const item of reservation.items) {
+    apply(item.policy, item.held)
   }
 }
 
 /**
- * Reserve spend (policy.check records on approve), run the attempt, then
- * settle | release | hold-unknown. Definite not-charged failures release
- * the reservation so a retry can use the same remaining cap.
+ * Return held capacity after a definite not-charged outcome.
+ * Uses SpendingPolicy.release — locked (hold-unknown) reservations refuse.
+ */
+export function releaseSpendReservation(
+  reservation: SpendReservation | null | undefined
+): void {
+  forEachHeld(reservation, (policy, held) => {
+    policy.release(held)
+  })
+}
+
+/**
+ * Finalize held capacity after a settled outcome.
+ */
+export function commitSpendReservation(
+  reservation: SpendReservation | null | undefined
+): void {
+  forEachHeld(reservation, (policy, held) => {
+    policy.commit(held)
+  })
+}
+
+/**
+ * Keep held capacity after a hold-unknown outcome. A timer never unlocks.
+ */
+export function lockSpendReservation(
+  reservation: SpendReservation | null | undefined
+): void {
+  forEachHeld(reservation, (policy, held) => {
+    policy.lock(held)
+  })
+}
+
+/**
+ * Apply a classified SDK spend outcome to every held reservation.
+ * settled → commit; released → release; hold-unknown → lock.
+ */
+export function applySpendOutcome(
+  reservation: SpendReservation | null | undefined,
+  outcome: SpendOutcome
+): void {
+  forEachHeld(reservation, (policy, held) => {
+    policy.applyOutcome(held, outcome)
+  })
+}
+
+/**
+ * Reserve spend, run the attempt, then commit | release | lock.
+ * Definite not-charged failures release so a retry can use the same cap.
+ * Unclear post-broadcast errors lock the hold (never auto-unlock).
  */
 export async function withReservedSpend<T>(
   input: {
@@ -97,10 +140,16 @@ export async function withReservedSpend<T>(
     )
   }
   try {
-    return await run()
+    const value = await run()
+    commitSpendReservation(reservation)
+    return value
   } catch (error: unknown) {
     if (error instanceof DefiniteSpendFailure) {
       releaseSpendReservation(reservation)
+    } else {
+      // After execute, only lock. classifySpendError treats unknown errors
+      // as released (pre-broadcast); that is unsafe once a write may exist.
+      lockSpendReservation(reservation)
     }
     throw error
   }
@@ -132,6 +181,11 @@ export async function withReservedSpend<T>(
  * Fail closed: ANY error while evaluating the policy — decimals resolution,
  * numeric conversion, or the policy engine itself — rejects the payment, and
  * unrecognised policy statuses are treated as rejections.
+ *
+ * Payment-path callers that still use `enforceSpendPolicy` get reserve-then
+ * commit (the same net effect as the legacy `check()` wrapper). Prefer
+ * `withReservedSpend` or explicit reserve/commit/release when the outcome
+ * is known after execute.
  */
 export async function reserveSpendPolicy(input: {
   merchant: string
@@ -195,34 +249,27 @@ export async function reserveSpendPolicy(input: {
       amountNumber *= 1 + Number.EPSILON
     }
 
-    const snapshots = policies.map(([, policy]) => ({
-      policy,
-      beforeLength: getSpendWindow(policy)?.length ?? 0,
-    }))
-    const reservedPolicies: Array<InstanceType<typeof SpendingPolicy>> = []
+    const reservedItems: SpendReservationItem[] = []
 
     for (const [scope, policy] of policies) {
-      const result = await policy.check({
+      const result = await policy.reserve({
         merchant: input.merchant,
         amount: amountNumber,
       })
 
-      if (result.status === 'approved') {
-        const afterLength = getSpendWindow(policy)?.length ?? 0
-        if (afterLength > (snapshots.find((s) => s.policy === policy)?.beforeLength ?? 0)) {
-          reservedPolicies.push(policy)
-        }
+      if (result.status === 'reserved' && result.reservation) {
+        reservedItems.push({ policy, held: result.reservation })
         continue
       }
       if (result.status === 'draft') {
-        releaseSpendReservation({ amount: amountNumber, policies: reservedPolicies })
+        releaseSpendReservation({ amount: amountNumber, items: reservedItems })
         return {
           decision: { status: 'draft', reason: result.reason, draftId: result.draftId },
           reservation: null,
         }
       }
-      // 'rejected' and anything unrecognised both deny.
-      releaseSpendReservation({ amount: amountNumber, policies: reservedPolicies })
+      // 'rejected', reserved-without-handle, and anything unrecognised deny.
+      releaseSpendReservation({ amount: amountNumber, items: reservedItems })
       return {
         decision: {
           status: 'rejected',
@@ -237,8 +284,8 @@ export async function reserveSpendPolicy(input: {
     return {
       decision: { status: 'approved' },
       reservation:
-        reservedPolicies.length > 0
-          ? { amount: amountNumber, policies: reservedPolicies }
+        reservedItems.length > 0
+          ? { amount: amountNumber, items: reservedItems }
           : null,
     }
   } catch (error: unknown) {
@@ -261,7 +308,11 @@ export async function enforceSpendPolicy(input: {
   /** Decimals of the asset `amount` is denominated in (0–18), or a thunk. */
   decimals: number | (() => number)
 }): Promise<SpendPolicyDecision> {
-  return (await reserveSpendPolicy(input)).decision
+  const { decision, reservation } = await reserveSpendPolicy(input)
+  if (decision.status === 'approved') {
+    commitSpendReservation(reservation)
+  }
+  return decision
 }
 
 // ─── set_spend_policy ──────────────────────────────────────────────────────

@@ -40,7 +40,7 @@ import {
 const CANONICAL = '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913'
 
 /**
- * What agentwallet-sdk 6.2.1 actually does with the value after we approve it.
+ * What agentwallet-sdk 6.3.0 actually does with the value after we approve it.
  *
  * `X402Client.executePayment(req)` calls
  * `agentTransferToken(wallet, { to: req.payTo, ... })`, which reaches viem's

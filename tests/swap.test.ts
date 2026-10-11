@@ -46,6 +46,7 @@ import { handleSetSpendPolicy, _resetPolicyStore } from '../src/tools/budget.js'
 import { _resetSpendIntentStore } from '../src/utils/spend-intent.js'
 import { getWallet } from '../src/utils/client.js'
 import { getGlobalRegistry, attachSwap, SpendingPolicy } from 'agentwallet-sdk'
+import { policyEngine, reservedResult } from './helpers/policy-engine.js'
 
 const mockGetGlobalRegistry = vi.mocked(getGlobalRegistry)
 const mockAttachSwap = vi.mocked(attachSwap)
@@ -243,7 +244,7 @@ describe('swap_tokens', () => {
       reason:
         'Merchant "0x1234567890123456789012345678901234567890" is not on the allowlist.',
     })
-    MockSpendingPolicy.mockImplementation(function () { return { check } } as any)
+    MockSpendingPolicy.mockImplementation(function () { return policyEngine(check) } as any)
 
     const mockSwap = vi.fn()
     mockGetGlobalRegistry.mockReturnValue({
@@ -279,7 +280,7 @@ describe('swap_tokens', () => {
       status: 'rejected',
       reason: 'Rolling spend cap exceeded: spent 0, cap 5e19, attempted 1e20.',
     })
-    MockSpendingPolicy.mockImplementation(function () { return { check } } as any)
+    MockSpendingPolicy.mockImplementation(function () { return policyEngine(check) } as any)
 
     const mockSwap = vi.fn()
     mockGetGlobalRegistry.mockReturnValue({
@@ -302,8 +303,8 @@ describe('swap_tokens', () => {
   })
 
   it('swaps normally when the spend policy approves', async () => {
-    const check = vi.fn().mockResolvedValue({ status: 'approved' })
-    MockSpendingPolicy.mockImplementation(function () { return { check } } as any)
+    const check = vi.fn().mockResolvedValue(reservedResult())
+    MockSpendingPolicy.mockImplementation(function () { return policyEngine(check) } as any)
 
     const mockSwap = vi.fn().mockResolvedValue({
       txHash: '0x58b6062bc5903ddbde75a7f123ecc63aa020127ea617b13c3bc3e90a8b17cf50',
@@ -470,8 +471,8 @@ describe('swap_tokens', () => {
         status: 'rejected',
         reason: 'Rolling spend cap exceeded: spent 0, cap 5e19, attempted 1e20.',
       })
-      .mockResolvedValueOnce({ status: 'approved' })
-    MockSpendingPolicy.mockImplementation(function () { return { check } } as any)
+      .mockResolvedValueOnce(reservedResult())
+    MockSpendingPolicy.mockImplementation(function () { return policyEngine(check) } as any)
 
     const mockSwap = vi.fn().mockResolvedValue({ txHash: '0xc3746c982a2eeb7bc35e72d8a947e15e7e544950c861418fc0cab7c2d99b2fa9', quote: null })
     mockUsdcWethRegistry()

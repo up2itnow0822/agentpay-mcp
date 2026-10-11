@@ -32,9 +32,11 @@ import {
   enforceSpendPolicy,
   releaseSpendReservation,
   reserveSpendPolicy,
+  withReservedSpend,
   _resetPolicyStore,
 } from '../src/tools/budget.js'
 import { SpendingPolicy, checkBudget } from 'agentwallet-sdk'
+import { policyEngine, reservedResult } from './helpers/policy-engine.js'
 
 const MockSpendingPolicy = vi.mocked(SpendingPolicy)
 const mockCheckBudget = vi.mocked(checkBudget)
@@ -44,7 +46,9 @@ describe('set_spend_policy', () => {
     vi.clearAllMocks()
     _resetPolicyStore()
     // Must use function (not arrow) so it works as a constructor with `new`
-    MockSpendingPolicy.mockImplementation(function() { return { check: vi.fn() } } as any)
+    MockSpendingPolicy.mockImplementation(function() {
+      return policyEngine(vi.fn().mockResolvedValue(reservedResult()))
+    } as any)
   })
 
   it('creates a policy with daily limit and per-tx cap', async () => {
@@ -145,9 +149,9 @@ describe('enforceSpendPolicy', () => {
     expect(decimals).not.toHaveBeenCalled()
   })
 
-  it('invokes the configured SpendingPolicy.check for the scope', async () => {
-    const check = vi.fn().mockResolvedValue({ status: 'rejected', reason: 'blocked' })
-    MockSpendingPolicy.mockImplementation(function() { return { check } } as any)
+  it('invokes the configured SpendingPolicy.reserve for the scope', async () => {
+    const reserve = vi.fn().mockResolvedValue({ status: 'rejected', reason: 'blocked' })
+    MockSpendingPolicy.mockImplementation(function() { return policyEngine(reserve) } as any)
 
     await handleSetSpendPolicy({
       allowedRecipients: ['0xsafe'],
@@ -159,7 +163,7 @@ describe('enforceSpendPolicy', () => {
       decimals: 18,
     })
 
-    expect(check).toHaveBeenCalledWith({
+    expect(reserve).toHaveBeenCalledWith({
       merchant: '0xattacker',
       amount: 1000,
     })
@@ -167,8 +171,8 @@ describe('enforceSpendPolicy', () => {
   })
 
   it('normalises token base units to 18-decimal ETH-equivalent for the policy', async () => {
-    const check = vi.fn().mockResolvedValue({ status: 'approved' })
-    MockSpendingPolicy.mockImplementation(function() { return { check } } as any)
+    const reserve = vi.fn().mockResolvedValue(reservedResult())
+    MockSpendingPolicy.mockImplementation(function() { return policyEngine(reserve) } as any)
 
     await handleSetSpendPolicy({ perTxCapEth: '5' })
 
@@ -181,15 +185,15 @@ describe('enforceSpendPolicy', () => {
     })
 
     expect(decision).toEqual({ status: 'approved' })
-    expect(check).toHaveBeenCalledWith({
+    expect(reserve).toHaveBeenCalledWith({
       merchant: '0xmerchant',
       amount: 1e19,
     })
   })
 
   it('enforces policies configured under a non-default scopeKey', async () => {
-    const check = vi.fn().mockResolvedValue({ status: 'rejected', reason: 'scoped block' })
-    MockSpendingPolicy.mockImplementation(function() { return { check } } as any)
+    const reserve = vi.fn().mockResolvedValue({ status: 'rejected', reason: 'scoped block' })
+    MockSpendingPolicy.mockImplementation(function() { return policyEngine(reserve) } as any)
 
     await handleSetSpendPolicy({ scopeKey: 'session-1', perTxCapEth: '0.01' })
 
@@ -200,16 +204,16 @@ describe('enforceSpendPolicy', () => {
       decimals: 18,
     })
 
-    expect(check).toHaveBeenCalledWith({ merchant: '0xabc', amount: 1e18 })
+    expect(reserve).toHaveBeenCalledWith({ merchant: '0xabc', amount: 1e18 })
     expect(decision).toEqual({ status: 'rejected', reason: 'scoped block' })
   })
 
   it('requires every configured scope to approve (union enforcement)', async () => {
-    const approve = vi.fn().mockResolvedValue({ status: 'approved' })
+    const approve = vi.fn().mockResolvedValue(reservedResult())
     const reject = vi.fn().mockResolvedValue({ status: 'rejected', reason: 'scoped cap' })
     MockSpendingPolicy
-      .mockImplementationOnce(function() { return { check: approve } } as any)
-      .mockImplementationOnce(function() { return { check: reject } } as any)
+      .mockImplementationOnce(function() { return policyEngine(approve) } as any)
+      .mockImplementationOnce(function() { return policyEngine(reject) } as any)
 
     await handleSetSpendPolicy({ dailyLimitEth: '1' })
     await handleSetSpendPolicy({ scopeKey: 'session-1', dailyLimitEth: '0.001' })
@@ -226,8 +230,8 @@ describe('enforceSpendPolicy', () => {
   })
 
   it('never under-reports amounts that exceed float precision', async () => {
-    const check = vi.fn().mockResolvedValue({ status: 'approved' })
-    MockSpendingPolicy.mockImplementation(function() { return { check } } as any)
+    const reserve = vi.fn().mockResolvedValue(reservedResult())
+    MockSpendingPolicy.mockImplementation(function() { return policyEngine(reserve) } as any)
 
     await handleSetSpendPolicy({ perTxCapEth: '5' })
 
@@ -239,15 +243,15 @@ describe('enforceSpendPolicy', () => {
       decimals: 18,
     })
 
-    const seen = check.mock.calls[0]![0].amount as number
+    const seen = reserve.mock.calls[0]![0].amount as number
     expect(seen).toBeGreaterThan(Number(2n ** 53n))
   })
 
   // ─── Fail-closed behaviour ─────────────────────────────────────────────
 
-  it('fails closed when SpendingPolicy.check throws', async () => {
-    const check = vi.fn().mockRejectedValue(new Error('policy engine exploded'))
-    MockSpendingPolicy.mockImplementation(function() { return { check } } as any)
+  it('fails closed when SpendingPolicy.reserve throws', async () => {
+    const reserve = vi.fn().mockRejectedValue(new Error('policy engine exploded'))
+    MockSpendingPolicy.mockImplementation(function() { return policyEngine(reserve) } as any)
 
     await handleSetSpendPolicy({ dailyLimitEth: '0.1' })
 
@@ -263,8 +267,8 @@ describe('enforceSpendPolicy', () => {
   })
 
   it('fails closed when the policy returns an unrecognised status', async () => {
-    const check = vi.fn().mockResolvedValue({ status: 'maybe-later' })
-    MockSpendingPolicy.mockImplementation(function() { return { check } } as any)
+    const reserve = vi.fn().mockResolvedValue({ status: 'maybe-later' })
+    MockSpendingPolicy.mockImplementation(function() { return policyEngine(reserve) } as any)
 
     await handleSetSpendPolicy({ dailyLimitEth: '0.1' })
 
@@ -279,8 +283,8 @@ describe('enforceSpendPolicy', () => {
   })
 
   it('fails closed when the decimals thunk throws', async () => {
-    const check = vi.fn().mockResolvedValue({ status: 'approved' })
-    MockSpendingPolicy.mockImplementation(function() { return { check } } as any)
+    const reserve = vi.fn().mockResolvedValue(reservedResult())
+    MockSpendingPolicy.mockImplementation(function() { return policyEngine(reserve) } as any)
 
     await handleSetSpendPolicy({ dailyLimitEth: '0.1' })
 
@@ -294,12 +298,12 @@ describe('enforceSpendPolicy', () => {
 
     expect(decision.status).toBe('rejected')
     expect((decision as { reason?: string }).reason).toContain('Cannot resolve decimals')
-    expect(check).not.toHaveBeenCalled()
+    expect(reserve).not.toHaveBeenCalled()
   })
 
   it('fails closed for out-of-range decimals', async () => {
-    const check = vi.fn().mockResolvedValue({ status: 'approved' })
-    MockSpendingPolicy.mockImplementation(function() { return { check } } as any)
+    const reserve = vi.fn().mockResolvedValue(reservedResult())
+    MockSpendingPolicy.mockImplementation(function() { return policyEngine(reserve) } as any)
 
     await handleSetSpendPolicy({ dailyLimitEth: '0.1' })
 
@@ -311,12 +315,12 @@ describe('enforceSpendPolicy', () => {
       })
       expect(decision.status).toBe('rejected')
     }
-    expect(check).not.toHaveBeenCalled()
+    expect(reserve).not.toHaveBeenCalled()
   })
 
   it('fails closed for negative and non-finite amounts', async () => {
-    const check = vi.fn().mockResolvedValue({ status: 'approved' })
-    MockSpendingPolicy.mockImplementation(function() { return { check } } as any)
+    const reserve = vi.fn().mockResolvedValue(reservedResult())
+    MockSpendingPolicy.mockImplementation(function() { return policyEngine(reserve) } as any)
 
     await handleSetSpendPolicy({ dailyLimitEth: '0.1' })
 
@@ -335,7 +339,7 @@ describe('enforceSpendPolicy', () => {
     })
     expect(huge.status).toBe('rejected')
 
-    expect(check).not.toHaveBeenCalled()
+    expect(reserve).not.toHaveBeenCalled()
   })
 })
 
@@ -343,7 +347,9 @@ describe('check_budget', () => {
   beforeEach(() => {
     vi.clearAllMocks()
     _resetPolicyStore()
-    MockSpendingPolicy.mockImplementation(function() { return { check: vi.fn() } } as any)
+    MockSpendingPolicy.mockImplementation(function() {
+      return policyEngine(vi.fn().mockResolvedValue(reservedResult()))
+    } as any)
   })
 
   it('returns budget for ETH by default', async () => {
@@ -456,5 +462,35 @@ describe('reserveSpendPolicy / releaseSpendReservation', () => {
       decimals: 6,
     })
     expect(retried.decision.status).toBe('approved')
+  })
+
+  it('commits a reserved spend on success so a second 100-unit payment stays over a 150 cap', async () => {
+    const { SpendingPolicy: RealPolicy } = await vi.importActual<
+      typeof import('agentwallet-sdk')
+    >('agentwallet-sdk')
+    MockSpendingPolicy.mockImplementation(function (this: unknown, config: unknown) {
+      return new RealPolicy(config as ConstructorParameters<typeof RealPolicy>[0])
+    } as any)
+
+    await handleSetSpendPolicy({ dailyLimitEth: '150' })
+
+    await withReservedSpend(
+      {
+        merchant: '0x1234567890123456789012345678901234567890',
+        amount: 100_000_000n,
+        decimals: 6,
+      },
+      async () => 'settled'
+    )
+
+    const blocked = await reserveSpendPolicy({
+      merchant: '0x1234567890123456789012345678901234567890',
+      amount: 100_000_000n,
+      decimals: 6,
+    })
+    expect(blocked.decision.status).toBe('rejected')
+    expect(blocked.decision).toEqual(
+      expect.objectContaining({ reason: expect.stringMatching(/Rolling spend cap exceeded/i) })
+    )
   })
 })

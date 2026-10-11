@@ -1,6 +1,6 @@
 {
   "name": "agentpay-mcp",
-  "version": "4.1.17",
+  "version": "4.2.0",
   "mcpName": "io.github.up2itnow0822/agentpay",
   "description": "AgentPay MCP Server - Non-custodial x402 payment layer for AI agents. Multi-chain wallets, spending limits, and machine-to-machine payments. Patent Pending.",
   "main": "dist/index.js",
@@ -65,12 +65,12 @@
   "dependencies": {
     "@hono/node-server": "1.19.17",
     "@modelcontextprotocol/sdk": "1.31.0",
-    "agentwallet-sdk": "^6.2.1",
-    "viem": "2.56.0",
+    "agentwallet-sdk": "6.3.0",
+    "viem": "2.57.4",
     "zod": "^3.22.4"
   },
   "overrides": {
-    "viem": "2.56.0",
+    "viem": "2.57.4",
     "fast-uri": "3.1.8",
     "brace-expansion": "5.0.12",
     "ip-address": "10.7.2",
