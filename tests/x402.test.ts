@@ -1873,6 +1873,7 @@ describe('get_transaction_history tool', () => {
     const result = await handleGetTransactionHistory({ from_block: '1', to_block: '2' });
     const text = result.content[0]!.text;
     expect(text).not.toContain('**x402 Payment**');
+    expect(text).toContain('omitted from block-scoped queries');
   });
 
   it('shows the requested URL when the paid 402 came from a redirect target', async () => {

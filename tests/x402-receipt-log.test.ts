@@ -123,3 +123,20 @@ describe('x402 settlement receipt log', () => {
     expect(listX402Settlements()[0]?.token).toBe(DAI_BASE);
   });
 });
+
+describe('x402 receipt eviction order', () => {
+  it('evicts the oldest settlement, not the earliest insertion', async () => {
+    const m = await import('../src/utils/x402-receipt-log.js');
+    m._resetX402SettlementLog();
+    const hash = (n: number) => '0x' + n.toString(16).padStart(64, '0');
+    // Newest settlement inserted first, then fill past the cap with older ones.
+    m.recordX402Settlement({ intentKey: 'k-new', url: 'https://n', method: 'GET', amount: '1', token: 't', recipient: 'r', txHash: hash(1), settledAt: 10_000, seq: 10_000 });
+    for (let i = 0; i < m.X402_SETTLEMENT_LOG_MAX; i++) {
+      m.recordX402Settlement({ intentKey: `k-${i}`, url: 'https://o', method: 'GET', amount: '1', token: 't', recipient: 'r', txHash: hash(i + 2), settledAt: i, seq: i });
+    }
+    const list = m.listX402Settlements();
+    expect(list).toHaveLength(m.X402_SETTLEMENT_LOG_MAX);
+    expect(list[list.length - 1]!.intentKey).toBe('k-new');
+    expect(list.some((r) => r.intentKey === 'k-0')).toBe(false);
+  });
+});

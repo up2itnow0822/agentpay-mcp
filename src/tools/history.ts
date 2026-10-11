@@ -154,8 +154,12 @@ export async function handleGetTransactionHistory(
             `📜 **Transaction History**\n\n` +
             `No transactions found in the queried range.\n\n` +
             `  Block range: ${fromBlock?.toString() ?? '0'} → ${toBlock?.toString() ?? 'latest'}\n` +
-            `  Event type:  ${eventType}\n\n` +
-            `Try expanding the from_block range for older history.`
+            `  Event type:  ${eventType}\n` +
+            (x402Excluded
+              ? `  x402 settlements are not block-indexed and are omitted from block-scoped queries; ` +
+                `run without from_block/to_block to see them.\n`
+              : '') +
+            `\nTry expanding the from_block range for older history.`
           ),
         ],
       };

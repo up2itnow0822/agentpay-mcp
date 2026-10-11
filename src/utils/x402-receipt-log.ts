@@ -48,9 +48,23 @@ function sameTxHash(a: string, b: string): boolean {
   return a.toLowerCase() === b.toLowerCase()
 }
 
+function compareSettlement(a: X402SettlementReceipt, b: X402SettlementReceipt): number {
+  return (
+    a.settledAt - b.settledAt ||
+    (a.seq ?? Number.MAX_SAFE_INTEGER) - (b.seq ?? Number.MAX_SAFE_INTEGER)
+  )
+}
+
 function evictIfNeeded(): void {
   while (receipts.length > X402_SETTLEMENT_LOG_MAX) {
-    const evicted = receipts.shift()
+    // Evict the oldest by settlement order (settledAt, seq), not insertion.
+    let oldestIndex = 0
+    for (let i = 1; i < receipts.length; i++) {
+      if (compareSettlement(receipts[i]!, receipts[oldestIndex]!) < 0) {
+        oldestIndex = i
+      }
+    }
+    const [evicted] = receipts.splice(oldestIndex, 1)
     if (!evicted) {
       continue
     }
@@ -122,10 +136,7 @@ export function listX402Settlements(): X402SettlementReceipt[] {
   return receipts
     .map((receipt, index) => ({ receipt, index }))
     .sort(
-      (a, b) =>
-        a.receipt.settledAt - b.receipt.settledAt ||
-        (a.receipt.seq ?? Number.MAX_SAFE_INTEGER) - (b.receipt.seq ?? Number.MAX_SAFE_INTEGER) ||
-        a.index - b.index
+      (a, b) => compareSettlement(a.receipt, b.receipt) || a.index - b.index
     )
     .map(({ receipt }) => receipt)
 }
