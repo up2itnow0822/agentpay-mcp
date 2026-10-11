@@ -254,6 +254,34 @@ describe('enforceSpendPolicy', () => {
 
   // ─── Fail-closed behaviour ─────────────────────────────────────────────
 
+  it('releases earlier holds when a later policy.reserve throws', async () => {
+    const firstRelease = vi.fn().mockReturnValue(true)
+    const firstReserve = vi.fn().mockResolvedValue(reservedResult())
+    const secondReserve = vi.fn().mockRejectedValue(new Error('second scope exploded'))
+    MockSpendingPolicy
+      .mockImplementationOnce(function () {
+        return { ...policyEngine(firstReserve), release: firstRelease }
+      } as any)
+      .mockImplementationOnce(function () {
+        return policyEngine(secondReserve)
+      } as any)
+
+    await handleSetSpendPolicy({ dailyLimitEth: '1' })
+    await handleSetSpendPolicy({ scopeKey: 'session-2', dailyLimitEth: '1' })
+
+    const { decision, reservation } = await reserveSpendPolicy({
+      merchant: '0xabc',
+      amount: 1n,
+      decimals: 9,
+    })
+
+    expect(decision.status).toBe('rejected')
+    expect((decision as { reason?: string }).reason).toContain('second scope exploded')
+    expect(reservation).toBeNull()
+    expect(firstReserve).toHaveBeenCalledOnce()
+    expect(firstRelease).toHaveBeenCalledOnce()
+  })
+
   it('fails closed when SpendingPolicy.reserve throws', async () => {
     const reserve = vi.fn().mockRejectedValue(new Error('policy engine exploded'))
     MockSpendingPolicy.mockImplementation(function() { return policyEngine(reserve) } as any)

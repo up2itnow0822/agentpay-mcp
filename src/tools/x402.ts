@@ -412,7 +412,7 @@ export async function handleX402Pay(
 
         // Cap enforcement happens in onBeforePayment using the selected asset's
         // decimals — never compare USDC base units against ETH-wei.
-        const { client: x402Client, releaseUnusedReservation } = createAgentPayX402Client(
+        const paidClient = createAgentPayX402Client(
           wallet,
           {
             chainId: config.chainId,
@@ -429,6 +429,7 @@ export async function handleX402Pay(
             },
           }
         );
+        const x402Client = paidClient.client;
 
         const headers: Record<string, string> = {
           'Accept': 'application/json, text/plain, */*',
@@ -466,7 +467,7 @@ export async function handleX402Pay(
           responseText = paid.responseText;
         } catch (error: unknown) {
           if (!paymentMade) {
-            releaseUnusedReservation();
+            paidClient.disposeUnusedReservation(error);
           }
           if (paymentMade) {
             try {
@@ -509,7 +510,7 @@ export async function handleX402Pay(
         }
 
         if (response.status === 402 && !paymentMade) {
-          releaseUnusedReservation();
+          paidClient.releaseUnusedReservation();
           throw new X402UnsupportedRequirementError(
             describeUnsupported402(input, response, responseText, config.chainId)
           );
@@ -551,7 +552,7 @@ export async function handleX402Pay(
           out += `  TX Hash:   ${sanitizeUntrustedInline(paymentTxHash, 80)}\n`;
           out += `\n💡 Tip: Use x402_session_start to pay once for a session and skip per-call payments.\n`;
         } else {
-          releaseUnusedReservation();
+          paidClient.releaseUnusedReservation();
           out += `\n✅ No payment required\n`;
         }
 

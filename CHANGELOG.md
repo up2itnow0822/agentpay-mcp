@@ -38,6 +38,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     examples do not retry `fetchWithPayment` after settlement.
   - [#82](https://github.com/up2itnow0822/agentpay-mcp/pull/82) — persist
     `x402_pay` settlements in `get_transaction_history`.
+- Lock unused spend reservations after ambiguous x402 failures that may
+  already have broadcast; release only definite pre-broadcast outcomes.
+  Release earlier multi-scope holds if a later `policy.reserve` throws.
 
 ---
 

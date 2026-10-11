@@ -169,6 +169,7 @@ export async function handleX402SessionStart(
 ): Promise<{ content: Array<{ type: 'text'; text: string }>; isError?: boolean }> {
   let paymentMade = false;
   let releaseUnusedReservation = (): void => undefined;
+  let disposeUnusedReservation = (_error?: unknown): void => undefined;
   try {
     const config = getConfig();
     const timeoutMs = input.timeout_ms ?? 30000;
@@ -234,6 +235,7 @@ export async function handleX402SessionStart(
     );
     const x402Client = paidClient.client;
     releaseUnusedReservation = paidClient.releaseUnusedReservation;
+    disposeUnusedReservation = paidClient.disposeUnusedReservation;
 
     const method = input.method ?? 'GET';
     const reqHeaders: Record<string, string> = {
@@ -347,7 +349,7 @@ export async function handleX402SessionStart(
     return { content: [textContent(out)] };
   } catch (error: unknown) {
     if (!paymentMade) {
-      releaseUnusedReservation();
+      disposeUnusedReservation(error);
     }
     if (error instanceof Error && error.name === 'AbortError') {
       return {

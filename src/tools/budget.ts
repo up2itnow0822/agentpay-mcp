@@ -224,6 +224,7 @@ export async function reserveSpendPolicy(input: {
     return { decision: { status: 'approved' }, reservation: null }
   }
 
+  const reservedItems: SpendReservationItem[] = []
   try {
     const decimals =
       typeof input.decimals === 'function' ? input.decimals() : input.decimals
@@ -267,8 +268,6 @@ export async function reserveSpendPolicy(input: {
       }
     }
 
-    const reservedItems: SpendReservationItem[] = []
-
     for (const [scope, policy] of policies) {
       const result = await policy.reserve({
         merchant: input.merchant,
@@ -307,6 +306,7 @@ export async function reserveSpendPolicy(input: {
           : null,
     }
   } catch (error: unknown) {
+    releaseSpendReservation({ amount: 0, items: reservedItems })
     return {
       decision: {
         status: 'rejected',

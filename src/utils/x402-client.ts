@@ -18,10 +18,12 @@ import {
 } from './payment-cap.js'
 import {
   commitSpendReservation,
+  lockSpendReservation,
   releaseSpendReservation,
   reserveSpendPolicy,
   type SpendReservation,
 } from '../tools/budget.js'
+import { DefiniteSpendFailure } from './spend-intent.js'
 
 export type AgentPayX402Kind = 'payment' | 'session'
 
@@ -35,6 +37,13 @@ export interface AgentPayX402ClientOptions {
 export interface AgentPayX402Client {
   client: ReturnType<typeof createX402Client>
   releaseUnusedReservation: () => void
+  lockUnusedReservation: () => void
+  /**
+   * Drop a hold that never reached onPaymentComplete.
+   * Definite pre-broadcast failures release so the cap can be retried.
+   * Any other error may be post-broadcast — lock, never auto-unlock.
+   */
+  disposeUnusedReservation: (_error?: unknown) => void
 }
 
 function capExceededMessage(
@@ -87,52 +96,64 @@ export function createAgentPayX402Client(
     maxRetries: 1,
     supportedNetworks: supportedX402NetworksForChainId(options.chainId),
     onBeforePayment: async (req) => {
-      // The 402's payTo is remote-controlled and ends up inside error
-      // messages (SDK allowlist rejection, viem InvalidAddressError).
-      // Reject non-addresses before signing or interpolating.
-      const merchant = assertPayableX402Recipient(req.payTo)
-      // req.amount is remote-controlled; a raw BigInt() here would put the
-      // whole value verbatim into V8's "Cannot convert <amount> to a
-      // BigInt" message.
-      const amount = assertParsableX402Amount(req.amount)
-      if (options.maxPaymentEth) {
-        const maxRaw = maxPaymentBaseUnits(
-          options.maxPaymentEth,
-          req.asset,
-          options.chainId
-        )
-        if (amount > maxRaw) {
-          throw new Error(
-            capExceededMessage(
-              kind,
-              amount,
-              maxRaw,
-              req.asset,
-              options.maxPaymentEth
+      try {
+        // The 402's payTo is remote-controlled and ends up inside error
+        // messages (SDK allowlist rejection, viem InvalidAddressError).
+        // Reject non-addresses before signing or interpolating.
+        const merchant = assertPayableX402Recipient(req.payTo)
+        // req.amount is remote-controlled; a raw BigInt() here would put the
+        // whole value verbatim into V8's "Cannot convert <amount> to a
+        // BigInt" message.
+        const amount = assertParsableX402Amount(req.amount)
+        if (options.maxPaymentEth) {
+          const maxRaw = maxPaymentBaseUnits(
+            options.maxPaymentEth,
+            req.asset,
+            options.chainId
+          )
+          if (amount > maxRaw) {
+            throw new DefiniteSpendFailure(
+              capExceededMessage(
+                kind,
+                amount,
+                maxRaw,
+                req.asset,
+                options.maxPaymentEth
+              )
             )
+          }
+        }
+
+        // amount is in the offered asset's base units; the decimals thunk
+        // only runs when a policy is configured, and resolution failures
+        // reject (fail closed) inside reserveSpendPolicy.
+        const { decision, reservation: reserved } = await reserveSpendPolicy({
+          merchant,
+          amount,
+          decimals: () =>
+            resolveX402AssetDecimals(
+              req.asset ?? '0x0000000000000000000000000000000000000000',
+              options.chainId
+            ),
+        })
+        if (decision.status !== 'approved') {
+          throw new DefiniteSpendFailure(
+            policyBlockedMessage(kind, decision.status, decision.reason)
           )
         }
-      }
-
-      // amount is in the offered asset's base units; the decimals thunk
-      // only runs when a policy is configured, and resolution failures
-      // reject (fail closed) inside reserveSpendPolicy.
-      const { decision, reservation: reserved } = await reserveSpendPolicy({
-        merchant,
-        amount,
-        decimals: () =>
-          resolveX402AssetDecimals(
-            req.asset ?? '0x0000000000000000000000000000000000000000',
-            options.chainId
-          ),
-      })
-      if (decision.status !== 'approved') {
-        throw new Error(
-          policyBlockedMessage(kind, decision.status, decision.reason)
+        reservation = reserved
+        return true
+      } catch (error: unknown) {
+        // onBeforePayment runs before executePayment. Every failure here is
+        // a definite not-charged outcome — never lock a hold that was never
+        // exposed to a wallet write.
+        if (error instanceof DefiniteSpendFailure) {
+          throw error
+        }
+        throw new DefiniteSpendFailure(
+          error instanceof Error ? error.message : String(error)
         )
       }
-      reservation = reserved
-      return true
     },
     onPaymentComplete: (log) => {
       commitSpendReservation(reservation)
@@ -145,6 +166,18 @@ export function createAgentPayX402Client(
     client,
     releaseUnusedReservation() {
       releaseSpendReservation(reservation)
+      reservation = null
+    },
+    lockUnusedReservation() {
+      lockSpendReservation(reservation)
+      reservation = null
+    },
+    disposeUnusedReservation(error?: unknown) {
+      if (!error || error instanceof DefiniteSpendFailure) {
+        releaseSpendReservation(reservation)
+      } else {
+        lockSpendReservation(reservation)
+      }
       reservation = null
     },
   }
