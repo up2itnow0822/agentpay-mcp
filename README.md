@@ -1,3 +1,6 @@
+> [!WARNING]
+> **Paused for security maintenance. Do not use in production.**
+
 # AgentPay MCP
 
 [![npm](https://img.shields.io/npm/v/agentpay-mcp.svg)](https://www.npmjs.com/package/agentpay-mcp)
