@@ -264,10 +264,15 @@ export function hasInlineControlChars(value: string): boolean {
  * into the session record and re-emitted by every later status/fetch call for
  * the session's whole TTL.
  */
-export function noControlChars<T extends z.ZodType<string, z.ZodTypeDef, string>>(schema: T) {
-  return schema.refine((value) => !hasInlineControlChars(value), {
-    message: 'must not contain control characters (newlines, tabs, NUL, ...)',
-  });
+export function noControlChars<T extends z.ZodType<string, string>>(schema: T) {
+  // Zod 4's .url() normalizes (strips embedded newlines) before later checks
+  // run, so check the RAW input first, then hand it to the inner schema.
+  return z
+    .string()
+    .refine((value) => !hasInlineControlChars(value), {
+      message: 'must not contain control characters (newlines, tabs, NUL, ...)',
+    })
+    .pipe(schema);
 }
 
 /**

@@ -67,7 +67,7 @@
     "@modelcontextprotocol/sdk": "1.32.2",
     "agentwallet-sdk": "6.3.0",
     "viem": "2.57.4",
-    "zod": "^3.22.4"
+    "zod": "^4.6.7"
   },
   "overrides": {
     "viem": "2.57.4",
@@ -77,17 +77,18 @@
     "hono": "4.13.13",
     "proxy-addr": "2.0.8",
     "source-map-js": "1.2.2",
-    "@modelcontextprotocol/sdk": "1.32.2"
+    "@modelcontextprotocol/sdk": "1.32.2",
+    "body-parser": "2.4.0"
   },
   "devDependencies": {
     "@types/node": "^20.11.0",
     "@typescript-eslint/eslint-plugin": "^8.57.1",
     "@typescript-eslint/parser": "^8.57.1",
-    "@vitest/coverage-v8": "^4.0.18",
+    "@vitest/coverage-v8": "^4.1.12",
     "eslint": "^10.1.0",
     "globals": "^17.4.0",
     "typescript": "^5.3.3",
     "typescript-eslint": "^8.57.1",
-    "vitest": "^4.0.18"
+    "vitest": "^4.1.12"
   }
 }
