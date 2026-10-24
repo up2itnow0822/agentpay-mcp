@@ -10,7 +10,7 @@ a payment, verifies a receipt, or maps a chain.
 - `viem`: pinned exactly to `2.57.4`
 - `package.json` dependency: `"viem": "2.57.4"`
 - root npm override: `"viem": "2.57.4"`
-- reason: `agentwallet-sdk` `6.3.0` ships `viem` `2.57.4`. The pin replaces
+- reason: `agentwallet-sdk` `7.0.0` ships `viem` `2.57.4`. The pin replaces
   `2.56.0` so the x402 verifier path and the SDK share one install, and so
   the `ws` advisory that affected older `viem` trees stays cleared. Pins age:
   when the security gate flags a transitive advisory, bump the pin through

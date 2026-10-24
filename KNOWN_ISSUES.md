@@ -30,7 +30,7 @@ in the `files` array of its `package.json`. A PR/issue has been filed upstream.
 **Severity:** None (mitigated) **Status:** Resolved via `overrides`
 
 **Description:** `agentwallet-sdk` declares its own exact `viem` dependency
-(`2.57.4` as of `agentwallet-sdk@6.3.0`). Without pinning, a future SDK
+(`2.57.4` as of `agentwallet-sdk@7.0.0`). Without pinning, a future SDK
 release could install a second viem instance and break TypeScript types on
 the x402 verifier path.
 
@@ -43,7 +43,7 @@ everywhere via a root override:
 ```
 
 This forces a single viem installation (currently `2.57.4`, matching
-`agentwallet-sdk@6.3.0`). The pinned version is governed by the
+`agentwallet-sdk@7.0.0`). The pinned version is governed by the
 [payment-critical dependency pin policy](docs/dependency-pin-policy.md) and
 verified by `tests/dependency-pin-policy.test.ts` and
 `npm run smoke:clean-install`. The version in this file, `package.json`,

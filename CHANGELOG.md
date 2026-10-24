@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [4.3.0] - 2026-10-23
+
+Lifts the security-maintenance pause.
+
+### Fixed
+- Upgraded to agentwallet-sdk 7.0.0, which fixes the CCTP V2 attestation bug (#44 upstream) behind `bridge_usdc`, plus the x402 and escrow fund-safety fixes. The 4.2.2 known issue is resolved.
+- fast-uri override 3.1.9 (moderate advisories); npm audit clean.
+- A burn whose submission outcome is unknown (SDK `BURN_SUBMISSION_UNKNOWN`) is held as unknown, not released for retry.
+
 ## [4.2.2] - 2026-10-23
 
 ### Security

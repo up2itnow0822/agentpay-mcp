@@ -500,7 +500,8 @@ describe('runClassifiedSpend', () => {
     })
   })
 
-  it('classifies a confirmed uncharged revert as definite', async () => {
+  // agentwallet-sdk 7 needs structured revert evidence; a bare message is held.
+  it('holds a message-only revert as unknown (not retry-safe)', async () => {
     const walletClient = {
       sendTransaction: vi.fn().mockResolvedValue('0xsend'),
     }
@@ -509,7 +510,10 @@ describe('runClassifiedSpend', () => {
         await walletClient.sendTransaction({ to: '0x1' })
         throw new Error('depositForBurn transaction reverted (tx: 0xabc).')
       })
-    ).rejects.toBeInstanceOf(DefiniteSpendFailure)
+    ).rejects.toSatisfy((error: unknown) => {
+      expect(error).not.toBeInstanceOf(DefiniteSpendFailure)
+      return true
+    })
   })
 
   it('locks x402-style reverts after the first wallet write', async () => {
