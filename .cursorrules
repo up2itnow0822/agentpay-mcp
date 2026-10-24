@@ -4,8 +4,8 @@
 This is `agentpay-mcp` — an MCP (Model Context Protocol) server that wraps `agentwallet-sdk` to give AI agents financial capabilities. Any MCP-compatible client (Claude Desktop, Cursor, Windsurf, etc.) can use it.
 
 ## Current State
-- v4.2.0 — agentwallet-sdk 6.3.0, viem 2.57.4, 27 MCP tools
-- Dependencies: @modelcontextprotocol/sdk, agentwallet-sdk@6.3.0, viem, zod
+- v4.3.0 — agentwallet-sdk 7.0.0, viem 2.57.4, 27 MCP tools
+- Dependencies: @modelcontextprotocol/sdk, agentwallet-sdk@7.0.0, viem, zod
 - TypeScript, vitest for tests, stdio transport
 
 ## Upgrade Task: v4.0.0
