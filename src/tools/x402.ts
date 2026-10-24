@@ -203,7 +203,7 @@ export const X402PaySchema = z.object({
     .default('GET')
     .describe('HTTP method (default: GET)'),
   headers: z
-    .record(z.string())
+    .record(z.string(), z.string())
     .optional()
     .describe('Additional HTTP request headers as key-value pairs'),
   body: z

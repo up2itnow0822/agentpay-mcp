@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [4.2.2] - 2026-10-23
+
+### Security
+- @modelcontextprotocol/sdk 1.32.2, zod ^4.6.7, ip-address and body-parser overrides; npm audit clean.
+- Control-character rejection re-applied before zod 4 URL normalization (would otherwise silently pass).
+
+### Known issue
+- The bridge tool depends on agentwallet-sdk's CCTP bridge, which has an open attestation bug (#44 upstream). Do not use the bridge tool until a fixed SDK is released.
+
 ## [4.2.0] — 2026-10-11
 
 ### Changed

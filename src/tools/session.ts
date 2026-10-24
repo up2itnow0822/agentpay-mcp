@@ -85,7 +85,7 @@ export const X402SessionStartSchema = z.object({
     .default('GET')
     .describe('HTTP method for the initial payment request (default: GET)'),
   headers: z
-    .record(z.string())
+    .record(z.string(), z.string())
     .optional()
     .describe('Additional headers for the session-start request'),
   body: z
@@ -379,7 +379,7 @@ export const X402SessionFetchSchema = z.object({
     .default('GET')
     .describe('HTTP method (default: GET)'),
   headers: z
-    .record(z.string())
+    .record(z.string(), z.string())
     .optional()
     .describe('Additional HTTP headers (session token is injected automatically)'),
   body: z

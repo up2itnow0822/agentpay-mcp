@@ -42,11 +42,12 @@ function zodMessageFor(method: string): string {
 }
 
 describe('dispatcher error envelope', () => {
-  it('zod really does quote the offending value verbatim', () => {
-    // Premise check: if this stopped being true the finding would be moot.
+  it('zod 4 no longer echoes the offending enum value (premise changed)', () => {
+    // Zod 3 quoted the received value verbatim; Zod 4 lists only the allowed
+    // options. The fencing below stays as defense in depth either way.
     const message = zodMessageFor(HOSTILE_METHOD);
-    expect(message).toContain('0xATTACKER');
-    expect(message).toContain(UNTRUSTED_BODY_END);
+    expect(message).toContain('invalid_value');
+    expect(message).not.toContain('send_payment');
   });
 
   it('fences a schema-validation failure instead of narrating it', () => {
