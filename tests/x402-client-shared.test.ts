@@ -49,8 +49,9 @@ describe('shared x402 client and SDK outcomes', () => {
     expect(classifySpendError(new Error('quote rpc timeout')).status).toBe(
       'hold-unknown'
     )
+    // agentwallet-sdk 7 fails closed: unstructured errors are held, not released.
     expect(classifySpendError(new Error('merchant not on allowlist')).status).toBe(
-      'released'
+      'hold-unknown'
     )
   })
 })
