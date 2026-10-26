@@ -278,7 +278,8 @@ export interface PaymentApproval {
   readonly payTo: `0x${string}`;
   /** Exact payee amount in USDC base units. */
   readonly amount: bigint;
-  /** Approved ceiling in USDC base units (amount <= capBaseUnits). */
+  /** Approved ceiling in USDC base units: the full debit (amount plus the
+   *  SDK protocol fee, see withX402ProtocolFee) is <= capBaseUnits. */
   readonly capBaseUnits: bigint;
 }
 
@@ -337,9 +338,13 @@ export function createPaymentApproval(input: PaymentApprovalInput): PaymentAppro
   }
   const amount = parseBaseUnits(input.amount, 'amount');
   const capBaseUnits = usdToUsdcBaseUnits(input.capUsd);
-  if (amount > capBaseUnits) {
+  // The cap bounds what the wallet is debited: principal PLUS the SDK's
+  // protocol fee, which fetchWithPayment authorizes on top of the amount.
+  const debit = withX402ProtocolFee(amount);
+  if (debit > capBaseUnits) {
     throw new ApprovalRejectedError(
-      `offer of ${formatUsdcBaseUnits(amount)} USDC exceeds the $${input.capUsd} cap (${capBaseUnits} base units)`
+      `offer of ${formatUsdcBaseUnits(amount)} USDC plus the protocol fee (debit ${formatUsdcBaseUnits(debit)} USDC) ` +
+        `exceeds the $${input.capUsd} cap (${capBaseUnits} base units)`
     );
   }
   const approval: PaymentApproval = Object.freeze({
@@ -410,8 +415,8 @@ export function checkOfferAgainstApproval(
     mismatches.push(`amount ${String(offer.amount)} is not a positive integer`);
   }
   if (amount !== null) {
-    if (amount > approval.capBaseUnits) {
-      mismatches.push(`amount ${amount} exceeds cap ${approval.capBaseUnits}`);
+    if (withX402ProtocolFee(amount) > approval.capBaseUnits) {
+      mismatches.push(`amount ${amount} plus protocol fee exceeds cap ${approval.capBaseUnits}`);
     }
     if (amount !== approval.amount) mismatches.push(`amount ${amount} != approved ${approval.amount}`);
   }

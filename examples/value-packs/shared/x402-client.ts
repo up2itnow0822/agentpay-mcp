@@ -406,7 +406,20 @@ export async function fetchWithPayment(
     );
   }
 
-  const body = await response.text();
+  // The body read happens after settlement: a stream failure here must keep
+  // the payment state (PaymentAwareError), never surface as a raw error that
+  // withRetry would retry or that a caller would not count against its budget.
+  let body: string;
+  try {
+    body = await response.text();
+  } catch (err) {
+    wrapPaymentFailure(err, {
+      paymentInitiated,
+      paymentMade,
+      amountPaidUsd,
+      txHash,
+    });
+  }
   return {
     status: response.status,
     body,

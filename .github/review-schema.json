@@ -130,7 +130,7 @@
           "suggested_tier": {
             "type": "string",
             "enum": ["GREEN", "YELLOW", "RED"],
-            "description": "Suggested repair tier per REPAIR.md: GREEN may auto-merge, YELLOW waits for a human, RED never merges. Anything touching auth, wallets, signers, or settlement must be RED."
+            "description": "Suggested repair tier per REPAIR.md: GREEN is a mechanical, well-tested fix, YELLOW a real logic change, RED anything touching auth, wallets, signers, or settlement (opened only as a draft). No tier is ever merged by automation; a human merges every repair PR."
           }
         }
       }

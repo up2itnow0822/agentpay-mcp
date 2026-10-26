@@ -382,7 +382,13 @@ jobs:
               if (!isObj(s) || !isNonEmptyStr(s.check) || !isNonEmptyStr(s.reason)) return `skipped[${i}] must have non-empty check and reason`;
             }
             if (doc.status === 'COMPLETE' && doc.skipped.length !== 0) return 'COMPLETE status requires an empty skipped array';
-            if ('metrics' in doc && !isObj(doc.metrics)) return 'metrics must be an object';
+            if ('metrics' in doc) {
+              const m = doc.metrics;
+              if (!isObj(m)) return 'metrics must be an object';
+              // Per .github/review-schema.json: integer >= 0 and number >= 0.
+              if ('files_scanned' in m && !isNonNegInt(m.files_scanned)) return 'metrics.files_scanned must be a non-negative integer';
+              if ('duration_minutes' in m && !(typeof m.duration_minutes === 'number' && Number.isFinite(m.duration_minutes) && m.duration_minutes >= 0)) return 'metrics.duration_minutes must be a non-negative number';
+            }
             return { doc };
           }
 

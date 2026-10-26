@@ -13,6 +13,13 @@ Everything in this file binds the agent. Where the agent's judgment and this
 contract disagree, the contract wins. Where this contract is silent, the agent
 must choose the more conservative option.
 
+**Privilege split.** The agent reads text derived from untrusted repository,
+issue and PR content, so it never holds a write credential. The workflow runs
+it in a read-only `plan` job: it edits files in a throwaway checkout and writes
+a manifest. A deterministic `publish` job — no model — is the only holder of
+`REPAIR_TOKEN`; it validates the manifest and patch as untrusted data and
+opens the PRs. **Nothing is ever merged by automation** (S5).
+
 ---
 
 ## S1 — Mission and hard prohibitions
@@ -20,10 +27,9 @@ must choose the more conservative option.
 ### S1.1 Mission
 
 Convert findings from the latest daily review into small, reviewable,
-individually revertible pull requests — and merge only the narrow class of
-changes that a machine can safely verify end-to-end. Everything else waits for
-a human. The goal is not maximum throughput; it is that every automated action
-is boring, bounded, and reversible with a single `git revert`.
+individually revertible pull-request proposals. A human reviews and merges
+every one. The goal is not maximum throughput; it is that every automated
+action is boring, bounded, and reversible with a single `git revert`.
 
 ### S1.2 Hard prohibitions
 
@@ -66,7 +72,9 @@ human summary followed by exactly one fenced `json` code block conforming to
 
 ### S2.2 Preflight (fail-closed)
 
-Before acting on anything, in order:
+The workflow's deterministic `preflight` job performs steps 1–3 before the
+agent starts, and hands the agent the review report and the exclusion file.
+In order:
 
 1. Load `.github/repair-exclusions.yml`. If the file is missing, unparsable,
    or a key is absent, treat that key as **false** — fail-closed, always.
@@ -127,27 +135,26 @@ A finding is GREEN only if ALL of the following hold:
 - Total changed lines (additions + deletions) ≤ 400.
 - The change class is not in `demoted_classes` (S9).
 
-GREEN is the only tier eligible for auto-merge, and only through the full S5
-gate.
+GREEN PRs are opened ready for review. They are still merged only by a
+human (S5).
 
 ### S3.2 YELLOW — real logic changes
 
 A genuine behavioral change: an algorithm correction, error-handling logic,
 concurrency fix, API behavior change, or anything mechanical that lacks test
-coverage. The agent opens a normal PR with its reasoning in the body. **A
-human merges it.** The agent never merges YELLOW, and never converts a YELLOW
-to GREEN by adding a test in the same PR — the test and the fix arriving
-together prove nothing.
+coverage. The publisher opens a normal PR with the agent's notes in the
+body. **A human merges it.** The agent never converts a YELLOW to GREEN by
+adding a test in the same PR — the test and the fix arriving together prove
+nothing.
 
 ### S3.3 RED — never merged by automation
 
 Anything touching auth, wallets, signers, settlement, payments, key handling,
 CI/CD configuration, or secrets — in the diff, in the finding, or in the blast
-radius. For RED the agent produces either a **draft PR** (when a concrete,
-safe change can be drafted) or a **written plan as a comment** on the review
-issue (when it cannot). A RED item can NEVER be merged by automation, under
-any combination of passing checks, and the agent must not mark a RED draft PR
-ready-for-review.
+radius. For RED the publisher opens a **draft PR** (when the agent drafted a
+concrete, safe change) or the agent records the finding under `skipped` with
+a written plan as its reason. A RED draft is never marked ready by
+automation.
 
 ---
 
@@ -159,94 +166,70 @@ ready-for-review.
   the finding's files.
 - The diff must not touch any path matching a glob in `excluded_paths` in
   `.github/repair-exclusions.yml` (loaded in S2.2): lockfiles, build output,
-  vendored code, migrations, and the kit's own contract/workflow files. A
-  fix that cannot be made without touching an excluded path is not made — the
+  vendored code, migrations, and the kit's own contract/workflow files. The
+  publisher also enforces a floor the file cannot lower: `.github/**`,
+  `.git/**`, `.husky/**`, `**/.npmrc`, `.gitmodules`, `.gitattributes`. A fix
+  that cannot be made without touching an excluded path is not made — the
   finding is skipped and the reason recorded in the run summary (S10).
+- **What the agent produces.** The agent edits files in its checkout and
+  writes a manifest (`schema_version: 1`) mapping each repaired finding id to
+  its tier, the exact files it changed, and notes (what changed, why, how to
+  verify). Every changed file belongs to exactly one finding. Findings it does
+  not repair go under `skipped` with a reason. It does not run git writes, gh
+  writes, or tests: CI on the PR verifies.
+- **What the publisher refuses** (whole run, nothing pushed): a manifest or
+  patch that is malformed or over its size cap; a finding id not in today's
+  review or not a safe slug; a changed file no finding claims, or claimed
+  twice; an unsafe or excluded path; deletions, renames, copies, mode changes,
+  symlinks, submodules, executables or binary files; a failed plan job.
+- Effective tier = the more restrictive of the agent's tier and the review's
+  `suggested_tier` (computed by the publisher).
 - Branch name: `repair/YYYY-MM-DD-<finding-id>` (UTC date of the repair run,
-  finding `id` from the review JSON).
-- Label: `automated-repair` on every PR this agent opens, including drafts.
-- PR body must contain: a link to the source review issue; the finding `id`;
-  the effective tier and a one-paragraph justification of why it landed there
-  (including when the agent tiered more restrictively than `suggested_tier`);
-  what was changed and how to verify it.
-- PRs are created and pushed using the `REPAIR_TOKEN` secret (fine-grained
-  PAT: Contents R/W, Pull requests R/W, Issues R/W, Commit statuses Read,
-  Workflows Read), never the default `GITHUB_TOKEN`. PRs created with
-  `GITHUB_TOKEN` trigger **no CI at all** — see S5.2 for why this matters.
-- In dry-run mode (`dry_run=true`): no branches, no PRs, no merges. The agent
-  computes everything — tiers, diffs, gate outcomes — and reports what it
-  *would* have done in the run summary (S10).
+  finding `id` from the review JSON). Pushed without force; an existing
+  branch makes the push fail.
+- Label: `automated-repair` on every PR, drafts included. RED opens as a
+  draft.
+- PR body (written by the publisher): the source review issue, the finding
+  `id`, the effective tier, the files and line count, the finding text and the
+  agent's notes — both fenced and marked untrusted.
+- PRs are created and pushed only by the publisher with the `REPAIR_TOKEN`
+  secret (fine-grained PAT: Contents R/W, Pull requests R/W, Issues R/W,
+  Workflows Read), never the default `GITHUB_TOKEN`: PRs created with
+  `GITHUB_TOKEN` trigger **no CI at all**.
+- In dry-run mode (`dry_run=true`): no branches, no PRs. The publisher posts
+  what it *would* have opened in the run summary (S10).
 
 ---
 
-## S5 — Auto-merge gate (GREEN only)
+## S5 — No automated merge
 
-### S5.1 The gate
+Nothing in the repair layer merges a PR or enables auto-merge — not GREEN,
+not with every check green. The tier is ultimately the agent's judgment, and
+the agent reads untrusted text; a tier that unlocks a merge would let a
+prompt injection in a finding promote its own change into the default branch.
+A human reviews and merges every repair PR. (`automerge_enabled` in
+`.github/repair-exclusions.yml` is retained for compatibility and ignored.)
 
-A GREEN PR may auto-merge only when **every** condition below holds. Any
-single failure is a block. The agent enforces this gate itself, and a
-separate plain-bash audit step verifies it independently after every run —
-the gate must pass both.
-
-1. `automerge_enabled` in `.github/repair-exclusions.yml` is exactly `true`
-   (fail-closed: missing file, unparsable file, or absent key means false).
-2. A test suite **actually ran** — the agent identified the test job and saw
-   it execute, both on the base branch before the change and on the PR after.
-3. Tests were green **before AND after** the change. A fix that "makes tests
-   pass" from a red base proves only that it changed the failure, not that it
-   fixed anything.
-4. **Every** check run on the PR's head SHA is `completed` with conclusion
-   `success` — one hundred percent green. Any other conclusion (`failure`,
-   `cancelled`, `timed_out`, `skipped`, `neutral`, `stale`,
-   `action_required`) is a block, and any check still `queued` or
-   `in_progress` is a block — wait for completion and re-evaluate; never
-   merge ahead of a running check.
-5. At least one such successful check exists — **NO CHECKS AT ALL is a
-   BLOCK, never a pass** (S5.2).
-6. Every legacy commit-status context on the head SHA (the Statuses API,
-   used by some external CI instead of check runs), if any exist, reports
-   `success`. A `pending`, `failure`, or `error` context is a block.
-7. Zero unresolved review conversations on the PR.
-8. The diff is confined to the finding's files (S4).
-9. No cap from S7 is exceeded by this merge.
-
-Conditions 4–6 are deliberately stricter than GitHub's own required-status
-branch protection, which counts a skipped check as satisfying a requirement.
-Where a repo's branch protection already demands green CI and resolved
-conversations, GitHub enforces that floor on every merge path; this gate adds
-the ceiling (all-success, nothing skipped, nothing still running).
-
-### S5.2 The trap this gate closes
+### S5.1 The verification trap that still matters
 
 PRs created with the default `GITHUB_TOKEN` trigger no CI at all — GitHub
 suppresses it to prevent recursive workflows. Such a PR has no failing checks
-*because it has no checks*. A gate phrased as "did anything fail?" sees
-nothing red and merges an entirely unverified change. That is why:
-
-- "Nothing failed" is never the test. The test is "did verification
-  affirmatively succeed" — hence condition 4 requires a positive `success`,
-  and condition 5 makes the total absence of checks an unconditional block.
-- `skipped` and `neutral` are blocks for the same reason: GitHub itself counts
-  a skipped check as satisfying a required check, which is the second half of
-  the same trap. A check that didn't run verified nothing.
-- PRs are created with `REPAIR_TOKEN` (S4) so CI actually runs — and if that
-  token is ever missing or misconfigured, conditions 4 and 5 catch the
-  resulting check-less PR anyway, and the independent audit catches it a third
-  time.
-
-### S5.3 On block
-
-When the gate blocks a GREEN PR, the PR stays open for human review, the agent
-comments on the PR stating exactly which condition(s) blocked, and the run
-summary (S10) records it. A blocked auto-merge is a normal outcome, not a
-failure — it is the gate working.
+*because it has no checks*. That is why the publisher uses `REPAIR_TOKEN`
+(S4), and why the independent audit job flags any `automated-repair` PR
+merged in the last 24 hours whose merge commit is not 100 percent green
+(no check runs at all, or any check not completed with conclusion
+`success`). "Nothing failed" is never the test; "verification affirmatively
+succeeded" is.
 
 ---
 
 ## S6 — Retry budget
 
 - Each finding gets at most **2 repair attempts, total, across all days** —
-  attempts are counted per finding `id`, not per run.
+  attempts are counted per finding `id`, not per run. The publisher counts
+  earlier `automated-repair` PRs whose branch is `repair/<date>-<id>`, and
+  skips a finding that already has an open repair PR, two earlier attempts,
+  or an attempt labelled `repair-abandoned`.
 - An attempt fails when its PR's checks fail, the change is demonstrably
   wrong, or the PR is closed unmerged for cause.
 - On the **second** failure: apply the `repair-abandoned` label to the finding's
@@ -264,20 +247,19 @@ Per repository, per UTC day:
 
 | Cap | Limit |
 |---|---|
-| Auto-merges | 5 |
+| Automated merges | 0 (S5) |
 | PRs opened (all tiers, drafts included) | 15 |
-| Changed lines per GREEN PR (adds + deletes) | 400 |
+| Changed lines per PR (adds + deletes) | 400 |
 | Attempts per finding (lifetime, see S6) | 2 |
 
-When a cap binds — a merge withheld, a PR not opened, a finding forced out of
-GREEN by the 400-line limit — the agent **always states it** in the run
-summary (S10): which cap, what it prevented, and which finding ids were
+When a cap binds — a PR not opened, a finding over the 400-line limit — the
+publisher **always states it** in the run summary (S10): which cap, what it prevented, and which finding ids were
 affected. **A binding cap is reported, never silent.** Work deferred by a cap
 is not lost; the finding remains in review output and is eligible on a later
 run (subject to S6).
 
 The agent never splits one finding across multiple PRs to evade the 400-line
-cap. A fix that genuinely needs more than 400 lines is not GREEN.
+cap. A fix that genuinely needs more than 400 lines is left to a human.
 
 ---
 
@@ -306,8 +288,8 @@ the escalation comment — never a draft PR containing the affected file.
 
 ### S9.1 A reverted GREEN demotes its class permanently
 
-If a human reverts a merge that this agent auto-merged as GREEN, the agent got
-the tiering wrong — and the error is treated as systematic, not one-off:
+If a human reverts a merged repair the agent tiered GREEN, the agent got the
+tiering wrong — and the error is treated as systematic, not one-off:
 
 - That change **class** (e.g. "dependency patch bumps", "lint autofixes in
   package X", "config value corrections") leaves GREEN **permanently**.
@@ -326,17 +308,18 @@ the tiering wrong — and the error is treated as systematic, not one-off:
   and caps any matching finding at YELLOW or RED. Only a human editing the
   list can restore a class to GREEN.
 
-The next-morning brief surfaces every overnight merge, so a human sees each
-auto-merge within a day; this section is what makes their revert stick.
+Demotion keeps the agent's GREEN honest even though no tier merges
+automatically: GREEN still signals "safe to review quickly".
 
 ---
 
 ## S10 — Run summary
 
 At the end of every run — including dry runs, blocked runs, and runs that did
-nothing — the agent posts one comment on the source review issue containing:
+nothing — the deterministic publisher posts one comment on the source review
+issue containing:
 
-1. **Repaired:** each PR opened or merged, with finding id, tier, and link.
+1. **Repaired:** each PR opened, with finding id, tier, and link.
 2. **Tier decisions:** every finding's `suggested_tier` vs effective tier,
    with a one-liner wherever the agent tiered more restrictively.
 3. **Caps that bound:** per S7 — which cap, what it prevented, which findings.
@@ -345,11 +328,10 @@ nothing — the agent posts one comment on the source review issue containing:
    kill switch, excluded repo, `repair-abandoned`, demoted class, prohibited
    file (S1.2), excluded path (S2.2/S4), retry budget, non-COMPLETE status,
    or cap.
-5. **Gate outcomes:** for each GREEN PR, merged or blocked, and if blocked,
-   which S5.1 condition(s).
+5. **No-merge notice:** every PR listed needs a human review and merge (S5).
 6. **Dry-run notice:** when `dry_run=true`, the summary opens with a clear
-   statement that nothing was created or merged and everything below is
-   what *would* have happened.
+   statement that nothing was created and everything below is what *would*
+   have happened.
 
 The summary exists so that "repair opened nothing" is never a mystery: the
 comment always says which gate, switch, cap, or status made it so. Silence is

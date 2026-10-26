@@ -101,11 +101,15 @@ this via config.
 
 Last updated: 2026-10-25
 
-## 5. Daily repair automation must stay disabled until redesigned
+## 5. Daily repair automation ships disabled
 
-`.github/workflows/daily-repair.yml` is off (`repair_enabled: false` in
-`.github/repair-exclusions.yml`). Its actions are SHA-pinned, but when enabled
-it hands a write-capable `REPAIR_TOKEN` and broad `gh`/`git`/shell tools to a
-model whose input is derived from untrusted repository text. Do not re-enable
-it without the same analysis/publish privilege split now used by
-`daily-review.yml` (finding F17).
+`.github/workflows/daily-repair.yml` now uses the same privilege split as
+`daily-review.yml`: the model runs in a read-only `plan` job and can only
+produce an artifact; a deterministic `publish` job, the only holder of
+`REPAIR_TOKEN`, validates it and opens PRs. Nothing is ever merged by
+automation. It still ships off (`repair_enabled: false` in
+`.github/repair-exclusions.yml`); turning it on is a maintainer decision.
+Residual risk when enabled: repair PRs contain model-written code, so every
+one needs a careful human review; CI runs that code with a read-only token
+and no secrets. On a self-hosted runner, use ephemeral runners so the plan
+job's workspace cannot persist into the publish job.

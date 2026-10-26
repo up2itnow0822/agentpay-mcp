@@ -21,10 +21,10 @@
 # KILL SWITCHES:
 #   repair_enabled: false    -> stop ALL repair activity in this repo,
 #                               immediately. No PRs, no pushes, nothing.
-#   automerge_enabled: false -> repair keeps running and PRs keep opening,
-#                               but NOTHING merges itself. This is the switch
-#                               to reach for after a bad merge: you re-take
-#                               the merge decision while trust rebuilds.
+#   automerge_enabled        -> RETIRED. Repair never merges anything (the
+#                               model that tiers a change reads untrusted
+#                               text, so its tier cannot unlock a merge — see
+#                               REPAIR.md S5). Kept for compatibility; ignored.
 # =============================================================================
 
 # Master switch for the repair layer. Must be exactly `true` to allow any
@@ -37,9 +37,9 @@
 # reached the enable-repair step.
 repair_enabled: false
 
-# Auto-merge switch (GREEN-tier PRs only; YELLOW and RED never self-merge).
-# Must be exactly `true` for the auto-merge gate to even be evaluated.
-automerge_enabled: true
+# Retired (REPAIR.md S5): no repair PR is ever merged by automation. Ignored
+# by the workflow; left false so no reader mistakes it for an active switch.
+automerge_enabled: false
 
 # DO-NOT-TOUCH repos, currently in active development. The KIT-ROOT copy of
 # this list is the master exclusion consumed by install-daily-review.sh,

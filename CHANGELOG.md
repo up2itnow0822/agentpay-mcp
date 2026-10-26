@@ -38,34 +38,54 @@ which maps each finding to its repair and proving test.
   chains and bounded input (F18).
 
 ### Security
-- F1: `x402_session_start` is serialised per origin with an origin-scoped spend
-  intent; a payment that settles without a delivered response locks every new
-  x402 payment to that origin until an operator reconciles it.
+- F1: `x402_session_start` is serialised per canonical host; a payment that
+  settles without a delivered response (including a paid request answered
+  with any non-2xx status) locks every new x402 payment to that host — any
+  path, port or host alias — and to that payee behind any host, until an
+  operator reconciles it. The lock scope is journaled on the intent's begin
+  record, before the wallet call.
 - F2: Token decimals come from the registry, native ETH, or on-chain
   `decimals()`.
 - F3, F5: Mandatory cap and approved terms checked against the SDK-selected
   requirement; the zero address is refused as payee and as `pay_to`.
-- F4: Value-pack examples use exact 6-decimal USDC caps and a single-use
-  approval record bound to the final offer; mainnet requires an explicit opt-in.
+- F4: Value-pack examples use exact 6-decimal USDC caps (principal plus the
+  0.77% protocol fee) and a single-use approval record bound to the final
+  offer; a paid body that fails mid-read is a payment-aware error; mainnet
+  requires an explicit opt-in.
 - F6, F13, F17: Workflow actions pinned to full commit SHAs; review-gate
   evidence bound to the exact base SHA; the daily-review analysis job is
-  read-only and a deterministic job owns the single issue write.
+  read-only and a deterministic job owns the single issue write, validating
+  every schema field including optional metrics. Daily repair uses the same
+  split: the model plans with a read-only token, a deterministic publisher
+  (the only holder of `REPAIR_TOKEN`) validates its patch and opens PRs, and
+  nothing is ever merged by automation. Every workflow declares
+  `permissions`; CI that runs PR code is `contents: read` with no persisted
+  credential.
 - F7: Identity tools return a typed summary plus one nonce-fenced untrusted
   block.
 - F8, F15: New safe transport (`src/utils/safe-fetch.ts`) for every
-  caller-selected destination: DNS resolved once and pinned, response bodies
-  capped at 2 MiB (decoded), 1 MiB rendered.
+  caller-selected destination: DNS resolved once and pinned, `Host` and TLS
+  SNI derived only from the validated URL (caller authority and framing
+  headers are dropped), response bodies capped at 2 MiB (decoded), 1 MiB
+  rendered.
 - F9, F10: OTel kill callback uses the pinned transport; OTel identifiers,
-  policies, ledgers, decisions and span dedupe are bounded.
+  policies, ledgers, decisions and span dedupe are bounded; a span refused at
+  capacity is not remembered as counted, so its replay is refused too.
 - F12: Spend classification uses `AsyncLocalStorage` on a once-hooked wallet
   client, so concurrent spends cannot be misattributed.
 - F14: Unresolved spend-intent locks are never evicted; new spends are refused
   at capacity; evicted keyed settlements are tombstoned; the journal survives a
   torn final line.
-- F11: A malformed operator policy denies all spending and is reported at
-  startup.
+- F11: A malformed operator policy — including an allowlist variable that
+  names no address, or any operator policy with no constraint — denies all
+  spending and is reported at startup.
+- F2, F18: `add_custom_token` registration is serialised (decide, on-chain
+  `decimals()` check and write are atomic), so concurrent registrations
+  cannot overwrite each other or overrun the quota.
 - `create_escrow` runs under the same spend-intent contract (idempotency key,
-  replay, lock on ambiguous broadcast).
+  replay, lock on ambiguous broadcast); its keyless identity covers only
+  on-chain terms, so rewording the off-chain `terms` cannot mint a second
+  vault.
 - Kill callbacks to public hosts require `https`; `http` is accepted only for
   operator-allowlisted hosts.
 - The spend-intent journal fails closed: an fsync or read failure refuses value
@@ -81,6 +101,9 @@ which maps each finding to its repair and proving test.
   tools in total).
 - `agentpay-mcp spend-intents list | resolve <key>` operator CLI for
   reconciling locked spend intents. It is deliberately not an MCP tool.
+- `server.json` declares every environment variable the server reads
+  (previously `AGENT_WALLET_ADDRESS` was missing and `BASE_RPC_URL` was
+  declared though the server reads `RPC_URL`).
 - Environment variables: `AGENTPAY_POLICY_DAILY_LIMIT_ETH`,
   `AGENTPAY_POLICY_PER_TX_CAP_ETH`, `AGENTPAY_POLICY_ALLOWED_RECIPIENTS`,
   `AGENTPAY_ALLOW_UNPOLICED_SPEND`, `AGENTPAY_X402_MAX_PAYMENT`,

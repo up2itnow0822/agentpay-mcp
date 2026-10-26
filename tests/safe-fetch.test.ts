@@ -67,7 +67,16 @@ beforeEach(async () => {
         req.on('data', (c) => (body += c))
         req.on('end', () => {
           res.writeHead(200, { 'content-type': 'application/json' })
-          res.end(JSON.stringify({ host: req.headers.host, method: req.method, body, ae: req.headers['accept-encoding'] }))
+          res.end(
+            JSON.stringify({
+              host: req.headers.host,
+              method: req.method,
+              body,
+              ae: req.headers['accept-encoding'],
+              kept: req.headers['x-kept'],
+              upgrade: req.headers.upgrade,
+            })
+          )
         })
         return
       }
@@ -239,6 +248,27 @@ describe('real pinned connector', () => {
     const echoed = JSON.parse(await response.text())
     expect(echoed).toMatchObject({ method: 'POST', body: '{"a":1}', ae: 'identity' })
     expect(response.url).toBe(`http://t.invalid:${port}/echo`)
+  })
+
+  it('derives Host only from the validated URL; caller authority/framing headers are dropped (Codex P1)', async () => {
+    const { transport } = loopback()
+    const response = await transport(`http://t.invalid:${port}/echo`, {
+      method: 'POST',
+      body: '{"a":1}',
+      headers: {
+        Host: 'internal-admin.example',
+        Connection: 'upgrade',
+        Upgrade: 'websocket',
+        'Transfer-Encoding': 'chunked',
+        'Content-Length': '999',
+        'X-Kept': 'yes',
+      },
+    })
+    const echoed = JSON.parse(await response.text())
+    expect(echoed.host).toBe(`t.invalid:${port}`)
+    expect(echoed.body).toBe('{"a":1}') // framing came from us, not the caller
+    expect(echoed.kept).toBe('yes') // ordinary headers still pass
+    expect(echoed.upgrade).toBeUndefined()
   })
 
   it('honours an abort signal', async () => {

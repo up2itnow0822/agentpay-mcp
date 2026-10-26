@@ -36,7 +36,7 @@
  */
 import http from 'node:http'
 import https from 'node:https'
-import type { LookupFunction } from 'node:net'
+import { isIP, type LookupFunction } from 'node:net'
 import { Readable } from 'node:stream'
 import zlib from 'node:zlib'
 import {
@@ -215,10 +215,30 @@ export function createSafeTransport(options: SafeTransportOptions = {}): Outboun
 
 const NULL_BODY_STATUSES = new Set([101, 103, 204, 205, 304])
 
+/**
+ * Headers a caller may never set. Authority (`host`) is derived only from the
+ * validated URL: a caller Host would re-route the request at a shared ingress
+ * (with the session's bearer headers) and, in Node, also steer TLS SNI.
+ * Hop-by-hop and framing headers are owned by this connector.
+ */
+const CONNECTOR_OWNED_HEADERS = new Set([
+  'host',
+  'connection',
+  'keep-alive',
+  'proxy-connection',
+  'transfer-encoding',
+  'upgrade',
+  'te',
+  'trailer',
+  'content-length',
+  'expect',
+  'accept-encoding',
+])
+
 function headersToNode(headers: RequestInit['headers']): Record<string, string> {
   const out: Record<string, string> = {}
   new Headers(headers).forEach((value, key) => {
-    out[key] = value
+    if (!CONNECTOR_OWNED_HEADERS.has(key.toLowerCase())) out[key] = value
   })
   return out
 }
@@ -301,9 +321,13 @@ export const nodeHttpConnector: OutboundConnector = (url, init, pinned, limits) 
   new Promise<Response>((resolve, reject) => {
     const isHttps = url.protocol === 'https:'
     const headers = headersToNode(init.headers)
+    // Authority comes from the validated URL only (url.host keeps a non-default
+    // port and IPv6 brackets).
+    headers['host'] = url.host
     // Never let a caller header switch on compression we would then have to
     // buffer; decoded bytes are capped either way.
     headers['accept-encoding'] = 'identity'
+    const bareHost = url.hostname.startsWith('[') ? url.hostname.slice(1, -1) : url.hostname
     let body: Buffer | undefined
     try {
       body = bodyToBuffer(init.body)
@@ -315,7 +339,10 @@ export const nodeHttpConnector: OutboundConnector = (url, init, pinned, limits) 
 
     const requestOptions: https.RequestOptions = {
       protocol: url.protocol,
-      hostname: url.hostname.startsWith('[') ? url.hostname.slice(1, -1) : url.hostname,
+      hostname: bareHost,
+      // SNI and certificate checks bind to the validated name, never to a
+      // header. (No SNI for IP literals — TLS forbids it.)
+      ...(isHttps && isIP(bareHost) === 0 ? { servername: bareHost.replace(/\.+$/, '') } : {}),
       port: url.port || (isHttps ? 443 : 80),
       path: `${url.pathname}${url.search}`,
       method: (init.method ?? 'GET').toUpperCase(),

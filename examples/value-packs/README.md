@@ -406,12 +406,13 @@ Every payment in the packs goes through one path: **probe → approve → pay**.
 ### One frozen, single-use approval per payment
 
 1. `probeEndpoint(url)` reads the 402 `PAYMENT-REQUIRED` payload and picks the exact USDC offer for the configured network. If there is none, it returns `{ payable: false, reason }`.
-2. `approveProbedPayment(info, capUsd)` turns that offer into a frozen `PaymentApproval` record containing `{ endpoint, method, network, asset, payTo, amount, capBaseUnits }`. If the probed amount is above the cap, it throws `ApprovalRejectedError`. This record is what the user approves; the prompt shows the exact amount, payee, asset and network.
+2. `approveProbedPayment(info, capUsd)` turns that offer into a frozen `PaymentApproval` record containing `{ endpoint, method, network, asset, payTo, amount, capBaseUnits }`. The cap bounds the full debit — the probed amount **plus** the SDK's 0.77% protocol fee — so if that debit is above the cap, it throws `ApprovalRejectedError` (a `$0.01` cap approves at most 9,924 base units: 9,924 + 76 fee = 10,000). This record is what the user approves; the prompt shows the exact amount, payee, asset and network.
 3. `fetchWithPayment(wallet, url, { approval })` pays only when the **final** offer matches the approval:
    - Endpoint, method and wallet chain are checked before any request is sent.
    - The SDK client is restricted to the approved network and its USDC contract. Its per-request and daily limits are both set to the approved amount plus the SDK protocol fee.
-   - `onBeforePayment` compares the final offer's `amount` (exact, and no more than the cap), `asset` and `payTo` (both case-insensitive), `network`, `scheme` and endpoint against the approval. If **any** field differs, it returns `false`. Nothing is signed and `ApprovalRejectedError` is thrown.
+   - `onBeforePayment` compares the final offer's `amount` (exact, and with the protocol fee no more than the cap), `asset` and `payTo` (both case-insensitive), `network`, `scheme` and endpoint against the approval. If **any** field differs, it returns `false`. Nothing is signed and `ApprovalRejectedError` is thrown.
 4. The first evaluation consumes the approval, whether it accepts or rejects the offer. A second payment needs a new probe and a new approval. `withRetry` never retries an `ApprovalRejectedError` or a `PaymentAwareError`.
+5. Any failure after settlement — including the paid response body failing mid-read — is a `PaymentAwareError` carrying the settled amount and transaction hash, so callers count it against their budget and never retry it.
 
 This stops a hostile endpoint from turning a $0.01 approval into a different payee, asset, network or amount after the user has said yes. `tests/value-pack-cap-binding.test.ts` covers each of these cases.
 

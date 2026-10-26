@@ -203,6 +203,88 @@ describe('daily-review privilege separation (F17)', () => {
   });
 });
 
+describe('daily-repair privilege separation (Codex review of PR #90)', () => {
+  const text = readWorkflow('daily-repair.yml');
+  const jobs = jobBlocks(text);
+  const agentJobs = [...jobs].filter(([, lines]) => lines.some((l) => /uses:\s*anthropics\/claude-code-action@/.test(l)));
+
+  it('runs the model only in the read-only plan job', () => {
+    expect(agentJobs.map(([id]) => id)).toEqual(['plan']);
+    expect(nestedBlock(text.split(/\r?\n/), 'permissions', 0)).toEqual(['{}']);
+    const perms = nestedBlock(agentJobs[0][1], 'permissions', 4)!;
+    expect(perms.length).toBeGreaterThan(0);
+    for (const entry of perms) expect(entry).toMatch(/^[a-z-]+:\s*(read|none)\b/);
+  });
+
+  it('never lets REPAIR_TOKEN, a persisted credential, or a mutating command reach the model', () => {
+    // Comment lines are ignored: the next job's header comment parses into this block.
+    const plan = agentJobs[0][1].filter((l) => !l.trim().startsWith('#')).join('\n');
+    expect(plan).not.toMatch(/REPAIR_TOKEN/);
+    expect(plan).not.toMatch(/secrets\.(?!CLAUDE_CODE_OAUTH_TOKEN\b)[A-Z_]+/);
+    expect(plan).toMatch(/persist-credentials:\s*false/);
+    expect(plan).toMatch(/github_token:\s*\$\{\{\s*github\.token\s*\}\}/);
+    expect(plan).toMatch(/GH_TOKEN:\s*\$\{\{\s*github\.token\s*\}\}/);
+    const match = /--allowedTools\s+"([^"]+)"/.exec(plan);
+    expect(match).not.toBeNull();
+    for (const tool of match![1].split(',').map((t) => t.trim())) {
+      if (tool === 'Bash') throw new Error('unrestricted Bash is allowed');
+      const bash = /^Bash\((.*)\)$/.exec(tool);
+      if (!bash) continue;
+      const command = bash[1].replace(/:\*$/, '').trim();
+      expect(/^(git (status|diff|log|show|ls-files)|gh (issue view|pr list|pr view))$/.test(command), `${tool} is not read-only`).toBe(true);
+    }
+  });
+
+  it('keeps REPAIR_TOKEN in the deterministic publisher, which never merges', () => {
+    const publish = jobs.get('publish')!.join('\n');
+    expect(publish).toMatch(/needs:\s*\[preflight, plan\]/);
+    expect(publish).not.toMatch(/uses:\s*anthropics\//);
+    expect(publish).not.toMatch(/CLAUDE_CODE_OAUTH_TOKEN/);
+    expect(publish).toMatch(/secrets\.REPAIR_TOKEN/);
+    // REPAIR_TOKEN appears nowhere else as a value (preflight only tests presence).
+    for (const [id, lines] of jobs) {
+      if (id === 'publish') continue;
+      for (const line of lines) {
+        if (/secrets\.REPAIR_TOKEN/.test(line)) expect(line, `${id}: ${line.trim()}`).toMatch(/secrets\.REPAIR_TOKEN\s*!=\s*''/);
+      }
+    }
+    // No automated merge anywhere in the workflow.
+    expect(text).not.toMatch(/gh pr merge|'merge'|--auto\b|enablePullRequestAutoMerge/);
+    // Values reach the publisher's shell via env only.
+    const lines = jobs.get('publish')!;
+    lines.forEach((line, i) => {
+      if (!/^\s*run:\s*\|\s*$/.test(line)) return;
+      const keyIndent = indentOf(line);
+      for (const next of lines.slice(i + 1)) {
+        if (next.trim() !== '' && indentOf(next) <= keyIndent) break;
+        expect(next).not.toContain('${{');
+      }
+    });
+  });
+});
+
+describe('least privilege for every workflow', () => {
+  it('declares an explicit permissions block (top level or on every job)', () => {
+    for (const file of workflowFiles) {
+      const text = readWorkflow(file);
+      const topLevel = nestedBlock(text.split(/\r?\n/), 'permissions', 0);
+      if (topLevel) continue;
+      for (const [id, lines] of jobBlocks(text)) {
+        expect(nestedBlock(lines, 'permissions', 4), `${file} job ${id} has no permissions block`).not.toBeNull();
+      }
+    }
+  });
+
+  it('runs pull-request code with a read-only token and no persisted credential', () => {
+    for (const file of ['build.yml', 'ci.yml']) {
+      const text = readWorkflow(file);
+      expect(nestedBlock(text.split(/\r?\n/), 'permissions', 0), file).toEqual(['contents: read']);
+      expect(text, file).toMatch(/persist-credentials:\s*false/);
+      expect(text, file).not.toMatch(/secrets\./);
+    }
+  });
+});
+
 describe('review-gate binds ordinary Codex evidence to the current base SHA (F13)', () => {
   const text = readWorkflow('review-gate.yml');
   const scripts = githubScripts(text);

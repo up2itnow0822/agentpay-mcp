@@ -29,13 +29,20 @@
   writes in `runClassifiedSpend`; failures after a possible broadcast lock the
   intent. Unresolved locks are never evicted; only the operator CLI clears them.
 - x402 payment entry points require `max_payment_eth` and `pay_to`; the
-  signed requirement must match the caller-approved terms.
+  signed requirement must match the caller-approved terms. x402 intents carry
+  a `lockScope` (canonical host + payee): a paid-but-undelivered payment,
+  including a paid non-2xx response, blocks new x402 payments to that host
+  and that payee until the operator CLI resolves it.
 - Spend policy: the operator policy comes only from the environment; MCP
   callers may only tighten. No MCP tool may loosen policy or clear spend locks.
 - Remote free text (HTTP bodies, registry metadata, error strings) reaches
   tool results only through `formatUntrustedBody` or sanitizers.
-- Third-party GitHub Actions are pinned to full commit SHAs; model-driven
-  workflows hold no write token.
+- Third-party GitHub Actions are pinned to full commit SHAs. Model-driven
+  jobs (daily-review `analyze`, daily-repair `plan`) hold only read-only
+  tokens and no persisted credential; deterministic jobs validate their
+  artifacts and own every write. No workflow merges automatically. Every
+  workflow declares `permissions`; CI that runs PR code is `contents: read`.
+- `server.json` declares every environment variable the server reads.
 - The finding-to-fix map in `docs/security-remediation-2026-10.md` must stay
   accurate when any of these controls change.
 
@@ -52,8 +59,12 @@
 - Run `npm run smoke:clean-install` for package or release changes.
 - Security regressions: `tests/safe-fetch.test.ts`,
   `tests/x402-onchain-write-fencing.test.ts` (real SDK, zero-write proofs),
-  `tests/x402-session-start-idempotency.test.ts`, `tests/spend-intent.test.ts`,
-  `tests/workflow-security-policy.test.ts`.
+  `tests/x402-session-start-idempotency.test.ts`,
+  `tests/x402-payment-locks.test.ts`, `tests/spend-intent.test.ts`,
+  `tests/workflow-security-policy.test.ts`,
+  `tests/daily-repair-publisher.test.ts` and
+  `tests/daily-review-publisher.test.ts` (run the real workflow publishers
+  against a git sandbox), `tests/server-metadata.test.ts`.
 
 ## Child DOX Index
 

@@ -68,7 +68,7 @@ import { runSpendIntentsCli } from '../src/cli/spend-intents.js'
 import { install402ProbeConnector } from './helpers/x402-harness.js'
 
 const mockCreate = vi.mocked(createX402Client)
-type Config = { onPaymentComplete?: (log: Record<string, unknown>) => void }
+type Config = { onPaymentComplete?: (_log: Record<string, unknown>) => void }
 
 /** SDK double: every paid fetch settles, then answers with `after()`. */
 function payingClient(after: () => Response, payments: { count: number }) {

@@ -118,8 +118,11 @@ These boundaries matter more than the feature list:
   protocol fee) above the cap is refused before any wallet write.
   `AGENTPAY_X402_MAX_PAYMENT` is a USDC ceiling; with it set, non-USDC
   payments are refused. Use `x402_quote` to read the offered terms first.
-- If a payment settles but its response is not delivered, every new x402
-  payment to that origin is locked until an operator reconciles it.
+- If a payment settles but its response is not delivered — the response
+  fails, or the paid request is answered with any non-2xx status — every new
+  x402 payment to that **host** (any path, port or spelling of the name) and
+  to that **payee** (behind any host) is locked until an operator reconciles
+  it. The lock is written before the wallet call, so a crash cannot lose it.
 - Caller-selected outbound requests (x402, quote, sessions, OTel kill
   callback) use a safe transport: `https` only (a kill callback may use `http`
   only for a host in `AGENTPAY_KILL_CALLBACK_ALLOWED_HOSTS`), private, loopback, link-local and metadata destinations refused,

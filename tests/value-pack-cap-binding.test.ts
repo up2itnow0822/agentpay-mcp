@@ -38,7 +38,7 @@ function approvalInput(overrides: Partial<Parameters<typeof createPaymentApprova
     asset: SEPOLIA_USDC,
     payTo: PAYEE,
     amount: 10_000n,
-    capUsd: '0.01',
+    capUsd: CAP_FOR_10K,
     ...overrides,
   };
 }
@@ -57,6 +57,9 @@ function offer(overrides: Record<string, unknown> = {}) {
 }
 
 const GET = { url: ENDPOINT, method: 'GET' };
+
+/** Exactly fits a 10_000 principal plus its 0.77% SDK fee (77): debit 10_077. */
+const CAP_FOR_10K = '0.010077';
 
 describe('usdToUsdcBaseUnits (exact 6-decimal conversion)', () => {
   it('converts $0.01 to 10,000 base units (not 10^16)', () => {
@@ -94,7 +97,7 @@ describe('approval record', () => {
     const approval = createPaymentApproval(approvalInput());
     expect(Object.isFrozen(approval)).toBe(true);
     expect(approval.amount).toBe(10_000n);
-    expect(approval.capBaseUnits).toBe(10_000n);
+    expect(approval.capBaseUnits).toBe(10_077n);
     expect(approval.asset).toBe(SEPOLIA_USDC.toLowerCase());
     expect(approval.payTo).toBe(PAYEE);
     expect(() => {
@@ -104,6 +107,15 @@ describe('approval record', () => {
 
   it('refuses to approve a probed amount above the cap', () => {
     expect(() => createPaymentApproval(approvalInput({ amount: 10_001n }))).toThrow(ApprovalRejectedError);
+  });
+
+  it('counts the 0.77% protocol fee against the cap (Codex P1)', () => {
+    // A $0.01 cap can no longer approve a 10_000 offer: the wallet would be
+    // debited 10_077 base units.
+    expect(() => createPaymentApproval(approvalInput({ amount: 10_000n, capUsd: '0.01' }))).toThrow(/protocol fee/);
+    // The largest principal whose debit fits a $0.01 cap: 9_924 + 76 = 10_000.
+    expect(() => createPaymentApproval(approvalInput({ amount: 9_924n, capUsd: '0.01' }))).not.toThrow();
+    expect(() => createPaymentApproval(approvalInput({ amount: 9_925n, capUsd: '0.01' }))).toThrow(/protocol fee/);
   });
 
   it('refuses unknown assets, symbols, other-network USDC, and unknown networks', () => {
@@ -119,7 +131,7 @@ describe('approval record', () => {
 });
 
 describe('onBeforePayment binding', () => {
-  it('accepts exactly the approved offer at the cap (10_000n for $0.01)', () => {
+  it('accepts exactly the approved offer whose debit is at the cap (10_000n + 77n fee for $0.010077)', () => {
     const approval = createPaymentApproval(approvalInput());
     expect(checkOfferAgainstApproval(approval, offer(), GET)).toEqual({ ok: true });
   });
@@ -134,7 +146,7 @@ describe('onBeforePayment binding', () => {
     expect(decision).toEqual({ ok: true });
   });
 
-  it('rejects an amount over the cap (10_001n for a $0.01 cap)', () => {
+  it('rejects an amount whose debit is over the cap (10_001n + fee for a $0.010077 cap)', () => {
     const approval = createPaymentApproval(approvalInput());
     const decision = checkOfferAgainstApproval(approval, offer({ amount: '10001' }), GET);
     expect(decision.ok).toBe(false);
@@ -280,7 +292,7 @@ function fakeWallet(harness: Harness, chainId = 84532) {
   } as unknown as Parameters<typeof fetchWithPayment>[0];
 }
 
-async function probeAndApprove(capUsd = '0.01') {
+async function probeAndApprove(capUsd = CAP_FOR_10K) {
   const info = await probeEndpoint(ENDPOINT, 1000, { network: SEPOLIA });
   expect(info).not.toBeNull();
   return approveProbedPayment(info!, capUsd);
