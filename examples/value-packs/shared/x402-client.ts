@@ -3,7 +3,8 @@
  *
  * Handles:
  *  - 402 Payment Required detection
- *  - Payment amount parsing from WWW-Authenticate headers
+ *  - Verified USDC offer parsing from x402 PAYMENT-REQUIRED payloads
+ *  - Binding each payment to a single-use, immutable approval record
  *  - Payment construction via agentwallet-sdk
  *  - Automatic retry after payment
  *  - Configurable fallback to mock data when demo endpoint is unavailable
@@ -15,9 +16,43 @@ import { createWalletClient, http } from 'viem';
 import { privateKeyToAccount } from 'viem/accounts';
 import { base, baseSepolia } from 'viem/chains';
 import { createWallet } from 'agentwallet-sdk';
-import { parsePaymentAmountUsd } from './spending-policy.js';
-import { printInfo, printSuccess, printWarning, printError } from './ui.js';
+import { printInfo, printWarning, printError } from './ui.js';
 import { wrapPaymentFailure } from './payment-retry.js';
+// The packs use the MCP server's own outbound transport, so there is one
+// implementation of the SSRF defences: https only, private / loopback /
+// link-local / metadata destinations refused, DNS resolved once and pinned,
+// no automatic redirects, bounded bodies. (If you copy a pack out of this
+// repository, keep an equivalent transport — never fall back to bare fetch.)
+import {
+  UnsafeDestinationError,
+  createSafeTransport,
+  readLimitedText,
+} from '../../../src/utils/safe-fetch.js';
+
+/** Most a 402 challenge body may be (it is parsed, not displayed). */
+const MAX_CHALLENGE_BYTES = 64 * 1024;
+import {
+  ApprovalRejectedError,
+  MAINNET_OPT_IN_ENV,
+  VALUE_PACK_NETWORKS,
+  canonicalEndpoint,
+  consumePaymentApproval,
+  createApprovalGuard,
+  createPaymentApproval,
+  decodePaymentRequiredHeader,
+  formatUsdcBaseUnits,
+  isApprovalConsumed,
+  resolveValuePackNetwork,
+  selectUsdcOffer,
+  usdcBaseUnitsToUsdNumber,
+  withX402ProtocolFee,
+} from './usdc-approval.js';
+import type {
+  PaymentApproval,
+  ValuePackNetwork,
+  ValuePackNetworkId,
+  VerifiedUsdcOffer,
+} from './usdc-approval.js';
 
 export {
   PaymentAwareError,
@@ -29,6 +64,16 @@ export {
 } from './payment-retry.js';
 export type { RetryOptions, PaymentAttemptState } from './payment-retry.js';
 
+export {
+  ApprovalRejectedError,
+  createPaymentApproval,
+  isApprovalConsumed,
+  usdToUsdcBaseUnits,
+  formatUsdcBaseUnits,
+  MAINNET_OPT_IN_ENV,
+} from './usdc-approval.js';
+export type { PaymentApproval, ValuePackNetwork } from './usdc-approval.js';
+
 // ─── Types ─────────────────────────────────────────────────────────────────
 
 export interface X402Config {
@@ -36,9 +81,12 @@ export interface X402Config {
   privateKey?: string;
   /** AgentAccount contract address. Reads AGENT_WALLET_ADDRESS env by default. */
   walletAddress?: string;
-  /** Chain ID: 8453 (Base Mainnet) or 84532 (Base Sepolia). Default: 84532 for testing. */
+  /**
+   * Chain ID: 84532 (Base Sepolia, default) or 8453 (Base Mainnet).
+   * Mainnet additionally requires VALUE_PACK_ALLOW_MAINNET=1.
+   */
   chainId?: number;
-  /** RPC URL. Defaults to public Base Sepolia endpoint. */
+  /** RPC URL. Defaults to the public endpoint of the selected network. */
   rpcUrl?: string;
 }
 
@@ -49,54 +97,140 @@ export interface FetchResult {
   body: string;
   /** Whether an x402 payment was made */
   paymentMade: boolean;
-  /** Amount paid in USD (if payment was made) */
+  /** Amount paid in USD — display/budget accounting only (lossy float). */
   amountPaidUsd: number;
+  /** Exact payee amount paid, in USDC base units (0n when no payment). */
+  amountPaidBaseUnits: bigint;
   /** Transaction hash (if payment was made) */
   txHash?: string;
   /** Whether this result came from fallback (no payment) */
   isFallback?: boolean;
 }
 
-export interface PaymentInfo {
+interface PaymentInfoBase {
+  endpoint: string;
+  method: string;
+  network: ValuePackNetworkId;
+}
+
+/** A 402 whose offer is exact USDC on the configured network and can be approved. */
+export interface PayablePaymentInfo extends PaymentInfoBase {
+  payable: true;
+  /** The verified offer to bind into a PaymentApproval. */
+  offer: VerifiedUsdcOffer;
+  /** Exact decimal string of the offer, e.g. "0.010000". */
+  amountUsdc: string;
+  /** Display/budget-accounting value only (lossy float). */
   amountUsd: number;
-  token: string;
+  token: 'USDC';
   recipient: string;
-  network: string;
+}
+
+/** A 402 the value packs refuse to pay (unknown asset, other network, malformed). */
+export interface UnpayablePaymentInfo extends PaymentInfoBase {
+  payable: false;
+  reason: string;
+}
+
+export type PaymentInfo = PayablePaymentInfo | UnpayablePaymentInfo;
+
+// ─── Network ──────────────────────────────────────────────────────────────
+
+/**
+ * The network every payment in this process is bound to. Base Sepolia by
+ * default; Base Mainnet only with CHAIN_ID=8453 AND VALUE_PACK_ALLOW_MAINNET=1.
+ */
+export function getConfiguredNetwork(config: X402Config = {}): ValuePackNetwork {
+  return resolveValuePackNetwork(config.chainId);
 }
 
 // ─── 402 Detection ────────────────────────────────────────────────────────
 
 /**
  * Make a probe request to check if an endpoint requires payment.
- * Returns null if the endpoint is freely accessible, or payment info if gated.
+ * Returns null if the endpoint is not 402-gated (or unreachable). For a 402,
+ * returns the verified USDC offer, or `payable: false` with the reason the
+ * offer is refused. Nothing here is trusted until it is bound into a
+ * PaymentApproval and re-checked against the final offer.
  */
 export async function probeEndpoint(
   url: string,
-  timeoutMs = 10000
+  timeoutMs = 10000,
+  opts: { method?: string; network?: ValuePackNetwork } = {}
 ): Promise<PaymentInfo | null> {
+  const network = opts.network ?? getConfiguredNetwork();
+  const method = (opts.method ?? 'GET').toUpperCase();
+  const endpoint = canonicalEndpoint(url);
+  let response: Response;
   try {
-    const response = await fetch(url, {
-      method: 'GET',
+    response = await createSafeTransport()(endpoint, {
+      method,
+      redirect: 'manual',
       signal: AbortSignal.timeout(timeoutMs),
     });
-
-    if (response.status !== 402) {
-      return null; // Free endpoint
+  } catch (err) {
+    if (err instanceof UnsafeDestinationError) {
+      return {
+        endpoint,
+        method,
+        network: network.network,
+        payable: false,
+        reason: err.message, // already "Refused outbound request: …"
+      };
     }
-
-    // Parse payment requirements from WWW-Authenticate header
-    const wwwAuth = response.headers.get('www-authenticate') ?? '';
-    const amountUsd = parsePaymentAmountUsd(wwwAuth) ?? 0.01; // default to 1 cent if unparseable
-
-    return {
-      amountUsd,
-      token: extractHeaderField(wwwAuth, 'token') ?? 'USDC',
-      recipient: extractHeaderField(wwwAuth, 'recipient') ?? 'unknown',
-      network: extractHeaderField(wwwAuth, 'network') ?? 'base-sepolia',
-    };
-  } catch {
     return null; // Network error — treat as unavailable
   }
+
+  if (response.status !== 402) {
+    return null; // Free endpoint
+  }
+
+  const base = { endpoint, method, network: network.network };
+  const header =
+    response.headers.get('payment-required') ?? response.headers.get('x-payment-required');
+  let paymentRequired: unknown = header ? decodePaymentRequiredHeader(header) : null;
+  if (!paymentRequired) {
+    try {
+      paymentRequired = JSON.parse((await readLimitedText(response, MAX_CHALLENGE_BYTES)).text);
+    } catch {
+      paymentRequired = null;
+    }
+  }
+
+  const selection = selectUsdcOffer(paymentRequired, network);
+  if (!selection.offer) {
+    return { ...base, payable: false, reason: selection.reason };
+  }
+  const offer = selection.offer;
+  return {
+    ...base,
+    payable: true,
+    offer,
+    amountUsdc: formatUsdcBaseUnits(offer.amount),
+    amountUsd: usdcBaseUnitsToUsdNumber(offer.amount),
+    token: 'USDC',
+    recipient: offer.payTo,
+  };
+}
+
+/**
+ * Bind a probed offer into the single immutable, single-use approval record.
+ * `capUsd` is a decimal string ceiling (e.g. "0.01"); the probed amount must
+ * not exceed it. Throws ApprovalRejectedError (fail closed) otherwise.
+ */
+export function approveProbedPayment(info: PaymentInfo, capUsd: string): PaymentApproval {
+  if (!info.payable) {
+    throw new ApprovalRejectedError(info.reason);
+  }
+  return createPaymentApproval({
+    endpoint: info.endpoint,
+    method: info.method,
+    network: info.network,
+    asset: info.offer.asset,
+    payTo: info.offer.payTo,
+    amount: info.offer.amount,
+    capUsd,
+  });
 }
 
 // ─── Wallet creation ───────────────────────────────────────────────────────
@@ -125,14 +259,14 @@ export function createScriptWallet(config: X402Config = {}) {
     );
   }
 
-  const chainId = config.chainId ?? parseInt(process.env['CHAIN_ID'] ?? '84532', 10);
-  const chain = chainId === 8453 ? base : baseSepolia;
-  const rpcUrl =
-    config.rpcUrl ??
-    process.env['RPC_URL'] ??
-    (chainId === 8453 ? 'https://mainnet.base.org' : 'https://sepolia.base.org');
+  // Fails closed for unknown chains and for mainnet without the explicit opt-in.
+  const network = getConfiguredNetwork(config);
+  const chain = network.chainId === 8453 ? base : baseSepolia;
+  const rpcUrl = config.rpcUrl ?? process.env['RPC_URL'] ?? network.defaultRpcUrl;
 
-  const chainName = chainId === 8453 ? 'base' : ('base-sepolia' as const);
+  if (network.isMainnet) {
+    printWarning(`!!! ${network.label}: payments move REAL USDC (${MAINNET_OPT_IN_ENV}=1 is set) !!!`);
+  }
 
   const account = privateKeyToAccount(privateKey as `0x${string}`);
   const walletClient = createWalletClient({
@@ -143,7 +277,7 @@ export function createScriptWallet(config: X402Config = {}) {
 
   return createWallet({
     accountAddress: walletAddress as `0x${string}`,
-    chain: chainName,
+    chain: network.chainName,
     rpcUrl,
     walletClient,
   });
@@ -157,49 +291,96 @@ export interface PaymentCallbacks {
 }
 
 /**
- * Fetch a URL, automatically handling x402 payment if required.
- * Assumes the caller has already obtained user approval.
+ * Fetch a URL, paying an x402 challenge only if it matches `approval`.
+ *
+ * The approval (from approveProbedPayment / createPaymentApproval) is the
+ * only authority: the final offer's endpoint, method, network, USDC asset,
+ * payTo and exact amount must equal it, and the amount must not exceed its
+ * cap. Any mismatch returns false from onBeforePayment, so nothing is signed,
+ * and this function throws ApprovalRejectedError. The approval is single-use.
  */
 export async function fetchWithPayment(
   wallet: ReturnType<typeof createScriptWallet>,
   url: string,
   opts: {
+    approval: PaymentApproval;
     method?: string;
     headers?: Record<string, string>;
     body?: string;
-    maxPaymentUsd?: number;
     timeoutMs?: number;
     callbacks?: PaymentCallbacks;
-  } = {}
+  }
 ): Promise<FetchResult> {
+  const { approval } = opts;
   const timeoutMs = opts.timeoutMs ?? 30000;
+  const method = (opts.method ?? 'GET').toUpperCase();
   let paymentInitiated = false;
   let paymentMade = false;
+  let offerEvaluated = false;
+  let rejection: string | null = null;
+  let amountPaidBaseUnits = 0n;
   let amountPaidUsd = 0;
   let txHash: string | undefined;
 
-  const maxPaymentWei = opts.maxPaymentUsd
-    ? BigInt(Math.round(opts.maxPaymentUsd * 1e18))
-    : undefined;
+  // ── Pre-flight: the request itself must be the one that was approved ──
+  if (isApprovalConsumed(approval)) {
+    throw new ApprovalRejectedError('approval already used (single-use); probe and approve again');
+  }
+  const preflight: string[] = [];
+  if (canonicalEndpoint(url) !== approval.endpoint) preflight.push(`endpoint ${url} != ${approval.endpoint}`);
+  if (method !== approval.method) preflight.push(`method ${method} != ${approval.method}`);
+  const walletChainId = wallet.chain?.id;
+  if (walletChainId !== VALUE_PACK_NETWORKS[approval.network].chainId) {
+    preflight.push(`wallet chain ${String(walletChainId)} != approved network ${approval.network}`);
+  }
+  if (preflight.length > 0) {
+    consumePaymentApproval(approval);
+    throw new ApprovalRejectedError(preflight.join('; '));
+  }
+
+  const usdc = VALUE_PACK_NETWORKS[approval.network].usdc;
+  // Exact debit of this one approved payment (payee amount + SDK protocol fee).
+  const approvedDebit = withX402ProtocolFee(approval.amount);
+  const guard = createApprovalGuard(
+    approval,
+    method,
+    (reason) => {
+      rejection = reason;
+    },
+    () => {
+      paymentInitiated = true;
+      if (opts.callbacks?.onPaymentRequired) {
+        opts.callbacks.onPaymentRequired(usdcBaseUnitsToUsdNumber(approval.amount), url);
+      }
+    }
+  );
 
   const x402Client = createX402Client(wallet, {
     autoPay: true,
     maxRetries: 1,
-    globalPerRequestMax: maxPaymentWei,
-    onBeforePayment: (req: { amount: string | number | bigint }, _url: string) => {
-      paymentInitiated = true;
-      const amountWei = BigInt(req.amount);
-      // Approximate USD from wei (ETH price rough estimate); for USDC it's direct
-      const estimatedUsd = Number(amountWei) / 1e6; // USDC path
-      if (opts.callbacks?.onPaymentRequired) {
-        opts.callbacks.onPaymentRequired(estimatedUsd, url);
-      }
-      return true; // Caller has already obtained approval
+    // Only the configured network and its canonical USDC are payable.
+    supportedNetworks: [approval.network],
+    supportedAssets: { [approval.network]: [usdc] },
+    // Defence in depth: this client can debit at most one approved payment.
+    globalPerRequestMax: approvedDebit,
+    globalDailyLimit: approvedDebit,
+    onBeforePayment: (req, reqUrl) => {
+      offerEvaluated = true;
+      return guard(req, reqUrl);
     },
-    onPaymentComplete: (log: { amount: bigint | string; txHash: string }) => {
+    onPaymentComplete: (log) => {
+      const paid = BigInt(log.amount);
       paymentMade = true;
-      amountPaidUsd = Number(BigInt(log.amount)) / 1e6; // USDC
+      amountPaidBaseUnits = paid;
+      amountPaidUsd = usdcBaseUnitsToUsdNumber(paid);
       txHash = log.txHash;
+      if (
+        paid !== approval.amount ||
+        String(log.recipient).toLowerCase() !== approval.payTo ||
+        String(log.token).toLowerCase() !== approval.asset
+      ) {
+        printError('Settled payment does not match the approval record — investigate this transaction.');
+      }
       if (opts.callbacks?.onPaymentComplete) {
         opts.callbacks.onPaymentComplete(amountPaidUsd, log.txHash);
       }
@@ -211,23 +392,62 @@ export async function fetchWithPayment(
     ...(opts.headers ?? {}),
   };
 
+  // Both hops — the unpaid probe and the SDK's paid retry — go through one
+  // safe transport (one DNS pin). Never global fetch.
+  const transport = createSafeTransport();
+  const sdkTransport = ((input: string | URL | Request, init?: RequestInit): Promise<Response> =>
+    typeof input === 'string' || input instanceof URL
+      ? transport(input.toString(), init)
+      : Promise.reject(new TypeError('safe transport accepts URL strings only'))) as typeof globalThis.fetch;
+  const hopInit: RequestInit = {
+    method,
+    headers,
+    ...(opts.body ? { body: opts.body } : {}),
+    signal: AbortSignal.timeout(timeoutMs),
+    redirect: 'manual',
+  };
+
+  let response: Response;
   try {
-    const response = await x402Client.fetch(url, {
-      method: opts.method ?? 'GET',
-      headers,
-      ...(opts.body ? { body: opts.body } : {}),
-      signal: AbortSignal.timeout(timeoutMs),
-    });
-
-    const body = await response.text();
-
-    return {
-      status: response.status,
-      body,
+    const probe = await transport(url, hopInit);
+    response = probe.status === 402
+      ? await x402Client.settle402AndRetry(probe, url, hopInit, sdkTransport)
+      : probe;
+  } catch (err) {
+    if (offerEvaluated) consumePaymentApproval(approval);
+    if (err instanceof Error && err.name === 'X402BudgetExceededError') {
+      // The offer's debit exceeds this one approved payment, so its amount
+      // cannot equal the approved amount. Nothing was signed.
+      consumePaymentApproval(approval);
+      throw new ApprovalRejectedError(`final offer exceeds the approved amount: ${err.message}`);
+    }
+    wrapPaymentFailure(err, {
+      paymentInitiated,
       paymentMade,
       amountPaidUsd,
       txHash,
-    };
+    });
+  }
+
+  // A challenge was answered (or refused): the approval cannot be reused.
+  if (offerEvaluated || response.status === 402) consumePaymentApproval(approval);
+
+  if (rejection !== null) {
+    throw new ApprovalRejectedError(`final offer does not match approval: ${rejection}`);
+  }
+  if (response.status === 402 && !paymentMade) {
+    throw new ApprovalRejectedError(
+      `endpoint still demands payment, but no offer matched the approved USDC terms on ${approval.network}`
+    );
+  }
+
+  // The body read happens after settlement: a stream failure here must keep
+  // the payment state (PaymentAwareError), never surface as a raw error that
+  // withRetry would retry or that a caller would not count against its budget.
+  let body: string;
+  try {
+    // Bounded read: oversized paid bodies are truncated for display.
+    body = (await readLimitedText(response)).text;
   } catch (err) {
     wrapPaymentFailure(err, {
       paymentInitiated,
@@ -236,6 +456,14 @@ export async function fetchWithPayment(
       txHash,
     });
   }
+  return {
+    status: response.status,
+    body,
+    paymentMade,
+    amountPaidUsd,
+    amountPaidBaseUnits,
+    txHash,
+  };
 }
 
 // ─── Free fetch ────────────────────────────────────────────────────────────
@@ -252,7 +480,7 @@ export async function fetchFree(
   } = {}
 ): Promise<{ status: number; body: string } | null> {
   try {
-    const response = await fetch(url, {
+    const response = await createSafeTransport()(url, {
       headers: {
         Accept: 'application/json, text/plain, */*',
         'User-Agent': 'agentpay-value-packs/1.0',
@@ -260,10 +488,10 @@ export async function fetchFree(
       },
       signal: AbortSignal.timeout(opts.timeoutMs ?? 15000),
     });
-    const body = await response.text();
-    return { status: response.status, body };
+    const { text } = await readLimitedText(response);
+    return { status: response.status, body: text };
   } catch {
-    return null;
+    return null; // network error or refused destination
   }
 }
 
@@ -315,14 +543,6 @@ export function getMockSentimentData(topic: string): string {
   });
 }
 
-// ─── Header parsing helper ─────────────────────────────────────────────────
-
-function extractHeaderField(header: string, field: string): string | null {
-  const regex = new RegExp(`${field}=([^,\\s]+)`);
-  const match = header.match(regex);
-  return match?.[1] ?? null;
-}
-
 // ─── Environment config ────────────────────────────────────────────────────
 
 /** Get the configured demo endpoint URL, or the default. */
@@ -339,11 +559,19 @@ export function isMockMode(): boolean {
 export function printWalletStatus(config: X402Config = {}): void {
   const hasKey = !!(config.privateKey ?? process.env['AGENT_PRIVATE_KEY']);
   const hasAddr = !!(config.walletAddress ?? process.env['AGENT_WALLET_ADDRESS']);
-  const chainId = config.chainId ?? parseInt(process.env['CHAIN_ID'] ?? '84532', 10);
 
   printInfo('Wallet key:', hasKey ? '✓ set (redacted)' : '✗ NOT SET');
   printInfo('Wallet addr:', hasAddr ? '✓ set' : '✗ NOT SET');
-  printInfo('Chain:', chainId === 8453 ? 'Base Mainnet' : 'Base Sepolia (testnet)');
+  try {
+    const network = getConfiguredNetwork(config);
+    printInfo('Chain:', network.label);
+    printInfo('Pay asset:', `USDC ${network.usdc} only`);
+    if (network.isMainnet) {
+      printWarning(`!!! MAINNET: real USDC will be spent (${MAINNET_OPT_IN_ENV}=1) !!!`);
+    }
+  } catch (err) {
+    printError(err instanceof Error ? err.message : String(err));
+  }
 
   if (!hasKey || !hasAddr) {
     printWarning('Wallet not configured — paid endpoints will be skipped.');

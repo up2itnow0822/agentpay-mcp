@@ -4,8 +4,11 @@
 
 | Version | Supported |
 |---------|-----------|
-| 1.2.x   | ✅        |
-| < 1.2   | ❌        |
+| 5.x     | ✅        |
+| < 5.0   | ❌        |
+
+Versions before 5.0.0 do not receive security fixes. They are affected by the
+findings repaired in the October 2026 remediation below; upgrade to 5.x.
 
 ## Reporting a Vulnerability
 
@@ -28,7 +31,7 @@ agentpay-mcp's architecture mitigates this class of vulnerability through three 
 
 1. **No managed identity dependency.** agentpay-mcp uses non-custodial wallet keys (ERC-6551 Token Bound Accounts), not cloud-managed identity tokens. There are no managed identity tokens to steal via SSRF because the system doesn't use them.
 
-2. **Input validation on all MCP tool parameters.** Every tool exposed by agentpay-mcp validates input against a strict schema before execution. URL parameters, addresses, and amounts are type-checked and range-validated. Arbitrary URL injection — the SSRF attack vector — is blocked at the schema layer.
+2. **Outbound destinations go through a safe transport.** Tool inputs are schema-validated, but a schema only checks that a URL is well formed; it cannot stop a caller from naming an internal host. Since 5.0.0, every outbound request to a caller-selected destination (`x402_pay`, `x402_quote`, the x402 session tools, and the OTel kill callback) goes through `src/utils/safe-fetch.ts`, which requires `https` (the kill callback also accepts `http`), refuses URLs with embedded credentials, refuses private, loopback, link-local, multicast and cloud-metadata destinations (including IPv4 addresses tunnelled in IPv6 forms), resolves DNS once and pins the socket to the validated answer (no DNS rebinding between check and connect), never follows redirects automatically, and caps response bodies at 2 MiB. Operators can permit specific private hosts with `AGENTPAY_ALLOWED_PRIVATE_HOSTS` (or `AGENTPAY_KILL_CALLBACK_ALLOWED_HOSTS` for the kill callback); `AGENTPAY_ALLOW_PRIVATE_NETWORK=1` relaxes the private-destination and `https` rules and is for development only. Versions before 5.0.0 did not have this transport and accepted any syntactically valid URL.
 
 3. **Process isolation.** agentpay-mcp runs as a standalone MCP server process. It does not share memory, tokens, or credentials with other Azure services. Even if an attacker could craft a malicious input, the blast radius is limited to the agentpay-mcp process — which holds only the agent's non-custodial wallet key, not cloud infrastructure credentials.
 
@@ -46,4 +49,17 @@ See our [enterprise MCP hardening guide](https://ai-agent-economy.hashnode.dev/e
 
 ## Dependency Security
 
-Current status: 5 low-severity vulnerabilities in the `elliptic` dependency chain (via `@elizaos/core`). These do not affect agentpay-mcp's payment operations. Monitoring for upstream fixes.
+As of 2026-10-25 (v5.0.0), `npm audit --omit=dev` and `npm audit` both report
+0 vulnerabilities. Payment-critical packages are pinned under
+[`docs/dependency-pin-policy.md`](docs/dependency-pin-policy.md). The earlier
+`elliptic` / `@elizaos/core` advisory chain is no longer in the dependency tree.
+
+## October 2026 remediation
+
+v5.0.0 repairs all 18 findings (4 high, 13 medium, 1 low) of the October 2026
+whole-repository static security review. The release is breaking: x402 payments
+require `max_payment_eth` and `pay_to`, spend policy is default-deny without an
+operator policy, and `set_spend_policy` can only tighten.
+[`docs/security-remediation-2026-10.md`](docs/security-remediation-2026-10.md)
+maps each finding to its repair and the test that proves it, and lists the
+accepted residual risks.

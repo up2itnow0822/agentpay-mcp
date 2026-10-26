@@ -12,14 +12,14 @@ import { getWallet, getConfig } from '../utils/client.js'
 import { textContent, formatError } from '../utils/format.js'
 import { assertConfiguredChain } from '../utils/wallet-chain.js'
 import {
-  DefiniteSpendFailure,
   IDEMPOTENCY_KEY_JSON_SCHEMA,
   IdempotencyKeyZodSchema,
   requireSettlementHash,
+  runClassifiedSpend,
   sendTokenIntentIdentity,
   withSpendIntent,
 } from '../utils/spend-intent.js'
-import { enforceSpendPolicy } from './budget.js'
+import { withReservedSpend } from './budget.js'
 
 // ─── send_token ────────────────────────────────────────────────────────────
 
@@ -92,50 +92,43 @@ export async function handleSendToken(
       idempotencyKey: input.idempotencyKey,
     })
 
-    const { value, replayed } = await withSpendIntent(intent.key, async () => {
-      // rawAmount is in the token's base units; decimals lets the policy
-      // normalise to its 9-decimal ETH-equivalent caps.
-      const policyDecision = await enforceSpendPolicy({
-        merchant: input.recipientAddress,
-        amount: rawAmount,
-        decimals: token.decimals,
-      })
-      if (policyDecision.status === 'rejected') {
-        throw new DefiniteSpendFailure(
-          policyDecision.reason ??
-            `Transfer blocked by spend policy for recipient ${input.recipientAddress}.`
-        )
-      }
-      if (policyDecision.status === 'draft') {
-        throw new DefiniteSpendFailure(
-          `Transfer exceeds per-tx spend policy and was queued as draft` +
-            `${policyDecision.draftId ? ` (${policyDecision.draftId})` : ''}. ` +
-            (policyDecision.reason ?? 'Approve the draft before executing.')
-        )
-      }
+    const { value, replayed } = await withSpendIntent(intent.key, () =>
+      // Reserve → execute → commit | release | lock: a definite pre-broadcast
+      // failure releases the policy capacity so the transfer can be retried;
+      // rawAmount is in the token's base units and decimals normalises it.
+      withReservedSpend(
+        { merchant: input.recipientAddress, amount: rawAmount, decimals: token.decimals },
+        async () => {
+          // A failure before the wallet write (simulation revert, RPC refusal,
+          // insufficient balance) moved nothing: it is classified definite and
+          // stays retryable instead of occupying an unresolved-lock slot.
+          const txHash = requireSettlementHash(
+            await runClassifiedSpend(wallet.walletClient, () =>
+              agentTransferToken(wallet, {
+                token: token.address as Address,
+                to: input.recipientAddress as Address,
+                amount: rawAmount,
+              })
+            ),
+            'send_token'
+          )
 
-      const txHash = requireSettlementHash(
-        await agentTransferToken(wallet, {
-          token: token.address as Address,
-          to: input.recipientAddress as Address,
-          amount: rawAmount,
-        }),
-        'send_token'
-      )
-
-      return {
-        success: true as const,
-        txHash,
-        token: token.symbol,
-        to: input.recipientAddress,
-        amount: input.amount,
-        rawAmount: rawAmount.toString(),
-        chainId: input.chainId,
+          return {
+            success: true as const,
+            txHash,
+            token: token.symbol,
+            to: input.recipientAddress,
+            amount: input.amount,
+            rawAmount: rawAmount.toString(),
+            chainId: input.chainId,
+          }
+        }
+      ),
+      {
+        durable: Boolean(input.idempotencyKey?.trim()),
+        fingerprint: intent.fingerprint,
       }
-    }, {
-      durable: Boolean(input.idempotencyKey?.trim()),
-      fingerprint: intent.fingerprint,
-    })
+    )
 
     return {
       content: [

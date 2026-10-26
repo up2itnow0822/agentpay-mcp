@@ -38,7 +38,7 @@ Do not call `tools/call` before initialize. Do not hide receipt or session heade
 
 ## AgentPay MCP client behavior
 
-`x402_pay` remains the direct paid-fetch tool for one-off x402 endpoints. Use it when the buyer already has a target URL, a spend cap, and no reusable session requirement.
+`x402_pay` remains the direct paid-fetch tool for one-off x402 endpoints. Use it when the buyer already has a target URL, an approved payee, a spend cap, and no reusable session requirement. Since v5.0.0 `max_payment_eth` and `pay_to` are required on `x402_pay` and `x402_session_start`; read the offered terms first with `x402_quote`, which never signs.
 
 `x402_session_start` is the better choice when the paid endpoint supports session semantics or the buyer expects repeated calls under one paid entitlement.
 

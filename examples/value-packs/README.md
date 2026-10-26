@@ -15,7 +15,8 @@ Three fully working TypeScript scripts that show exactly how to build AI agents 
 | **Automation Agent** | `automation-agent.ts` | Task planning, cost estimation, retry + fallback |
 
 All three share utilities from `shared/`:
-- `x402-client.ts` — 402 detection, payment execution, retry logic
+- `x402-client.ts` — 402 detection, approval-bound payment execution, retry logic
+- `usdc-approval.ts` — exact USDC cap parsing, USDC/network allowlist, single-use approval records
 - `spending-policy.ts` — daily cap, per-tx cap, approval threshold
 - `cache.ts` — file-based TTL cache (avoid double-paying)
 - `ui.ts` — colored console output, cost display, approval prompts
@@ -40,7 +41,16 @@ export AGENT_PRIVATE_KEY=0xYOUR_AGENT_HOT_WALLET_KEY
 export AGENT_WALLET_ADDRESS=0xYOUR_AGENT_ACCOUNT_ADDRESS
 ```
 
-> **Testnet first:** The packs default to Base Sepolia so you can test without real money. Set `CHAIN_ID=8453` to switch to Base Mainnet.
+> **Testnet first:** The packs default to Base Sepolia so you can test without real money.
+>
+> **Base Mainnet moves real USDC** and needs two settings together. With only one of them, the packs refuse to start:
+>
+> ```bash
+> export CHAIN_ID=8453
+> export VALUE_PACK_ALLOW_MAINNET=1   # explicit, deliberate opt-in
+> ```
+>
+> Any other `CHAIN_ID` value is rejected.
 
 ### 3. Run a pack
 
@@ -158,8 +168,10 @@ if (cached) return cached; // No payment needed
 const approved = await requestApproval({ action, description, costUsd, endpoint });
 if (!approved) return; // User said no
 
-// Payment + retry
-const result = await fetchWithPayment(wallet, url, { maxPaymentUsd: 0.05 });
+// Probe → bind → pay. The cap is an exact USD decimal string, never a float.
+const info = await probeEndpoint(url);              // verified USDC offer or { payable: false }
+const approval = approveProbedPayment(info!, '0.05'); // frozen, single-use; throws if offer > cap
+const result = await fetchWithPayment(wallet, url, { approval });
 cache.set('my-endpoint-key', result); // Cache after paying
 ```
 
@@ -353,9 +365,11 @@ if (estimatedTotal > MAX_COST_USD) {
 const approved = await requestPlanApproval({ steps: plan.steps, totalCostUsd, dailyCapUsd });
 
 // Execute with retry + fallback. withRetry will not re-enter fetchWithPayment
-// after payment has been initiated (a timeout after settlement is not a new buy).
+// after payment has been initiated (a timeout after settlement is not a new buy)
+// or after an approval rejection (approvals are single-use).
+const approval = approveProbedPayment(probe, MARKET_SENTIMENT_CAP_USD); // '0.01'
 const result = await withRetry(
-  () => fetchWithPayment(wallet, url, { maxPaymentUsd: step.estimatedCostUsd * 1.5 }),
+  () => fetchWithPayment(wallet, url, { approval }),
   { maxAttempts: 3, initialDelayMs: 1000, maxDelayMs: 8000,
     onRetry: (attempt, err) => printWarning(`Retry ${attempt}: ${err.message}`) }
 );
@@ -369,13 +383,51 @@ installShutdownHandler(() => {
 
 ---
 
+## Payment Caps and Approval Binding
+
+Every payment in the packs goes through one path: **probe → approve → pay**. The final 402 offer has to match what was approved.
+
+### Caps are exact USDC base units
+
+- Caps are written as **USD decimal strings** (`'0.01'`, not `0.01`).
+- `usdToUsdcBaseUnits()` converts them to USDC base units (6 decimals) with integer math only, so no floating-point values reach the cap path:
+  - `'0.01'` → `10_000n`
+  - `'1.234567'` → `1_234_567n`
+  - More than 6 fractional digits, negative values, `NaN`, empty strings, exponents, zero and non-string inputs are all rejected.
+- The packs pay only in **canonical USDC on the configured network**:
+
+  | Network | x402 `network` | USDC contract |
+  |---------|----------------|---------------|
+  | Base Sepolia (default) | `base-sepolia:84532` | `0x036CbD53842c5426634e7929541eC2318f3dCF7e` |
+  | Base Mainnet (opt-in) | `base:8453` | `0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913` |
+
+  The packs refuse any other token, any token given only by symbol (such as `"USDC"`), any other network, and any scheme other than `exact`. In each case nothing is paid.
+
+### One frozen, single-use approval per payment
+
+1. `probeEndpoint(url)` reads the 402 `PAYMENT-REQUIRED` payload and picks the exact USDC offer for the configured network. If there is none, it returns `{ payable: false, reason }`.
+2. `approveProbedPayment(info, capUsd)` turns that offer into a frozen `PaymentApproval` record containing `{ endpoint, method, network, asset, payTo, amount, capBaseUnits }`. The cap bounds the full debit — the probed amount **plus** the SDK's 0.77% protocol fee — so if that debit is above the cap, it throws `ApprovalRejectedError` (a `$0.01` cap approves at most 9,924 base units: 9,924 + 76 fee = 10,000). This record is what the user approves; the prompt shows the exact amount, payee, asset and network.
+3. `fetchWithPayment(wallet, url, { approval })` pays only when the **final** offer matches the approval:
+   - Endpoint, method and wallet chain are checked before any request is sent.
+   - The SDK client is restricted to the approved network and its USDC contract. Its per-request and daily limits are both set to the approved amount plus the SDK protocol fee.
+   - `onBeforePayment` compares the final offer's `amount` (exact, and with the protocol fee no more than the cap), `asset` and `payTo` (both case-insensitive), `network`, `scheme` and endpoint against the approval. If **any** field differs, it returns `false`. Nothing is signed and `ApprovalRejectedError` is thrown.
+4. The first evaluation consumes the approval, whether it accepts or rejects the offer. A second payment needs a new probe and a new approval. `withRetry` never retries an `ApprovalRejectedError` or a `PaymentAwareError`.
+5. Any failure after settlement — including the paid response body failing mid-read — is a `PaymentAwareError` carrying the settled amount and transaction hash, so callers count it against their budget and never retry it.
+
+This stops a hostile endpoint from turning a $0.01 approval into a different payee, asset, network or amount after the user has said yes. `tests/value-pack-cap-binding.test.ts` covers each of these cases.
+
+Daily caps in `PolicyGuard` and the displayed costs still use floats. They are for budgeting and display only and never authorize a payment.
+
+---
+
 ## Environment Variables
 
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `AGENT_PRIVATE_KEY` | — | Agent hot wallet private key (`0x...`) |
 | `AGENT_WALLET_ADDRESS` | — | AgentAccount contract address (`0x...`) |
-| `CHAIN_ID` | `84532` | Chain ID (`84532` = Base Sepolia, `8453` = Base Mainnet) |
+| `CHAIN_ID` | `84532` | Chain ID (`84532` = Base Sepolia, `8453` = Base Mainnet). Other values are rejected. |
+| `VALUE_PACK_ALLOW_MAINNET` | — | Must be `1` together with `CHAIN_ID=8453`, or the packs refuse to run on mainnet |
 | `RPC_URL` | public Base RPC | Custom RPC endpoint |
 | `X402_DEMO_URL` | `https://x402-demo.vercel.app/api/market-data` | Demo 402 endpoint URL. Set to `mock` for offline testing. |
 | `DAILY_CAP_USD` | `5.00` | Daily spending cap in USD |
@@ -389,9 +441,12 @@ installShutdownHandler(() => {
 ```
 Agent → GET /api/premium-data
          ← 402 Payment Required
-              WWW-Authenticate: X402-Payment amount=10000, token=USDC, ...
+              PAYMENT-REQUIRED: base64({ accepts: [{ scheme: "exact",
+                network: "base-sepolia:84532", asset: <USDC>, payTo, amount: "10000" }] })
 
-Agent → [shows user the cost, waits for approval]
+Agent → [verifies exact USDC on the configured network, checks amount ≤ cap,
+         freezes a single-use approval, shows the user the exact terms]
+Agent → GET /api/premium-data          (fresh 402 — must match the approval)
 Agent → [constructs payment proof via agentwallet-sdk]
 Agent → GET /api/premium-data
          X-Payment: <signed proof>
@@ -415,7 +470,7 @@ The x402 protocol is an open standard. Any HTTP server can return a 402 with pay
 
 ## Customizing
 
-1. **Add your own endpoint** — add an entry to `ENDPOINTS` in `paid-api-agent.ts` with `free: false` and your URL
+1. **Add your own endpoint** — add an entry to `ENDPOINTS` in `paid-api-agent.ts` with `free: false`, your URL, and a `maxCostUsd` decimal-string cap (paid endpoints without one are refused)
 2. **Change the spending cap** — set `DAILY_CAP_USD=10` or edit `PolicyGuard` options directly
 3. **Add a new task type** — extend `buildPlan()` in `automation-agent.ts` with new keyword patterns and step executors
 4. **Change cache TTL** — pass `{ ttlMs: 30 * 60 * 1000 }` to `FileCache` for 30-minute caching

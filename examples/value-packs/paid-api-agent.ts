@@ -5,8 +5,10 @@
  * Demonstrates the x402 payment flow end-to-end:
  *
  *  1. Fetches data from a mix of free and paid endpoints
- *  2. On hitting a 402, shows the cost and asks for human approval
- *  3. Pays on approval, then retries the request
+ *  2. On hitting a 402, verifies the offer is exact USDC on the configured
+ *     network, binds it into a single-use approval capped at maxCostUsd,
+ *     and asks for human approval
+ *  3. Pays only if the final 402 offer matches that approval exactly
  *  4. Caches results to avoid double-paying within 1 hour
  *  5. Prints a summary of data gathered and total spent
  *
@@ -17,6 +19,8 @@
  * Optional env:
  *   X402_DEMO_URL=mock        — use mock data instead of live demo endpoint
  *   DAILY_CAP_USD=5           — override daily spend cap (default: $5)
+ *   CHAIN_ID=8453 + VALUE_PACK_ALLOW_MAINNET=1 — pay real USDC on Base Mainnet
+ *                               (default: Base Sepolia testnet)
  */
 
 import {
@@ -31,6 +35,9 @@ import {
   printWalletStatus,
   PaymentAwareError,
   settledPaymentAmount,
+  approveProbedPayment,
+  ApprovalRejectedError,
+  formatUsdcBaseUnits,
 } from './shared/x402-client.js';
 
 import { PolicyGuard, PolicyError } from './shared/spending-policy.js';
@@ -65,7 +72,14 @@ interface ApiEndpoint {
   url: string;
   free: boolean;
   description: string;
+  /** Display estimate only. */
   estimatedCostUsd?: number;
+  /**
+   * Hard ceiling for one payment, as an exact USD decimal string (USDC, 6 dp).
+   * The probed offer must not exceed it, and the final offer must equal the
+   * probed one. Required for paid endpoints.
+   */
+  maxCostUsd?: string;
   parser: (body: string) => Record<string, unknown>;
 }
 
@@ -125,6 +139,7 @@ const ENDPOINTS: ApiEndpoint[] = [
     free: false,
     description: 'Premium crypto market data with sentiment analysis',
     estimatedCostUsd: 0.01,
+    maxCostUsd: '0.01',
     parser: (body) => {
       const data = JSON.parse(body);
       if (data._mock) {
@@ -230,10 +245,7 @@ async function collectData(
     printInfo('Probing:', ep.url);
     const paymentInfo = await probeEndpoint(ep.url);
 
-    let costUsd = ep.estimatedCostUsd ?? 0.01;
-    if (paymentInfo) {
-      costUsd = paymentInfo.amountUsd;
-    } else {
+    if (!paymentInfo) {
       // Endpoint might be freely accessible or unreachable — try free fetch
       const freeAttempt = await fetchFree(ep.url);
       if (freeAttempt && freeAttempt.status === 200) {
@@ -260,6 +272,28 @@ async function collectData(
       continue;
     }
 
+    // Fail closed: only exact USDC on the configured network can be approved.
+    if (!paymentInfo.payable) {
+      printError(`Refusing payment: ${paymentInfo.reason}`);
+      results.push({ endpoint: ep, data: null, error: paymentInfo.reason, costUsd: 0, fromCache: false, skipped: true });
+      continue;
+    }
+
+    // Bind the probed offer into one immutable, single-use approval record.
+    // The final 402 must match it field-for-field and stay under maxCostUsd.
+    let approval: ReturnType<typeof approveProbedPayment>;
+    try {
+      if (!ep.maxCostUsd) throw new ApprovalRejectedError('endpoint has no maxCostUsd cap configured');
+      approval = approveProbedPayment(paymentInfo, ep.maxCostUsd);
+    } catch (capErr) {
+      const msg = capErr instanceof Error ? capErr.message : String(capErr);
+      printError(msg);
+      results.push({ endpoint: ep, data: null, error: msg, costUsd: 0, fromCache: false, skipped: true });
+      continue;
+    }
+    // Float USD is for display and in-process budget accounting only.
+    const costUsd = paymentInfo.amountUsd;
+
     printPaid(ep.description, costUsd);
 
     // Policy check
@@ -282,12 +316,13 @@ async function collectData(
         description: ep.description,
         costUsd,
         endpoint: ep.url,
-        details: paymentInfo
-          ? {
-              'Token:': paymentInfo.token,
-              'Network:': paymentInfo.network,
-            }
-          : undefined,
+        details: {
+          'Amount:': `${formatUsdcBaseUnits(approval.amount)} USDC (${approval.amount} base units)`,
+          'Cap:': `$${ep.maxCostUsd}`,
+          'Token:': `${paymentInfo.token} ${approval.asset}`,
+          'Pay to:': approval.payTo,
+          'Network:': approval.network,
+        },
       });
 
       if (!approved) {
@@ -305,7 +340,7 @@ async function collectData(
       const result = await withRetry(
         () =>
           fetchWithPayment(wallet, ep.url, {
-            maxPaymentUsd: costUsd * 1.1, // 10% buffer
+            approval,
             callbacks: {
               onPaymentRequired: (amt, url) => {
                 printInfo('Paying:', `$${amt.toFixed(4)} for ${url}`);

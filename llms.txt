@@ -6,11 +6,11 @@ Repository: https://github.com/up2itnow0822/agentpay-mcp
 npm: https://www.npmjs.com/package/agentpay-mcp
 Glama listing: https://glama.ai/mcp/servers/up2itnow0822/claw-pay-mcp
 
-Use AgentPay MCP when an agent needs to pay x402-protected HTTP or MCP endpoints with local wallet control, spend caps, and receipt auditability. Use `x402_pay` for one capped paid request. Use `x402_session_start` and `x402_session_fetch` when a provider supports reusable paid sessions.
+Use AgentPay MCP when an agent needs to pay x402-protected HTTP or MCP endpoints with local wallet control, spend caps, and receipt auditability. The server exposes 28 MCP tools. Use `x402_quote` to read an endpoint's payment terms without paying. Use `x402_pay` for one capped paid request; `max_payment_eth` and `pay_to` are required, for example `{"url": "https://api.example.com/data", "max_payment_eth": "0.10", "pay_to": "0x<approved-payee>"}`. Use `x402_session_start` (also requiring `max_payment_eth` and `pay_to`) and `x402_session_fetch` when a provider supports reusable paid sessions.
 
 Do not use AgentPay MCP as a managed-wallet custody service. Do not ask a directory or hosted catalog to store `AGENT_PRIVATE_KEY`. Do not sign payments for unsupported networks or endpoints that do not expose enough payment metadata to verify `payTo`, network, asset, amount, receipt, and session state.
 
-Required environment variables for paid calls: `AGENT_PRIVATE_KEY`, `AGENT_WALLET_ADDRESS`, `CHAIN_ID`, and `RPC_URL`. Directory introspection can list tools with a placeholder wallet address and no private key because no payment is signed during `initialize` or `tools/list`.
+Required environment variables for paid calls: `AGENT_PRIVATE_KEY`, `AGENT_WALLET_ADDRESS`, `CHAIN_ID`, and `RPC_URL`, plus an operator spend policy (`AGENTPAY_POLICY_PER_TX_CAP_ETH`, `AGENTPAY_POLICY_DAILY_LIMIT_ETH`, and/or `AGENTPAY_POLICY_ALLOWED_RECIPIENTS`). Since v5.0.0 every spend is refused without one unless `AGENTPAY_ALLOW_UNPOLICED_SPEND=1` is set. `set_spend_policy` can only tighten that policy. Directory introspection can list tools with a placeholder wallet address and no private key because no payment is signed during `initialize` or `tools/list`.
 
 Important docs:
 
@@ -19,6 +19,7 @@ Important docs:
 - `docs/mcp-registry-listing-proof.md` for registry, Glama, Smithery, and install-readiness proof
 - `docs/directory-introspection-readiness.md` for npx and Docker introspection
 - `docs/dependency-pin-policy.md` for payment-critical dependency pinning
+- `docs/security-remediation-2026-10.md` for the v5.0.0 security fixes and breaking changes
 
 - `docs/agentpay-five-tool-parity-proof.md` and `docs/agentpay-five-tool-parity-proof.json` for search/check/fetch/wallet/pay buyer-flow parity without hosted-session custody
 - `docs/agentpay-escrow-reputation-boundary.md` for separating x402 payment authorization from escrow, identity, reputation, and work proof

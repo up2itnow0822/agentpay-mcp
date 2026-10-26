@@ -41,10 +41,11 @@ Expected result: `initialize` returns `agentpay-mcp`, then `tools/list` returns 
 
 Directory-facing paid tools should tell buyers when to use the tool and when not to use it.
 
-- `x402_pay`: use for one capped paid HTTP request; do not use for unknown networks, missing spend caps, or uninitialized Streamable HTTP MCP sessions.
-- `x402_session_start`: use for a reusable paid entitlement; do not use if the provider lacks session semantics or if the buyer cannot store the returned session ID.
+- `x402_quote`: use to read an endpoint's x402 terms (payee, asset, network, amount) without paying, so they can be approved first.
+- `x402_pay`: use for one capped paid HTTP request; `max_payment_eth` and `pay_to` are required, for example `{"url": "https://api.example.com/data", "max_payment_eth": "0.10", "pay_to": "0x<approved-payee>"}`. Do not use for unknown networks, unapproved payees, or uninitialized Streamable HTTP MCP sessions.
+- `x402_session_start`: use for a reusable paid entitlement; `max_payment_eth` and `pay_to` are required. Do not use if the provider lacks session semantics or if the buyer cannot store the returned session ID.
 - `x402_session_fetch`: use after a valid session exists; do not use as a payment bypass or before `x402_session_start`.
-- Budget tools: use for local policy enforcement before signing; do not treat catalog metadata as approval.
+- Budget tools: use for local policy enforcement before signing; `set_spend_policy` can only tighten the operator policy, never loosen it. Do not treat catalog metadata as approval.
 
 Every input field on paid tools must explain units, defaults, and failure behavior. Amount caps should name ETH-equivalent units. Network fields should name Base mainnet `8453` and Base Sepolia `84532` where relevant.
 
@@ -56,7 +57,7 @@ AgentPay MCP metadata must preserve these claims:
 - operator-supplied wallet configuration
 - Base mainnet and Base Sepolia x402 exact-payment support
 - fail-closed unsupported networks
-- spend caps before signing
+- spend caps before signing (mandatory `max_payment_eth` and approved `pay_to` on x402 tools; default-deny without an operator policy)
 - receipt/audit trail requirements
 
 Directory metadata rule: do not claim directory hosting, managed wallets, or verified listings that are not live.

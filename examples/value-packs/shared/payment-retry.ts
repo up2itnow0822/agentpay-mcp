@@ -92,6 +92,12 @@ export async function withRetry<T>(
         break;
       }
 
+      // Approval/cap rejections are deterministic: retrying cannot help and
+      // the approval they were bound to is single-use.
+      if ((lastError as { retryable?: unknown }).retryable === false) {
+        break;
+      }
+
       if (attempt === opts.maxAttempts) break;
 
       if (opts.onRetry) opts.onRetry(attempt, lastError);

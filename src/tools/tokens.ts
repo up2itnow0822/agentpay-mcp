@@ -2,15 +2,111 @@
  * tokens.ts — lookup_token, add_custom_token, list_chain_tokens tools.
  *
  * Wraps agentwallet-sdk v6 TokenRegistry for MCP access.
+ *
+ * Resource bounds (CWE-400 hardening)
+ * -----------------------------------
+ * The SDK's global TokenRegistry is process-wide and never evicts, so every
+ * entry add_custom_token writes is retained for the life of the server. The
+ * tool therefore:
+ *   - bounds every caller-supplied field at the schema layer (symbol charset
+ *     and length, name length and control characters, a real non-zero EVM
+ *     address, and a chainId from CUSTOM_TOKEN_CHAIN_IDS);
+ *   - tracks its own registrations in module-level Maps, giving O(1)
+ *     duplicate/alias lookup instead of a linear registry scan per add;
+ *   - enforces MAX_CUSTOM_TOKENS_PER_CHAIN and MAX_CUSTOM_TOKENS_TOTAL, failing
+ *     closed (nothing registered) once either is reached.
+ * list_chain_tokens is paginated (offset/limit, limit ≤ LIST_TOKENS_MAX_LIMIT)
+ * and flattens caller-supplied symbol/name text with sanitizeUntrustedInline.
  */
 import { z } from 'zod'
 import { getGlobalRegistry } from 'agentwallet-sdk'
-import { textContent, formatError } from '../utils/format.js'
+import { isAddress, zeroAddress } from 'viem'
+import {
+  textContent,
+  formatError,
+  noControlChars,
+  sanitizeUntrustedInline,
+} from '../utils/format.js'
+import { getConfig, getWallet } from '../utils/client.js'
+import { decimalsVerifierOverride_ } from '../utils/test-seams.js'
+import { withKeyedLock } from '../utils/spend-intent.js'
+
+/**
+ * One registration at a time, across every chain: the decision, the on-chain
+ * decimals check (an await) and the registry write must be atomic, or two
+ * concurrent registrations can both pass the "no overwrite" decision and the
+ * later write silently replaces the earlier one. The quota is global too.
+ */
+const ADD_CUSTOM_TOKEN_LOCK = 'add_custom_token'
+
+type ToolResult = { content: Array<{ type: 'text'; text: string }>; isError?: boolean }
+
+// ─── Bounds ────────────────────────────────────────────────────────────────
+
+/**
+ * Chains add_custom_token may register on.
+ *
+ * Mirrors the server's supported wallet chains (src/utils/client.ts CHAIN_MAP:
+ * 8453 Base Mainnet, 84532 Base Sepolia). send_token, swap_tokens and
+ * get_balances are bound to the configured CHAIN_ID (see
+ * src/utils/wallet-chain.ts), which must be one of these, so a custom token on
+ * any other chain could never be spent and would only grow the registry.
+ * client.ts does not export its map, so the list is restated here; keep the
+ * two in sync.
+ */
+export const CUSTOM_TOKEN_CHAIN_IDS = [8453, 84532] as const
+
+/** Max custom tokens add_custom_token will retain per chain. */
+export const MAX_CUSTOM_TOKENS_PER_CHAIN = 64
+/**
+ * Max custom tokens add_custom_token will retain across all chains.
+ * Deliberately below MAX_CUSTOM_TOKENS_PER_CHAIN × CUSTOM_TOKEN_CHAIN_IDS.length
+ * (128) so the global bound is a real constraint, not dead code.
+ */
+export const MAX_CUSTOM_TOKENS_TOTAL = 96
+
+export const TOKEN_SYMBOL_MAX_LEN = 16
+export const TOKEN_SYMBOL_PATTERN = /^[A-Za-z0-9._-]+$/
+export const TOKEN_NAME_MAX_LEN = 64
+
+export const LIST_TOKENS_DEFAULT_LIMIT = 50
+export const LIST_TOKENS_MAX_LIMIT = 100
+
+/** Lookup-symbol cap: looser than registration, but still bounded. */
+const LOOKUP_SYMBOL_MAX_LEN = 32
+
+// ─── Shared output shaping ─────────────────────────────────────────────────
+
+type RegistryToken = {
+  symbol: string
+  address: string
+  decimals: number
+  chainId: number
+  name?: string
+  isNative?: boolean
+}
+
+/**
+ * Render a registry entry for a tool result. Symbol and name can be
+ * caller-supplied text (via add_custom_token), so they are flattened and capped.
+ */
+function presentToken(token: RegistryToken): Record<string, unknown> {
+  return {
+    symbol: sanitizeUntrustedInline(token.symbol, TOKEN_SYMBOL_MAX_LEN),
+    name: sanitizeUntrustedInline(token.name ?? token.symbol, TOKEN_NAME_MAX_LEN),
+    address: sanitizeUntrustedInline(token.address, 42),
+    decimals: token.decimals,
+    chainId: token.chainId,
+    isNative: token.isNative === true,
+  }
+}
 
 // ─── lookup_token ──────────────────────────────────────────────────────────
 
 export const LookupTokenSchema = z.object({
-  symbol: z.string().describe('Token symbol, e.g. "USDC"'),
+  symbol: noControlChars(z.string().min(1).max(LOOKUP_SYMBOL_MAX_LEN)).describe(
+    'Token symbol, e.g. "USDC"'
+  ),
   chainId: z.number().int().describe('Chain ID, e.g. 8453 for Base Mainnet'),
 })
 
@@ -24,16 +120,19 @@ export const lookupTokenTool = {
   inputSchema: {
     type: 'object' as const,
     properties: {
-      symbol: { type: 'string', description: 'Token symbol (e.g. "USDC", "WETH")' },
-      chainId: { type: 'number', description: 'Chain ID (e.g. 8453 for Base Mainnet)' },
+      symbol: {
+        type: 'string',
+        description: 'Token symbol (e.g. "USDC", "WETH")',
+        minLength: 1,
+        maxLength: LOOKUP_SYMBOL_MAX_LEN,
+      },
+      chainId: { type: 'integer', description: 'Chain ID (e.g. 8453 for Base Mainnet)' },
     },
     required: ['symbol', 'chainId'],
   },
 }
 
-export async function handleLookupToken(
-  input: LookupTokenInput
-): Promise<{ content: Array<{ type: 'text'; text: string }>; isError?: boolean }> {
+export async function handleLookupToken(input: LookupTokenInput): Promise<ToolResult> {
   try {
     const registry = getGlobalRegistry()
     const token = registry.getToken(input.symbol.toUpperCase(), input.chainId)
@@ -41,13 +140,17 @@ export async function handleLookupToken(
       return {
         content: [
           textContent(
-            JSON.stringify({ found: false, symbol: input.symbol, chainId: input.chainId })
+            JSON.stringify({
+              found: false,
+              symbol: sanitizeUntrustedInline(input.symbol, LOOKUP_SYMBOL_MAX_LEN),
+              chainId: input.chainId,
+            })
           ),
         ],
       }
     }
     return {
-      content: [textContent(JSON.stringify({ found: true, ...token }))],
+      content: [textContent(JSON.stringify({ found: true, ...presentToken(token) }))],
     }
   } catch (error: unknown) {
     return {
@@ -60,11 +163,32 @@ export async function handleLookupToken(
 // ─── add_custom_token ──────────────────────────────────────────────────────
 
 export const AddCustomTokenSchema = z.object({
-  symbol: z.string().describe('Token symbol'),
-  address: z.string().describe('Token contract address (0x-prefixed)'),
+  symbol: z
+    .string()
+    .min(1)
+    .max(TOKEN_SYMBOL_MAX_LEN)
+    .regex(TOKEN_SYMBOL_PATTERN, 'symbol may contain only letters, digits, ".", "_" and "-"')
+    .describe('Token symbol (1–16 chars: letters, digits, ".", "_", "-")'),
+  address: z
+    .string()
+    .refine((v) => isAddress(v), {
+      message: 'address must be a valid 0x-prefixed 20-byte EVM address (EIP-55 checksum if mixed case)',
+    })
+    .refine((v) => v.toLowerCase() !== zeroAddress, {
+      message: 'address must not be the zero address',
+    })
+    .describe('Token contract address (0x-prefixed)'),
   decimals: z.number().int().min(0).max(18).describe('Token decimal precision'),
-  chainId: z.number().int().describe('Chain ID where this token lives'),
-  name: z.string().optional().describe('Human-readable token name (optional, defaults to symbol)'),
+  chainId: z
+    .number()
+    .int()
+    .refine((v) => (CUSTOM_TOKEN_CHAIN_IDS as readonly number[]).includes(v), {
+      message: `chainId must be one of the supported chains: ${CUSTOM_TOKEN_CHAIN_IDS.join(', ')}`,
+    })
+    .describe('Chain ID where this token lives (8453 Base Mainnet or 84532 Base Sepolia)'),
+  name: noControlChars(z.string().min(1).max(TOKEN_NAME_MAX_LEN))
+    .optional()
+    .describe('Human-readable token name (optional, defaults to symbol)'),
 })
 
 export type AddCustomTokenInput = z.infer<typeof AddCustomTokenSchema>
@@ -76,15 +200,42 @@ export const addCustomTokenTool = {
     'by send_token, get_balances, and swap_tokens. Refuses to overwrite an existing ' +
     'symbol+chain entry or to alias an already-registered contract with different ' +
     'decimals (including built-ins such as USDC) because a wrong decimals value ' +
-    'would silently overpay on later transfers and swaps.',
+    'would silently overpay on later transfers and swaps. Only supported chains ' +
+    `(${CUSTOM_TOKEN_CHAIN_IDS.join(', ')}) are accepted, and the server retains at most ` +
+    `${MAX_CUSTOM_TOKENS_PER_CHAIN} custom tokens per chain and ${MAX_CUSTOM_TOKENS_TOTAL} ` +
+    'in total until restart.',
   inputSchema: {
     type: 'object' as const,
     properties: {
-      symbol: { type: 'string', description: 'Token symbol' },
-      address: { type: 'string', description: 'Token contract address (0x-prefixed)' },
-      decimals: { type: 'number', description: 'Token decimal precision (0–18)' },
-      chainId: { type: 'number', description: 'Chain ID' },
-      name: { type: 'string', description: 'Human-readable name (optional)' },
+      symbol: {
+        type: 'string',
+        description: 'Token symbol (letters, digits, ".", "_", "-")',
+        minLength: 1,
+        maxLength: TOKEN_SYMBOL_MAX_LEN,
+        pattern: '^[A-Za-z0-9._-]+$',
+      },
+      address: {
+        type: 'string',
+        description: 'Token contract address (0x-prefixed, non-zero)',
+        pattern: '^0x[0-9a-fA-F]{40}$',
+      },
+      decimals: {
+        type: 'integer',
+        description: 'Token decimal precision (0–18)',
+        minimum: 0,
+        maximum: 18,
+      },
+      chainId: {
+        type: 'integer',
+        description: 'Chain ID (8453 Base Mainnet, 84532 Base Sepolia)',
+        enum: [...CUSTOM_TOKEN_CHAIN_IDS],
+      },
+      name: {
+        type: 'string',
+        description: 'Human-readable name (optional, no control characters)',
+        minLength: 1,
+        maxLength: TOKEN_NAME_MAX_LEN,
+      },
     },
     required: ['symbol', 'address', 'decimals', 'chainId'],
   },
@@ -154,16 +305,7 @@ export function decideCustomTokenRegistration(
   return 'register'
 }
 
-function asIdentity(
-  token:
-    | {
-        symbol: string
-        address: string
-        decimals: number
-        chainId: number
-      }
-    | undefined
-): CustomTokenIdentity | undefined {
+function asIdentity(token: RegistryToken | undefined): CustomTokenIdentity | undefined {
   if (!token) return undefined
   return {
     symbol: token.symbol,
@@ -173,57 +315,145 @@ function asIdentity(
   }
 }
 
-export async function handleAddCustomToken(
-  input: AddCustomTokenInput
-): Promise<{ content: Array<{ type: 'text'; text: string }>; isError?: boolean }> {
+// ─── Custom-registration tracking (quota + O(1) alias index) ───────────────
+
+/** Custom registrations made through this tool, keyed `${chainId}:${SYMBOL}`. */
+const customBySymbol = new Map<string, CustomTokenIdentity>()
+/** Custom registrations made through this tool, keyed `${chainId}:${addressLower}`. */
+const customByAddress = new Map<string, CustomTokenIdentity>()
+/** Count of custom registrations per chain. */
+const customCountByChain = new Map<number, number>()
+/**
+ * Snapshot of the registry's pre-existing (built-in) entries per chain, keyed
+ * `${chainId}:${addressLower}`. Taken once per chain on first use; the only
+ * in-tree writer of the global registry is this tool, so later entries are
+ * all in customByAddress.
+ */
+const builtinAddressIndex = new Map<number, Map<string, CustomTokenIdentity>>()
+
+function addressKey(chainId: number, address: string): string {
+  return `${chainId}:${address.toLowerCase()}`
+}
+
+function builtinIndexFor(
+  chainId: number,
+  registry: ReturnType<typeof getGlobalRegistry>
+): Map<string, CustomTokenIdentity> {
+  let index = builtinAddressIndex.get(chainId)
+  if (index) return index
+  index = new Map()
+  const listed = registry.listTokens(chainId)
+  for (const token of Array.isArray(listed) ? listed : []) {
+    const key = addressKey(chainId, token.address)
+    if (!index.has(key)) index.set(key, asIdentity(token)!)
+  }
+  builtinAddressIndex.set(chainId, index)
+  return index
+}
+
+/** Current custom-token usage, for diagnostics and tests. */
+export function getCustomTokenQuotaUsage(): { total: number; byChain: Record<number, number> } {
+  return {
+    total: customBySymbol.size,
+    byChain: Object.fromEntries(customCountByChain),
+  }
+}
+
+/**
+ * Test-only: forget tracked custom registrations and the built-in snapshot.
+ * Does NOT remove entries from the SDK's global registry.
+ */
+export function _resetCustomTokenQuota(): void {
+  customBySymbol.clear()
+  customByAddress.clear()
+  customCountByChain.clear()
+  builtinAddressIndex.clear()
+}
+
+function assertQuotaAvailable(chainId: number): void {
+  const onChain = customCountByChain.get(chainId) ?? 0
+  if (onChain >= MAX_CUSTOM_TOKENS_PER_CHAIN) {
+    throw new Error(
+      `Custom token limit reached for chain ${chainId} ` +
+        `(${MAX_CUSTOM_TOKENS_PER_CHAIN} per chain). Nothing was registered. ` +
+        `Restart the server to clear in-process custom entries.`
+    )
+  }
+  if (customBySymbol.size >= MAX_CUSTOM_TOKENS_TOTAL) {
+    throw new Error(
+      `Custom token limit reached (${MAX_CUSTOM_TOKENS_TOTAL} total across all chains). ` +
+        `Nothing was registered. Restart the server to clear in-process custom entries.`
+    )
+  }
+}
+
+// ─── On-chain decimals verification (F2) ──────────────────────────────────
+
+/**
+ * Registry decimals are authoritative for every amount the server signs
+ * (send_payment, send_token, x402 caps). A caller-registered token must
+ * therefore never be able to claim decimals the contract does not report:
+ * registering a 6-decimal token as 18 would scale a "1" transfer by 10^12
+ * while the spend policy saw 1.
+ */
+export type DecimalsVerifier = (
+  _chainId: number,
+  _address: `0x${string}`,
+  _claimed: number
+) => Promise<void>
+
+const ERC20_DECIMALS_ABI = [
+  {
+    type: 'function',
+    name: 'decimals',
+    stateMutability: 'view',
+    inputs: [],
+    outputs: [{ name: '', type: 'uint8' }],
+  },
+] as const
+
+export const verifyDecimalsOnChain: DecimalsVerifier = async (chainId, address, claimed) => {
+  const config = getConfig()
+  if (config.chainId !== chainId) {
+    throw new Error(
+      `Custom tokens can only be registered on the configured chain ${config.chainId}, ` +
+        'where their decimals() can be verified on-chain.'
+    )
+  }
+  const publicClient = (getWallet() as unknown as {
+    publicClient?: { readContract?: (_args: unknown) => Promise<unknown> }
+  }).publicClient
+  let reported: unknown
   try {
-    const registry = getGlobalRegistry()
-    const symbol = input.symbol.toUpperCase()
-    const incoming: CustomTokenIdentity = {
-      symbol,
-      address: input.address,
-      decimals: input.decimals,
-      chainId: input.chainId,
-    }
-    const existing = registry.getToken(symbol, input.chainId)
-    const listed = registry.listTokens(input.chainId)
-    const tokensOnChain = Array.isArray(listed) ? listed : []
-    const existingByAddressToken = tokensOnChain.find(
-      (token) => token.address.toLowerCase() === incoming.address.toLowerCase()
+    if (typeof publicClient?.readContract !== 'function') throw new Error('no public client')
+    reported = await publicClient.readContract({
+      address,
+      abi: ERC20_DECIMALS_ABI,
+      functionName: 'decimals',
+    })
+  } catch {
+    throw new Error(
+      `Could not read decimals() from ${address}; refusing to register an unverifiable token.`
     )
-    const existingByAddress =
-      existingByAddressToken &&
-      existingByAddressToken.symbol.toUpperCase() !== symbol
-        ? asIdentity(existingByAddressToken)
-        : undefined
-    const decision = decideCustomTokenRegistration(
-      asIdentity(existing),
-      incoming,
-      existingByAddress
+  }
+  if (Number(reported) !== claimed) {
+    throw new Error(
+      `decimals ${claimed} does not match the ${String(reported)} decimals reported by ` +
+        `${address} on-chain. Refusing to register.`
     )
+  }
+}
 
-    if (decision === 'register') {
-      registry.addToken({
-        symbol,
-        address: input.address as `0x${string}`,
-        decimals: input.decimals,
-        chainId: input.chainId,
-        name: input.name ?? input.symbol,
-      })
-    }
+function decimalsVerifier(): DecimalsVerifier {
+  return decimalsVerifierOverride_() ?? verifyDecimalsOnChain
+}
 
-    const token = registry.getToken(symbol, input.chainId)
-    return {
-      content: [
-        textContent(
-          JSON.stringify({
-            success: true,
-            idempotent: decision === 'idempotent',
-            token,
-          })
-        ),
-      ],
-    }
+export async function handleAddCustomToken(input: AddCustomTokenInput): Promise<ToolResult> {
+  try {
+    // Re-assert the schema invariants: handlers can be called directly
+    // (tests, embedders) without going through the dispatcher's zod parse.
+    const checked = AddCustomTokenSchema.parse(input)
+    return await withKeyedLock(ADD_CUSTOM_TOKEN_LOCK, () => registerCustomToken(checked))
   } catch (error: unknown) {
     return {
       content: [textContent(formatError(error, 'add_custom_token'))],
@@ -232,10 +462,89 @@ export async function handleAddCustomToken(
   }
 }
 
+/** Decide, verify and write — always under ADD_CUSTOM_TOKEN_LOCK. */
+async function registerCustomToken(checked: z.infer<typeof AddCustomTokenSchema>): Promise<ToolResult> {
+  const registry = getGlobalRegistry()
+  const symbol = checked.symbol.toUpperCase()
+  const incoming: CustomTokenIdentity = {
+    symbol,
+    address: checked.address,
+    decimals: checked.decimals,
+    chainId: checked.chainId,
+  }
+  const existing = registry.getToken(symbol, checked.chainId)
+
+  const aKey = addressKey(checked.chainId, checked.address)
+  const byAddress =
+    customByAddress.get(aKey) ?? builtinIndexFor(checked.chainId, registry).get(aKey)
+  const existingByAddress =
+    byAddress && byAddress.symbol.toUpperCase() !== symbol ? byAddress : undefined
+
+  const decision = decideCustomTokenRegistration(
+    asIdentity(existing),
+    incoming,
+    existingByAddress
+  )
+
+  if (decision === 'register') {
+    assertQuotaAvailable(checked.chainId)
+    await decimalsVerifier()(
+      checked.chainId,
+      checked.address as `0x${string}`,
+      checked.decimals
+    )
+    registry.addToken({
+      symbol,
+      address: checked.address as `0x${string}`,
+      decimals: checked.decimals,
+      chainId: checked.chainId,
+      name: checked.name ?? checked.symbol,
+    })
+    // Record only after the registry write succeeded.
+    const sKey = `${checked.chainId}:${symbol}`
+    if (!customBySymbol.has(sKey)) {
+      customCountByChain.set(
+        checked.chainId,
+        (customCountByChain.get(checked.chainId) ?? 0) + 1
+      )
+    }
+    customBySymbol.set(sKey, incoming)
+    if (!customByAddress.has(aKey)) customByAddress.set(aKey, incoming)
+  }
+
+  const token = registry.getToken(symbol, checked.chainId)
+  return {
+    content: [
+      textContent(
+        JSON.stringify({
+          success: true,
+          idempotent: decision === 'idempotent',
+          token: token ? presentToken(token) : null,
+        })
+      ),
+    ],
+  }
+}
+
 // ─── list_chain_tokens ─────────────────────────────────────────────────────
 
 export const ListChainTokensSchema = z.object({
-  chainId: z.number().int().describe('Chain ID to list tokens for, e.g. 8453'),
+  chainId: z.number().int().min(1).describe('Chain ID to list tokens for, e.g. 8453'),
+  offset: z
+    .number()
+    .int()
+    .min(0)
+    .optional()
+    .describe('Number of tokens to skip (default 0)'),
+  limit: z
+    .number()
+    .int()
+    .min(1)
+    .max(LIST_TOKENS_MAX_LIMIT)
+    .optional()
+    .describe(
+      `Max tokens to return (default ${LIST_TOKENS_DEFAULT_LIMIT}, max ${LIST_TOKENS_MAX_LIMIT})`
+    ),
 })
 
 export type ListChainTokensInput = z.infer<typeof ListChainTokensSchema>
@@ -243,26 +552,60 @@ export type ListChainTokensInput = z.infer<typeof ListChainTokensSchema>
 export const listChainTokensTool = {
   name: 'list_chain_tokens',
   description:
-    'List all tokens registered for a given chain ID in the global token registry.',
+    'List tokens registered for a given chain ID in the global token registry, ' +
+    `paginated (offset/limit; limit defaults to ${LIST_TOKENS_DEFAULT_LIMIT}, max ` +
+    `${LIST_TOKENS_MAX_LIMIT}). Returns total and nextOffset (null on the last page).`,
   inputSchema: {
     type: 'object' as const,
     properties: {
-      chainId: { type: 'number', description: 'Chain ID (e.g. 8453 for Base Mainnet)' },
+      chainId: {
+        type: 'integer',
+        description: 'Chain ID (e.g. 8453 for Base Mainnet)',
+        minimum: 1,
+      },
+      offset: {
+        type: 'integer',
+        description: 'Number of tokens to skip (default 0)',
+        minimum: 0,
+      },
+      limit: {
+        type: 'integer',
+        description: `Max tokens to return (default ${LIST_TOKENS_DEFAULT_LIMIT})`,
+        minimum: 1,
+        maximum: LIST_TOKENS_MAX_LIMIT,
+      },
     },
     required: ['chainId'],
   },
 }
 
-export async function handleListChainTokens(
-  input: ListChainTokensInput
-): Promise<{ content: Array<{ type: 'text'; text: string }>; isError?: boolean }> {
+export async function handleListChainTokens(input: ListChainTokensInput): Promise<ToolResult> {
   try {
+    // Clamp even when called directly without the zod parse.
+    const rawOffset = Number.isSafeInteger(input.offset) ? (input.offset as number) : 0
+    const offset = Math.max(0, rawOffset)
+    const rawLimit = Number.isSafeInteger(input.limit)
+      ? (input.limit as number)
+      : LIST_TOKENS_DEFAULT_LIMIT
+    const limit = Math.min(LIST_TOKENS_MAX_LIMIT, Math.max(1, rawLimit))
+
     const registry = getGlobalRegistry()
-    const tokens = registry.listTokens(input.chainId)
+    const listed = registry.listTokens(input.chainId)
+    const all = Array.isArray(listed) ? listed : []
+    const page = all.slice(offset, offset + limit)
+    const end = offset + page.length
     return {
       content: [
         textContent(
-          JSON.stringify({ chainId: input.chainId, count: tokens.length, tokens })
+          JSON.stringify({
+            chainId: input.chainId,
+            total: all.length,
+            offset,
+            limit,
+            count: page.length,
+            nextOffset: end < all.length ? end : null,
+            tokens: page.map(presentToken),
+          })
         ),
       ],
     }

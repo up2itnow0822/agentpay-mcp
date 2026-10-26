@@ -22,6 +22,7 @@ import {
   type CallToolRequest,
 } from '@modelcontextprotocol/sdk/types.js';
 import packageJson from '../package.json';
+import { runSpendIntentsCli } from './cli/spend-intents.js';
 
 const PACKAGE_VERSION = packageJson.version;
 
@@ -43,6 +44,20 @@ function printHelp(): void {
       '  CHAIN_ID                Chain id, defaults to 8453 (Base Mainnet)',
       '  SESSION_TTL_SECONDS     Session TTL, defaults to 3600',
       '',
+      'Safety (see SECURITY.md):',
+      '  AGENTPAY_POLICY_DAILY_LIMIT_ETH / _PER_TX_CAP_ETH / _ALLOWED_RECIPIENTS',
+      '                          Immutable operator spend policy (required unless',
+      '                          AGENTPAY_ALLOW_UNPOLICED_SPEND=1)',
+      '  AGENTPAY_X402_MAX_PAYMENT  Operator ceiling on every x402 payment',
+      '  AGENTPAY_STATE_DIR      Journal spend intents so locks survive restarts',
+      '',
+      'Operator commands:',
+      '  agentpay-mcp spend-intents list                 List locked (ambiguous) spend intents and their id: handles',
+      '  agentpay-mcp spend-intents resolve <id> settled    Value moved: clear the lock; a keyed intent\'s',
+      '                                                     idempotencyKey is retired for good',
+      '  agentpay-mcp spend-intents resolve <id> unsettled  Nothing moved: clear the lock; a retry may pay',
+      '                          (stop the server first: one process per state directory)',
+      '',
       'When no metadata flag is provided, the server starts on stdio for MCP clients.',
       '',
     ].join('\n')
@@ -51,6 +66,13 @@ function printHelp(): void {
 
 function handleCliMetadataFlag(argv: string[]): void {
   const args = argv.slice(2);
+
+  // Operator reconciliation of locked spend intents (journal mode only).
+  // Deliberately a local CLI, never an MCP tool: the constrained agent must
+  // not be able to unlock its own ambiguous payments.
+  if (args[0] === 'spend-intents') {
+    process.exit(runSpendIntentsCli(args.slice(1)));
+  }
 
   if (args.includes('--version') || args.includes('-v')) {
     process.stdout.write(`${PACKAGE_VERSION}\n`);
@@ -72,7 +94,14 @@ import { getWalletInfoTool, handleGetWalletInfo, GetWalletInfoSchema } from './t
 import { checkSpendLimitTool, handleCheckSpendLimit, CheckSpendLimitSchema } from './tools/wallet.js';
 import { queueApprovalTool, handleQueueApproval, QueueApprovalSchema } from './tools/wallet.js';
 import { sendPaymentTool, handleSendPayment, SendPaymentSchema } from './tools/payments.js';
-import { x402PayTool, handleX402Pay, X402PaySchema } from './tools/x402.js';
+import {
+  x402PayTool,
+  handleX402Pay,
+  X402PaySchema,
+  x402QuoteTool,
+  handleX402Quote,
+  X402QuoteSchema,
+} from './tools/x402.js';
 import { getTransactionHistoryTool, handleGetTransactionHistory, GetTransactionHistorySchema } from './tools/history.js';
 
 // ─── Tool imports (v1.1.0 — x402 V2 session payments) ─────────────────────
@@ -126,6 +155,7 @@ import {
   checkBudgetTool,
   handleCheckBudget,
   CheckBudgetSchema,
+  operatorPolicyError,
 } from './tools/budget.js';
 
 import {
@@ -179,6 +209,7 @@ const ALL_TOOLS = [
   checkSpendLimitTool,
   queueApprovalTool,
   x402PayTool,
+  x402QuoteTool,
   getTransactionHistoryTool,
   // v1.1.0 — x402 V2 session tools
   x402SessionStartTool,
@@ -263,6 +294,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request: CallToolRequest)
       case 'x402_pay': {
         const input = X402PaySchema.parse(args);
         return handleX402Pay(input);
+      }
+
+      case 'x402_quote': {
+        const input = X402QuoteSchema.parse(args);
+        return handleX402Quote(input);
       }
 
       case 'get_transaction_history': {
@@ -435,6 +471,15 @@ async function main(): Promise<void> {
   });
 
   await server.connect(transport);
+
+  // Surface spend-policy configuration problems at startup, loudly.
+  const policyError = operatorPolicyError();
+  if (policyError) {
+    process.stderr.write(
+      `AgentPay MCP: operator spend policy is INVALID (${policyError}). ` +
+        'All value-moving tools will refuse until AGENTPAY_POLICY_* is fixed.\n'
+    );
+  }
 
   // Log to stderr (not stdout — stdout is reserved for MCP protocol)
   process.stderr.write(

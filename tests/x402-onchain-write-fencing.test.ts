@@ -193,7 +193,7 @@ import { _resetSpendIntentStore } from '../src/utils/spend-intent.js';
 
 // ─── Hostile 402 server ────────────────────────────────────────────────────
 
-function serve402(payTo: unknown, extra: Record<string, unknown> = {}): void {
+function serve402(payTo: unknown, extra: Record<string, unknown> = {}, paidStatus = 200): void {
   const body = JSON.stringify({
     x402Version: 1,
     resource: { url: PAY_INPUT.url },
@@ -217,7 +217,7 @@ function serve402(payTo: unknown, extra: Record<string, unknown> = {}): void {
       const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
       const response = call === 1
         ? new Response(body, { status: 402, headers: { 'content-type': 'application/json' } })
-        : new Response('paid content', { status: 200 });
+        : new Response(paidStatus === 200 ? 'paid content' : 'server error', { status: paidStatus });
       Object.defineProperty(response, 'url', { value: url });
       return response;
     })
@@ -229,6 +229,8 @@ const PAY_INPUT = {
   method: 'GET' as const,
   timeout_ms: 30000,
   skip_session_check: true,
+  max_payment_eth: '10',
+  pay_to: PAYEE,
 };
 
 const SESSION_INPUT = {
@@ -236,6 +238,8 @@ const SESSION_INPUT = {
   method: 'GET' as const,
   scope: 'prefix' as const,
   timeout_ms: 30000,
+  max_payment_eth: '10',
+  pay_to: PAYEE,
 };
 
 describe('x402 on-chain write fencing (real agentwallet-sdk)', () => {
@@ -298,6 +302,23 @@ describe('x402 on-chain write fencing (real agentwallet-sdk)', () => {
     });
   }
 
+  it('a paid request answered 500 fails closed and locks host + payee (round-2 F1)', async () => {
+    serve402(PAYEE, {}, 500);
+
+    const first = await handleX402Pay(PAY_INPUT);
+    expect(first.isError).toBe(true);
+    expect(first.content[0]!.text).toContain('failed after settlement');
+    expect(writes).toHaveLength(2); // fee + purchase really moved
+
+    // Host alias on another port, and the same payee behind another host.
+    serve402(PAYEE);
+    const alias = await handleX402Pay({ ...PAY_INPUT, url: 'https://merchant.example.com.:8443/other' });
+    const samePayee = await handleX402Pay({ ...PAY_INPUT, url: 'https://unrelated.example.org/x' });
+    expect(alias.content[0]!.text).toContain('New x402 payments to merchant.example.com are locked');
+    expect(samePayee.content[0]!.text).toContain(`New x402 payments to payee ${PAYEE.toLowerCase()} are locked`);
+    expect(writes).toHaveLength(2); // nothing further reached the chain
+  });
+
   it('a hostile amount is rejected before any write, too', async () => {
     serve402(PAYEE, { amount: '1000000 ' });
 
@@ -333,4 +354,134 @@ describe('x402 on-chain write fencing (real agentwallet-sdk)', () => {
     expect(text).toContain('Offered:   not parseable');
     expect(text).not.toContain('Schemes:');
   });
+
+  // ─── F5: the zero address is never a payable recipient ──────────────────
+  it('x402_pay: a zero-address payTo produces zero on-chain writes (F5)', async () => {
+    const ZERO = '0x0000000000000000000000000000000000000000';
+    serve402(ZERO);
+    const result = await handleX402Pay({ ...PAY_INPUT, pay_to: PAYEE });
+    expect(writes).toEqual([]);
+    expect(result.isError).toBe(true);
+    expect(result.content[0]!.text).toContain('did not sign');
+  });
+
+  it('x402_session_start: a zero-address payTo produces zero on-chain writes (F5)', async () => {
+    serve402('0x0000000000000000000000000000000000000000');
+    const result = await handleX402SessionStart(SESSION_INPUT);
+    expect(writes).toEqual([]);
+    expect(result.isError).toBe(true);
+  });
+
+  it('refuses to approve the zero address as pay_to before any request is made (F5)', async () => {
+    serve402(PAYEE);
+    const result = await handleX402Pay({
+      ...PAY_INPUT,
+      pay_to: '0x0000000000000000000000000000000000000000',
+    });
+    expect(writes).toEqual([]);
+    expect(result.isError).toBe(true);
+    expect(vi.mocked(globalThis.fetch)).not.toHaveBeenCalled();
+  });
+
+  // ─── F3: the signature is bound to caller-approved terms ────────────────
+  it('a 402 naming a different payee than the approved pay_to produces zero writes (F3)', async () => {
+    serve402('0x2222222222222222222222222222222222222222');
+    const result = await handleX402Pay(PAY_INPUT);
+    expect(writes).toEqual([]);
+    expect(result.isError).toBe(true);
+    expect(result.content[0]!.text).toContain('does not match the approved pay_to');
+  });
+
+  it('a 402 above the mandatory cap produces zero writes (F3)', async () => {
+    serve402(PAYEE, { amount: '1000000' }); // 1 USDC
+    const result = await handleX402Pay({ ...PAY_INPUT, max_payment_eth: '0.5' });
+    expect(writes).toEqual([]);
+    expect(result.isError).toBe(true);
+    expect(result.content[0]!.text).toContain('exceeds max_payment_eth cap');
+  });
+
+  it('a 402 offering a different asset than the approved one produces zero writes (F3)', async () => {
+    serve402(PAYEE);
+    const result = await handleX402Pay({
+      ...PAY_INPUT,
+      asset: '0x50c5725949A6F0c72E6C4a641F24049A917DB0Cb', // DAI on Base
+    });
+    expect(writes).toEqual([]);
+    expect(result.isError).toBe(true);
+    expect(result.content[0]!.text).toContain('does not match the approved asset');
+  });
+
+  it('the operator ceiling clamps a larger caller cap (F3)', async () => {
+    process.env.AGENTPAY_X402_MAX_PAYMENT = '0.5'
+    try {
+      serve402(PAYEE, { amount: '1000000' });
+      const result = await handleX402Pay({ ...PAY_INPUT, max_payment_eth: '100' });
+      expect(writes).toEqual([]);
+      expect(result.isError).toBe(true);
+      expect(result.content[0]!.text).toContain('exceeds max_payment_eth cap');
+    } finally {
+      delete process.env.AGENTPAY_X402_MAX_PAYMENT
+    }
+  });
+
+  it('x402_pay and x402_session_start refuse to run without a cap or pay_to (F3)', async () => {
+    serve402(PAYEE);
+    const noCap = await handleX402Pay({ ...PAY_INPUT, max_payment_eth: undefined as unknown as string });
+    const noPayee = await handleX402Pay({ ...PAY_INPUT, pay_to: undefined as unknown as string });
+    const sessionNoCap = await handleX402SessionStart({
+      ...SESSION_INPUT,
+      max_payment_eth: undefined as unknown as string,
+    });
+    for (const result of [noCap, noPayee, sessionNoCap]) {
+      expect(result.isError).toBe(true);
+    }
+    expect(writes).toEqual([]);
+    expect(vi.mocked(globalThis.fetch)).not.toHaveBeenCalled();
+  });
+
+  // ─── F3 review follow-up: asset is always bound; cap covers the fee ──────
+  const WETH_BASE = '0x4200000000000000000000000000000000000006';
+
+  it('an unnamed asset binds to USDC: a WETH offer under a "1" cap produces zero writes', async () => {
+    serve402(PAYEE, { asset: WETH_BASE, amount: '1000000000000000000' });
+    const result = await handleX402Pay({ ...PAY_INPUT, max_payment_eth: '1' });
+    expect(writes).toEqual([]);
+    expect(result.isError).toBe(true);
+    expect(result.content[0]!.text).toContain('does not match the approved asset');
+  });
+
+  it('the USDC-denominated operator ceiling refuses any other asset', async () => {
+    process.env.AGENTPAY_X402_MAX_PAYMENT = '1';
+    try {
+      serve402(PAYEE, { asset: WETH_BASE, amount: '1000000000000000000' });
+      const result = await handleX402Pay({ ...PAY_INPUT, max_payment_eth: '1', asset: WETH_BASE });
+      expect(writes).toEqual([]);
+      expect(result.isError).toBe(true);
+      expect(result.content[0]!.text).toContain('denominated in USDC');
+    } finally {
+      delete process.env.AGENTPAY_X402_MAX_PAYMENT;
+    }
+  });
+
+  it('the cap bounds principal plus protocol fee', async () => {
+    serve402(PAYEE, { amount: '1000000' }); // 1 USDC + 0.0077 fee
+    const over = await handleX402Pay({ ...PAY_INPUT, max_payment_eth: '1' });
+    expect(writes).toEqual([]);
+    expect(over.isError).toBe(true);
+
+    _resetSpendIntentStore();
+    serve402(PAYEE, { amount: '990000' }); // debit 997,623 ≤ 1,000,000
+    const under = await handleX402Pay({ ...PAY_INPUT, max_payment_eth: '1' });
+    expect(under.isError).toBeUndefined();
+    expect(writes).toHaveLength(2);
+  });
+
+  it('local fee math matches the SDK', async () => {
+    const { x402DebitAmount } = await import('agentwallet-sdk');
+    const { x402Debit } = await import('../src/utils/payment-cap.js');
+    for (const amount of [0n, 1n, 129n, 990000n, 1000000n, 10n ** 24n]) {
+      expect(x402Debit(amount)).toBe(x402DebitAmount(amount));
+    }
+  });
 });
+

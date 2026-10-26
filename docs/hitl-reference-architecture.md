@@ -75,27 +75,52 @@ agent = CodeAgent(
       "args": ["agentpay-mcp"],
       "env": {
         "AGENT_PRIVATE_KEY": "0x...",
-        "AGENT_WALLET_ADDRESS": "0x..."
+        "AGENT_WALLET_ADDRESS": "0x...",
+        "AGENTPAY_POLICY_PER_TX_CAP_ETH": "0.004",
+        "AGENTPAY_POLICY_DAILY_LIMIT_ETH": "0.04",
+        "AGENTPAY_POLICY_ALLOWED_RECIPIENTS": "0x...",
+        "AGENTPAY_X402_MAX_PAYMENT": "1"
       }
     }
   }
 }
 ```
 
-The HITL behavior is configured via `set_spend_policy` tool:
+The operator policy above is read from the server environment and cannot be changed through MCP. Since v5.0.0, AgentPay MCP refuses every spend when no operator policy is configured (unless the operator sets `AGENTPAY_ALLOW_UNPOLICED_SPEND=1`).
+
+The agent, or the host on its behalf, can narrow that policy further for a task with the `set_spend_policy` tool:
 
 ```json
 {
   "tool": "set_spend_policy",
   "arguments": {
-    "perTxCapEth": "0.004",
-    "dailyLimitEth": "0.04",
-    "requireHumanApproval": true,
-    "humanApprovalThreshold": "0.0004",
+    "scopeKey": "research-task",
+    "perTxCapEth": "0.001",
+    "dailyLimitEth": "0.01",
     "allowedRecipients": ["0x..."]
   }
 }
 ```
+
+`set_spend_policy` can only tighten. A call that raises a limit, omits a limit the scope already has, or adds a recipient outside the allowlist in force is refused, and earlier layers keep their rolling-window accounting. Loosening requires an operator restart.
+
+Each paid call names the approved terms. Read them first with `x402_quote` (no payment), get the human's approval, then pay:
+
+```json
+{
+  "tool": "x402_pay",
+  "arguments": {
+    "url": "https://api.example.com/premium",
+    "max_payment_eth": "0.50",
+    "pay_to": "0x<payee approved from x402_quote>",
+    "network": "base:8453"
+  }
+}
+```
+
+A 402 that names a different payee, network, or asset, or asks for more than `max_payment_eth`, is refused before anything is signed.
+
+The human-approval threshold itself is not a `set_spend_policy` setting. In AgentPay MCP the human gates are (1) the host or human approving the quoted terms before `x402_pay` is called, (2) payments above the in-process per-transaction cap being refused as drafts, and (3) transactions above the AgentAccountV2 on-chain limits being queued for owner approval through `queue_approval`.
 
 ## Why This Architecture Works
 
@@ -103,20 +128,13 @@ The HITL behavior is configured via `set_spend_policy` tool:
 
 Not every payment needs human review. The threshold model lets agents handle routine micropayments autonomously while escalating significant transactions. This preserves agent utility without sacrificing oversight.
 
-### 2. On-Chain Enforcement
+### 2. Layered Enforcement
 
-The spending caps aren't in application code — they're in the AgentAccountV2 smart contract. Even if the agent, the MCP server, or the host application is compromised, the on-chain limits hold. The human-approval gate is the last line of defense, not the only one.
+The `set_spend_policy` and operator caps are enforced in the MCP server process, and the agent cannot loosen them. The tamper-resistant layer is the AgentAccountV2 smart contract: limits the wallet owner configures directly on the contract hold even if the agent, the MCP server, or the host application is compromised. Configure both; see [security-posture.md](security-posture.md) for what each layer guarantees.
 
 ### 3. Audit Trail for Compliance
 
-Every payment attempt (approved, rejected, or auto-approved) is logged with:
-- Merchant/recipient address
-- Amount requested
-- Policy evaluation result
-- Human decision (if applicable)
-- On-chain transaction hash (if executed)
-
-This gives compliance teams the artifact trail they need for SOC 2, financial audits, and regulatory reporting.
+AgentPay MCP records on-chain AgentAccountV2 events and, in memory, the x402 settlements made by the running process (`get_transaction_history`). It does not log rejected attempts, policy evaluation results, or human decisions; capture those in the host application or a logging gateway in front of the MCP server. See [Audit Logging](security-posture.md#audit-logging) for exactly what is and is not recorded.
 
 ## MCP 2026 Roadmap Alignment
 

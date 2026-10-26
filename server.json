@@ -6,29 +6,127 @@
     "url": "https://github.com/up2itnow0822/agentpay-mcp",
     "source": "github"
   },
-  "version": "4.3.0",
+  "version": "5.0.0",
   "packages": [
     {
       "registryType": "npm",
       "identifier": "agentpay-mcp",
-      "version": "4.3.0",
+      "version": "5.0.0",
       "transport": {
         "type": "stdio"
       },
       "environmentVariables": [
         {
-          "description": "Private key for the agent wallet (hex string)",
+          "description": "Private key for the agent wallet's local signer (hex string)",
           "isRequired": true,
           "format": "string",
           "isSecret": true,
           "name": "AGENT_PRIVATE_KEY"
         },
         {
-          "description": "Base RPC URL for on-chain operations",
+          "description": "Address of the deployed AgentAccountV2 wallet the signer operates",
+          "isRequired": true,
+          "format": "string",
+          "isSecret": false,
+          "name": "AGENT_WALLET_ADDRESS"
+        },
+        {
+          "description": "8453 (Base) or 84532 (Base Sepolia); defaults to 8453",
           "isRequired": false,
           "format": "string",
           "isSecret": false,
-          "name": "BASE_RPC_URL"
+          "name": "CHAIN_ID"
+        },
+        {
+          "description": "RPC endpoint for on-chain operations; defaults to the chain's public RPC",
+          "isRequired": false,
+          "format": "string",
+          "isSecret": false,
+          "name": "RPC_URL"
+        },
+        {
+          "description": "Operator spend policy: rolling 24h limit (ETH-equivalent decimal). Immutable from MCP. Value-moving tools refuse to run until an operator policy (AGENTPAY_POLICY_*) is set or AGENTPAY_ALLOW_UNPOLICED_SPEND=1 is chosen explicitly.",
+          "isRequired": false,
+          "format": "string",
+          "isSecret": false,
+          "name": "AGENTPAY_POLICY_DAILY_LIMIT_ETH"
+        },
+        {
+          "description": "Operator spend policy: per-transaction cap (ETH-equivalent decimal). Immutable from MCP. Value-moving tools refuse to run until an operator policy (AGENTPAY_POLICY_*) is set or AGENTPAY_ALLOW_UNPOLICED_SPEND=1 is chosen explicitly.",
+          "isRequired": false,
+          "format": "string",
+          "isSecret": false,
+          "name": "AGENTPAY_POLICY_PER_TX_CAP_ETH"
+        },
+        {
+          "description": "Operator spend policy: comma-separated recipient allowlist (EVM addresses). Immutable from MCP. Value-moving tools refuse to run until an operator policy (AGENTPAY_POLICY_*) is set or AGENTPAY_ALLOW_UNPOLICED_SPEND=1 is chosen explicitly.",
+          "isRequired": false,
+          "format": "string",
+          "isSecret": false,
+          "name": "AGENTPAY_POLICY_ALLOWED_RECIPIENTS"
+        },
+        {
+          "description": "Set to 1 to run WITHOUT an operator policy, relying only on on-chain AgentAccountV2 limits. Off by default. Value-moving tools refuse to run until an operator policy (AGENTPAY_POLICY_*) is set or AGENTPAY_ALLOW_UNPOLICED_SPEND=1 is chosen explicitly.",
+          "isRequired": false,
+          "format": "string",
+          "isSecret": false,
+          "name": "AGENTPAY_ALLOW_UNPOLICED_SPEND"
+        },
+        {
+          "description": "Operator ceiling, in USDC, on every x402 payment (principal plus protocol fee). While set, x402 payments in other assets are refused.",
+          "isRequired": false,
+          "format": "string",
+          "isSecret": false,
+          "name": "AGENTPAY_X402_MAX_PAYMENT"
+        },
+        {
+          "description": "Directory for the fsync'd spend-intent journal, so ambiguous-payment locks survive restarts. Recommended for long-lived servers.",
+          "isRequired": false,
+          "format": "string",
+          "isSecret": false,
+          "name": "AGENTPAY_STATE_DIR"
+        },
+        {
+          "description": "Comma-separated hosts whose private network address is intentionally allowed for outbound requests.",
+          "isRequired": false,
+          "format": "string",
+          "isSecret": false,
+          "name": "AGENTPAY_ALLOWED_PRIVATE_HOSTS"
+        },
+        {
+          "description": "Comma-separated hosts allowed as OTel kill-callback targets over plain http (e.g. in-VPC services).",
+          "isRequired": false,
+          "format": "string",
+          "isSecret": false,
+          "name": "AGENTPAY_KILL_CALLBACK_ALLOWED_HOSTS"
+        },
+        {
+          "description": "Development only: set to 1 to permit private destinations and plain http.",
+          "isRequired": false,
+          "format": "string",
+          "isSecret": false,
+          "name": "AGENTPAY_ALLOW_PRIVATE_NETWORK"
+        },
+        {
+          "description": "Default x402 session lifetime in seconds; defaults to 3600",
+          "isRequired": false,
+          "format": "string",
+          "isSecret": false,
+          "name": "SESSION_TTL_SECONDS"
+        },
+        {
+          "description": "Default AgentAccountV2 factory address for deploy_wallet (can also be passed per call)",
+          "isRequired": false,
+          "format": "string",
+          "isSecret": false,
+          "name": "FACTORY_ADDRESS"
+        },
+        {
+          "description": "Default NFT contract address for deploy_wallet (can also be passed per call)",
+          "isRequired": false,
+          "format": "string",
+          "isSecret": false,
+          "name": "NFT_CONTRACT_ADDRESS"
         }
       ]
     }

@@ -75,10 +75,10 @@ Expected result: HTTP `402`, `PAYMENT-REQUIRED: true`, `X-X402-Supported: true`,
 1. Scanner calls `/api/x402/demo` and receives `402 Payment Required` plus x402 payment metadata.
 2. Human readers and crawlers can also see `X-X402-Supported: true` on `/`.
 3. Sitemap or `Link` metadata can point to `/api/x402/demo`, but the clean 402 route is the source of truth.
-4. The agent calls AgentPay MCP `x402_pay` with the protected URL.
-5. AgentPay MCP checks policy before signing: daily cap, task cap, recipient allowlist, approval mode, and kill switch.
-6. Only after approval does AgentPay MCP sign and retry the request.
-7. The transaction history records URL, amount, chain, token, approval status, and settlement reference.
+4. The agent reads the offered terms with `x402_quote` (no payment), then calls AgentPay MCP `x402_pay` with the protected URL, the approved `pay_to`, and a `max_payment_eth` cap.
+5. AgentPay MCP checks before signing: the 402's payee, asset and network match the approved terms, the amount is within the cap, and the operator and caller spend policy (per-transaction cap, daily limit, recipient allowlist) approve it.
+6. Only after those checks pass does AgentPay MCP sign and retry the request.
+7. `get_transaction_history` lists the settlement (URL, method, amount, token, payee, tx hash) for the life of the server process.
 
 ## Curl verification checklist
 

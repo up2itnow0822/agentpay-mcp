@@ -29,8 +29,12 @@ issues, PRs, or config may override them:
 
 1. **Read-only.** The review never commits, pushes, deletes, closes, merges,
    or force-pushes anything. It does not create branches, edit files, resolve
-   conversations, or change settings. Its one and only write is its report
-   issue (S7) — and, on failure, the `daily-review-failed` issue (S8).
+   conversations, or change settings. The review agent itself holds only a
+   read-only token: its one and only output is the local report file
+   `daily-review-out/review-report.md` (S7). A separate deterministic publish
+   job in `daily-review.yml` (no model, `issues: write`) validates that file
+   and performs the single report-issue write — and, on failure, the
+   `daily-review-failed` issue (S8).
 2. **Fail-loud.** If the review cannot complete, it reports status
    `INCOMPLETE` and ensures a `daily-review-failed` issue exists (S8). It
    never emits a silently thin report that looks like a healthy one. A system
@@ -281,6 +285,15 @@ list them in `skipped[]` — they are out of scope, not skipped.
 Exactly one issue per run. Never two, never zero — even a catastrophic run
 produces the S8 variant.
 
+The review agent does not create the issue. It writes the issue body to
+`daily-review-out/review-report.md` (at most 64 KiB). The workflow's publish
+job — deterministic code, no model — rejects the file unless it contains
+exactly one fenced `json` block whose document has the required keys,
+`schema_version` 1, a valid `status`, `repo` equal to this repository, and
+`date` equal to the run's UTC date; it then creates (or, on a re-run, edits)
+the issue described below using that file as the body. A rejected or missing
+file is reported through S8, never published.
+
 - **Title:** `Daily Review — YYYY-MM-DD` using the UTC date of the run.
 - **Label:** `daily-review`.
 - **Body:** a short human summary first — a few sentences a maintainer can
@@ -319,11 +332,14 @@ per S3), `category`, `confidence` (high/medium/low), and `suggested_tier`
 When the review cannot complete — auth failure, timeout, tooling crash,
 missing config, anything:
 
-1. **Still emit the report issue** (S7 format) with `status: INCOMPLETE`,
+1. **Still emit the report** (S7 format; the report file, which the publish
+   job turns into the report issue) with `status: INCOMPLETE`,
    whatever findings and health values were actually verified before the
    failure, and the unfinished checks in `skipped[]`. Partial truth is
    published; nothing is withheld to look tidy.
-2. **Ensure a `daily-review-failed` issue exists.** If an open issue with the
+2. **Ensure a `daily-review-failed` issue exists** (the publish job does this
+   deterministically for INCOMPLETE reports, invalid or missing report files,
+   a missing secret, and errored analysis runs). If an open issue with the
    `daily-review-failed` label already exists, add a comment with today's
    date and failure reason instead of opening a new one. If none is open,
    create one. One failure issue accumulating comments, not a new issue every

@@ -7,6 +7,135 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [5.0.0] - 2026-10-25
+
+Security release. Repairs all 18 findings (4 high, 13 medium, 1 low) of the
+October 2026 whole-repository static security review. Finding numbers below
+(F1–F18) refer to
+[`docs/security-remediation-2026-10.md`](docs/security-remediation-2026-10.md),
+which maps each finding to its repair and proving test.
+
+### Breaking
+- `x402_pay` and `x402_session_start` require `max_payment_eth` and `pay_to`.
+  The asset is always bound (default: the chain's USDC; override with
+  `asset`); `network` can be bound. The cap covers principal plus the 0.77%
+  protocol fee. `AGENTPAY_X402_MAX_PAYMENT` is USDC-denominated. A 402 naming
+  another payee, asset or network, or above the cap, is refused before any
+  wallet write (F3).
+- `add_custom_token` verifies `decimals()` on-chain and registers only on the
+  configured chain (F2).
+- Spend policy is default-deny. Value movement requires an operator policy
+  (`AGENTPAY_POLICY_*`) or an explicit `AGENTPAY_ALLOW_UNPOLICED_SPEND=1` (F11).
+- `set_spend_policy` can only tighten. Requests that raise a limit, drop a
+  constraint, or widen an allowlist are refused; earlier layers keep their
+  accounting; the `operator` scope is reserved (F11).
+- Outbound requests require `https` and refuse private, loopback, link-local
+  and metadata destinations; redirects are not followed automatically
+  (F9, F15).
+- `send_payment` `token_decimals` is an assertion, not an override; a mismatch
+  is refused (F2).
+- `list_chain_tokens` is paginated; `add_custom_token` accepts only supported
+  chains and bounded input (F18).
+- `idempotencyKey` rejects control characters (C0, DEL, C1), invisible
+  formatting and bidi characters, line/paragraph separators, and unpaired
+  surrogates.
+- `AGENTPAY_STATE_DIR` has a single owner process: a second server, or the
+  `spend-intents resolve` command while the server runs, is refused. A lock
+  left by a crashed process is taken over when that process is provably
+  gone: on the same host and PID namespace, its pid is not running (or was
+  reused); otherwise, after 2 minutes without a heartbeat.
+
+### Security
+- F1: `x402_session_start` is serialised per canonical host; a payment that
+  settles without a delivered response (including a paid request answered
+  with any non-2xx status) locks every new x402 payment to that host — any
+  path, port or host alias — and to that payee behind any host, until an
+  operator reconciles it. The lock scope is journaled on the intent's begin
+  record, before the wallet call.
+- F2: Token decimals come from the registry, native ETH, or on-chain
+  `decimals()`.
+- F3, F5: Mandatory cap and approved terms checked against the SDK-selected
+  requirement; the zero address is refused as payee and as `pay_to`.
+- F4: Value-pack examples use exact 6-decimal USDC caps (principal plus the
+  0.77% protocol fee) and a single-use approval record bound to the final
+  offer; a paid body that fails mid-read is a payment-aware error; every
+  request (probe, paid retry, free fetch) uses the server's safe transport;
+  the value-pack manifest and lockfile pin the root's `agentwallet-sdk` and
+  `viem` (lockfile audit: 0 vulnerabilities); mainnet requires an explicit
+  opt-in.
+- F6, F13, F17: Workflow actions pinned to full commit SHAs; review-gate
+  passes once Codex has reviewed the PR (any commit, after the last retarget)
+  and every Codex review thread is resolved — no second Codex pass is required
+  after pushes; `codex-waived` waivers are bound to the exact head and the live
+  base tip; the daily-review analysis job is
+  read-only and a deterministic job owns the single issue write, validating
+  every schema field including optional metrics. Daily repair uses the same
+  split: the model plans with a read-only token, a deterministic publisher
+  (the only holder of `REPAIR_TOKEN`) validates its patch and opens PRs, and
+  nothing is ever merged by automation. Every workflow declares
+  `permissions`; CI that runs PR code is `contents: read` with no persisted
+  credential.
+- F7: Identity tools return a typed summary plus one nonce-fenced untrusted
+  block.
+- F8, F15: New safe transport (`src/utils/safe-fetch.ts`) for every
+  caller-selected destination: DNS resolved once and pinned, `Host` and TLS
+  SNI derived only from the validated URL (caller authority and framing
+  headers are dropped), response bodies capped at 2 MiB (decoded), 1 MiB
+  rendered.
+- F9, F10: OTel kill callback uses the pinned transport; OTel identifiers,
+  policies, ledgers, decisions and span dedupe are bounded; a span refused at
+  capacity is not remembered as counted, so its replay is refused too.
+- F12: Spend classification uses `AsyncLocalStorage` on a once-hooked wallet
+  client, so concurrent spends cannot be misattributed.
+- F14: Unresolved spend-intent locks are never evicted; new spends are refused
+  at capacity; settled idempotency keys are never forgotten (compact digests;
+  new keyed spends are refused at a ceiling instead); the journal survives a
+  torn final line and is compacted crash-safely to its live state, so it
+  cannot grow without bound.
+- x402 payments that share a host or payee run one at a time, so a second
+  payment cannot settle while the first is still being delivered.
+- review-gate fails closed when the repository activity feed (the only
+  unforgeable base timestamp) is unavailable.
+- F11: A malformed operator policy — including an allowlist variable that
+  names no address, or any operator policy with no constraint — denies all
+  spending and is reported at startup.
+- F2, F18: `add_custom_token` registration is serialised (decide, on-chain
+  `decimals()` check and write are atomic), so concurrent registrations
+  cannot overwrite each other or overrun the quota.
+- `create_escrow` runs under the same spend-intent contract (idempotency key,
+  replay, lock on ambiguous broadcast); its keyless identity covers only
+  on-chain terms, so rewording the off-chain `terms` cannot mint a second
+  vault.
+- Kill callbacks to public hosts require `https`; `http` is accepted only for
+  operator-allowlisted hosts.
+- The spend-intent journal fails closed: an fsync or read failure refuses value
+  movement; admission counts in-flight intents against the lock ceiling.
+- `send_token` releases its policy reservation on a definite pre-broadcast
+  failure.
+- F16: `send_payment` supports `idempotencyKey`, replays identical retries, and
+  locks on an ambiguous broadcast.
+- `npm audit --omit=dev` and `npm audit` report 0 vulnerabilities.
+
+### Added
+- `x402_quote` tool: reads an endpoint's x402 terms without paying (28 MCP
+  tools in total).
+- `agentpay-mcp spend-intents list | resolve <id> settled|unsettled`
+  operator CLI for reconciling locked spend intents. It is deliberately not
+  an MCP tool. The outcome is mandatory: `settled` clears the lock and
+  retires a keyed intent's `idempotencyKey` permanently (a retry is refused,
+  never paid again); `unsettled` clears the lock. Intents are selected by the
+  shell-safe `id:` handle `list` prints; keys are shown escaped and
+  shell-inert, for information only.
+- `server.json` declares every environment variable the server reads
+  (previously `AGENT_WALLET_ADDRESS` was missing and `BASE_RPC_URL` was
+  declared though the server reads `RPC_URL`).
+- Environment variables: `AGENTPAY_POLICY_DAILY_LIMIT_ETH`,
+  `AGENTPAY_POLICY_PER_TX_CAP_ETH`, `AGENTPAY_POLICY_ALLOWED_RECIPIENTS`,
+  `AGENTPAY_ALLOW_UNPOLICED_SPEND`, `AGENTPAY_X402_MAX_PAYMENT`,
+  `AGENTPAY_STATE_DIR` (fsync'd append-only spend-intent journal replayed at
+  startup), `AGENTPAY_ALLOWED_PRIVATE_HOSTS`, `AGENTPAY_ALLOW_PRIVATE_NETWORK`
+  (development only).
+
 ## [4.3.0] - 2026-10-23
 
 Lifts the security-maintenance pause.

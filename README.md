@@ -8,7 +8,7 @@ AgentPay MCP is a stdio Model Context Protocol server for x402 payments and
 wallet operations. It exposes Agent Wallet SDK functions as MCP tools and loads
 a caller-controlled signing key from the local process environment.
 
-The current npm package is `agentpay-mcp` v4.3.0.
+The current npm package is `agentpay-mcp` v5.0.0.
 
 ## Start without funds
 
@@ -38,6 +38,23 @@ Wallet tools read the following environment variables:
 | `NFT_CONTRACT_ADDRESS` | For deployment | Token contract bound to a wallet |
 | `SESSION_TTL_SECONDS` | No | Local session lifetime in seconds |
 
+Operator safety variables. They are read from the server environment only and
+cannot be changed through MCP:
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `AGENTPAY_POLICY_DAILY_LIMIT_ETH` | unset | Operator 24-hour rolling limit (ETH-equivalent) |
+| `AGENTPAY_POLICY_PER_TX_CAP_ETH` | unset | Operator per-transaction cap (ETH-equivalent) |
+| `AGENTPAY_POLICY_ALLOWED_RECIPIENTS` | unset | Comma-separated operator recipient allowlist |
+| `AGENTPAY_ALLOW_UNPOLICED_SPEND` | off | `1` permits value movement with no operator policy, relying only on on-chain limits |
+| `AGENTPAY_X402_MAX_PAYMENT` | unset | USDC ceiling applied on top of every per-call x402 cap; non-USDC x402 payments are refused while set |
+| `AGENTPAY_STATE_DIR` | unset | Directory for the fsync'd spend-intent journal; locks and keyed settlements survive restarts, and the journal is compacted to its live state automatically. One process owns the directory at a time (`spend-intents.lock`). If the journal cannot be read or fsync'd, or another live process owns the directory, value movement is refused |
+| `AGENTPAY_ALLOWED_PRIVATE_HOSTS` | unset | Comma-separated hosts whose private address may be reached by outbound requests |
+| `AGENTPAY_ALLOW_PRIVATE_NETWORK` | off | Development only: permit private destinations and plain `http` |
+
+Without at least one `AGENTPAY_POLICY_*` variable, or
+`AGENTPAY_ALLOW_UNPOLICED_SPEND=1`, every value-moving tool refuses to spend.
+
 Example MCP configuration:
 
 ```json
@@ -49,7 +66,11 @@ Example MCP configuration:
       "env": {
         "AGENT_PRIVATE_KEY": "<secret-reference-or-local-key>",
         "AGENT_WALLET_ADDRESS": "0x<deployed-wallet-address>",
-        "CHAIN_ID": "84532"
+        "CHAIN_ID": "84532",
+        "AGENTPAY_POLICY_PER_TX_CAP_ETH": "0.01",
+        "AGENTPAY_POLICY_DAILY_LIMIT_ETH": "0.1",
+        "AGENTPAY_X402_MAX_PAYMENT": "1",
+        "AGENTPAY_STATE_DIR": "<writable-private-directory>"
       }
     }
   }
@@ -66,7 +87,7 @@ The tool registry in [`src/index.ts`](src/index.ts) exposes these groups:
 | Group | Examples |
 | --- | --- |
 | Wallet | `deploy_wallet`, `get_wallet_info`, `queue_approval` |
-| Payments | `send_payment`, `x402_pay`, x402 session tools |
+| Payments | `send_payment`, `x402_quote`, `x402_pay`, x402 session tools |
 | Policy | `set_spend_policy`, `check_budget`, OTel budget tools |
 | Tokens | Lookup, custom-token registration, balances, and transfers |
 | Execution | Swap, USDC bridge, and mutual-stake escrow |
@@ -81,18 +102,56 @@ These boundaries matter more than the feature list:
 
 - The server reads `AGENT_PRIVATE_KEY` into its local Node.js process and uses
   viem for signing. Protect the process, environment, and MCP client config.
-- `set_spend_policy` stores policy in the MCP server process. The same agent can
-  call that tool again, and a process restart clears its rolling state.
-- Every current value-moving handler calls the in-process policy check, but
-  this is still application-level enforcement.
-- `swap_tokens` and `bridge_usdc` reserve spend at approve, then settle,
-  release, or hold-unknown. Quote, validation, and confirmed uncharged revert
-  failures release the reservation and stay retryable. An unclear
-  post-broadcast outcome locks that intent with no timer.
+- Spend policy is default-deny. The operator policy comes from
+  `AGENTPAY_POLICY_*` environment variables, is loaded once, and cannot be
+  changed or cleared through MCP. Without it, value movement is refused unless
+  the operator sets `AGENTPAY_ALLOW_UNPOLICED_SPEND=1`.
+- `set_spend_policy` can only tighten. Each call adds a layer to its scope; a
+  request that raises a limit, drops a constraint, or widens an allowlist is
+  refused, and earlier layers keep their rolling-window accounting. Loosening
+  requires an operator restart. All policy state is still in-process and is
+  reset by a restart.
+- `x402_pay` and `x402_session_start` require `max_payment_eth` and `pay_to`.
+  The asset is always bound: it defaults to the chain's USDC unless `asset`
+  names another; `network` can be bound too. A 402 that names another payee,
+  asset, or network, the zero address, or a debit (principal plus the 0.77%
+  protocol fee) above the cap is refused before any wallet write.
+  `AGENTPAY_X402_MAX_PAYMENT` is a USDC ceiling; with it set, non-USDC
+  payments are refused. Use `x402_quote` to read the offered terms first.
+- If a payment settles but its response is not delivered — the response
+  fails, or the paid request is answered with any non-2xx status — every new
+  x402 payment to that **host** (any path, port or spelling of the name) and
+  to that **payee** (behind any host) is locked until an operator reconciles
+  it. The lock is written before the wallet call, so a crash cannot lose it.
+- Caller-selected outbound requests (x402, quote, sessions, OTel kill
+  callback) use a safe transport: `https` only (a kill callback may use `http`
+  only for a host in `AGENTPAY_KILL_CALLBACK_ALLOWED_HOSTS`), private, loopback, link-local and metadata destinations refused,
+  DNS resolved once with the
+  socket pinned to the validated address, no automatic redirects, and
+  response bodies capped at 2 MiB (1 MiB rendered).
+- `send_payment`, `send_token`, `swap_tokens`, `bridge_usdc`, `create_escrow`,
+  `x402_pay`, and `x402_session_start` run inside a spend intent. Identical retries replay;
+  `idempotencyKey` distinguishes equal payments; an unclear post-broadcast
+  outcome locks the intent with no timer. Locks are process-local unless
+  `AGENTPAY_STATE_DIR` journals them. Reconcile with
+  `agentpay-mcp spend-intents list` and
+  `resolve <id> settled|unsettled`, which is a local CLI, never an MCP tool.
+  `<id>` is the shell-safe `id:` handle `list` prints for each intent.
+  `settled` (the value moved) clears the lock and retires a keyed intent's
+  `idempotencyKey` for good; a keyless intent has no key to retire, so an
+  identical new request is a new payment (use `idempotencyKey` for retry
+  safety). `unsettled` (nothing moved) clears the lock so a retry may pay.
+  Only one process may use a state directory at a time: stop the server
+  before `resolve` (`list` shows a read-only snapshot while it runs), and
+  give each server its own `AGENTPAY_STATE_DIR`.
+- `idempotencyKey` may not contain control, invisible formatting, or
+  line-separator characters; keys are printed escaped and shell-inert.
+- `send_payment` takes decimals from the token registry or the token
+  contract; a differing `token_decimals` is refused before signing.
 - On-chain limits exist only when the wallet owner configures them directly on
-  `AgentAccountV2`. `set_spend_policy` does not write those contract limits.
-- An over-limit transaction is a human gate only when the owner key is kept
-  separate from the agent key.
+  `AgentAccountV2`. The application policy does not write those contract
+  limits, and an over-limit transaction is a human gate only when the owner
+  key is kept separate from the agent key.
 - `get_transaction_history` reads on-chain wallet events and, for unscoped
   `all` queries, also lists x402 settlements made by this server process (final URL of
   the paid response, which may differ from the 402 issuer under redirects, method, amount, token, payee, tx hash, replay count). Those x402
@@ -107,6 +166,23 @@ These boundaries matter more than the feature list:
 
 Read [`docs/security-posture.md`](docs/security-posture.md) for the detailed
 control map and known limitations.
+
+## Upgrading from 4.x
+
+v5.0.0 is a breaking security release. Before upgrading:
+
+- Set an operator policy (`AGENTPAY_POLICY_*`) or explicitly opt out with
+  `AGENTPAY_ALLOW_UNPOLICED_SPEND=1`; otherwise every spend is refused.
+- Pass `max_payment_eth` and `pay_to` to every `x402_pay` and
+  `x402_session_start` call. Use `x402_quote` to read the terms first.
+- Stop relying on `set_spend_policy` to raise or clear limits.
+- Move any `http` or private-network x402 endpoint to `https`, or allow it with
+  `AGENTPAY_ALLOWED_PRIVATE_HOSTS` (production) or
+  `AGENTPAY_ALLOW_PRIVATE_NETWORK=1` (development only).
+- Set `AGENTPAY_STATE_DIR` on long-lived servers.
+
+[`docs/security-remediation-2026-10.md`](docs/security-remediation-2026-10.md)
+maps every finding to its fix and test.
 
 ## Technical proof index
 

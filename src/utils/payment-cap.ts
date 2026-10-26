@@ -5,7 +5,7 @@
  * USDC). Comparing those amounts against ETH-wei (×1e18) silently disables the
  * cap for stablecoin payments.
  */
-import { isAddress, type Address } from 'viem'
+import { isAddress, zeroAddress, type Address } from 'viem'
 import { getGlobalRegistry } from 'agentwallet-sdk'
 import { parseTokenAmount, resolveTokenDecimals } from '../tools/payments.js'
 import { sanitizeUntrustedInline } from './format.js'
@@ -68,7 +68,145 @@ export function assertPayableX402Recipient(payTo: string | undefined): Address {
         'AgentPay failed closed and did not sign a payment.'
     )
   }
+  // Syntactically valid is not payable: the zero address burns the principal
+  // (or reverts after the protocol fee already left the wallet). The buyer
+  // verifier in x402-buyer-flow.ts already encodes this invariant (F5).
+  if (candidate.toLowerCase() === zeroAddress) {
+    throw new Error(
+      'x402 payment recipient is the zero address. AgentPay failed closed and did not sign a payment.'
+    )
+  }
   return candidate as Address
+}
+
+/**
+ * Terms the caller approved before any payment may be signed.
+ * `payTo` is mandatory; `asset` and `network` are optional extra bindings.
+ */
+export interface ApprovedX402Terms {
+  payTo: string
+  asset?: string
+  network?: string
+}
+
+/** Canonical Circle USDC per supported chain — the default x402 asset. */
+export const X402_DEFAULT_ASSET_BY_CHAIN: Readonly<Record<number, Address>> = Object.freeze({
+  8453: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913',
+  84532: '0x036CbD53842c5426634e7929541eC2318f3dCF7e',
+})
+
+/** The asset an x402 payment is bound to when the caller names none. */
+export function defaultX402Asset(chainId: number): Address {
+  const asset = X402_DEFAULT_ASSET_BY_CHAIN[chainId]
+  if (!asset) {
+    throw new Error(`No default x402 asset for chain ${chainId}; pass asset explicitly.`)
+  }
+  return asset
+}
+
+/**
+ * Canonical comparison form for an x402 asset on the configured chain:
+ * a lower-cased contract address. Symbols resolve through the token
+ * registry; anything unresolvable stays as-is (and so never matches an
+ * address).
+ */
+function canonicalAsset(asset: string, chainId: number): string {
+  if (/^0x[0-9a-fA-F]{40}$/.test(asset)) return asset.toLowerCase()
+  const bySymbol = getGlobalRegistry().getToken(asset.toUpperCase(), chainId)
+  return (bySymbol?.address ?? asset).toLowerCase()
+}
+
+/** Same floor division as the SDK settlement client (0.77%). */
+export const X402_PROTOCOL_FEE_BPS = 77n
+
+/** What the wallet actually debits for an x402 payment: principal + fee. */
+export function x402Debit(amount: bigint): bigint {
+  return amount + (amount * X402_PROTOCOL_FEE_BPS) / 10000n
+}
+
+/**
+ * Bind the remote-selected payment requirement to the caller's approval.
+ * Every comparison runs on the exact values the SDK will sign (F3): a 402
+ * that changes payee, asset, or network after approval is refused before
+ * any fee or principal write.
+ */
+export function assertX402TermsApproved(
+  req: { payTo?: string; asset?: string; network?: string },
+  approved: ApprovedX402Terms,
+  chainId: number
+): void {
+  const payTo = typeof req.payTo === 'string' ? req.payTo : ''
+  if (payTo.toLowerCase() !== approved.payTo.toLowerCase()) {
+    throw new Error(
+      `x402 payee "${sanitizeUntrustedInline(payTo, 48)}" does not match the approved pay_to ` +
+        `${approved.payTo}. AgentPay failed closed and did not sign a payment.`
+    )
+  }
+  const network = typeof req.network === 'string' ? req.network : ''
+  if (approved.network !== undefined && network.toLowerCase() !== approved.network.toLowerCase()) {
+    throw new Error(
+      `x402 network "${sanitizeUntrustedInline(network, 48)}" does not match the approved network ` +
+        `"${sanitizeUntrustedInline(approved.network, 48)}". AgentPay did not sign a payment.`
+    )
+  }
+  {
+    // The asset is ALWAYS bound: an unnamed asset means the chain's USDC, so
+    // a cap the caller meant in USDC can never be applied to 1 WETH (F3).
+    const approvedAsset = approved.asset ?? defaultX402Asset(chainId)
+    const offered = typeof req.asset === 'string' ? req.asset : ''
+    if (canonicalAsset(offered, chainId) !== canonicalAsset(approvedAsset, chainId)) {
+      throw new Error(
+        `x402 asset "${sanitizeUntrustedInline(offered, 48)}" does not match the approved asset ` +
+          `"${sanitizeUntrustedInline(approvedAsset, 48)}". AgentPay did not sign a payment.`
+      )
+    }
+  }
+}
+
+/** Operator-wide ceiling applied on top of every per-call cap. */
+export const X402_OPERATOR_MAX_PAYMENT_ENV = 'AGENTPAY_X402_MAX_PAYMENT'
+
+/**
+ * Validate a mandatory human-readable cap: plain positive decimal only.
+ * Returns the trimmed string.
+ */
+export function assertPaymentCap(raw: string | undefined, field = 'max_payment_eth'): string {
+  const value = typeof raw === 'string' ? raw.trim() : ''
+  if (!/^\d+(\.\d+)?$/.test(value) || !/[1-9]/.test(value)) {
+    throw new Error(
+      `${field} is required and must be a positive decimal amount (e.g. "0.01"). ` +
+        'AgentPay never signs an x402 payment without an explicit cap.'
+    )
+  }
+  return value
+}
+
+/**
+ * Effective cap in the selected asset's base units: the smaller of the
+ * caller's cap and the operator ceiling (if configured).
+ *
+ * The operator ceiling is denominated in USDC. When it is set, a payment in
+ * any other asset is refused outright — a unitless ceiling of "1" must never
+ * admit 1 WETH.
+ */
+export function effectiveCapBaseUnits(
+  callerCap: string,
+  asset: string | undefined,
+  chainId: number
+): bigint {
+  const callerRaw = maxPaymentBaseUnits(callerCap, asset, chainId)
+  const operator = process.env[X402_OPERATOR_MAX_PAYMENT_ENV]?.trim()
+  if (!operator) return callerRaw
+  const ceiling = assertPaymentCap(operator, X402_OPERATOR_MAX_PAYMENT_ENV)
+  const usdc = X402_DEFAULT_ASSET_BY_CHAIN[chainId]
+  if (!usdc || canonicalAsset(asset ?? '', chainId) !== usdc.toLowerCase()) {
+    throw new Error(
+      `${X402_OPERATOR_MAX_PAYMENT_ENV} is denominated in USDC; refusing a payment in ` +
+        `"${sanitizeUntrustedInline(asset, 48)}". AgentPay did not sign a payment.`
+    )
+  }
+  const operatorRaw = maxPaymentBaseUnits(ceiling, usdc, chainId)
+  return operatorRaw < callerRaw ? operatorRaw : callerRaw
 }
 
 /**

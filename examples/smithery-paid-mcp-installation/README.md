@@ -11,12 +11,22 @@ smithery mcp add up2itnow0822/agentpay-mcp
 smithery tool list <connection>
 ```
 
-Do not run a paid tool from a directory-installed server until the host app has loaded a spend policy and captured a fresh `.well-known/x402` snapshot.
+Do not run a paid tool from a directory-installed server until the server has an operator spend policy and the host app has captured a fresh `.well-known/x402` snapshot.
 
 ## Safety defaults
 
+Server environment (AgentPay MCP v5.0.0 refuses every spend without an operator policy):
+
 ```bash
 export CHAIN_ID="84532"
+export AGENTPAY_POLICY_PER_TX_CAP_ETH="1"
+export AGENTPAY_POLICY_DAILY_LIMIT_ETH="5"
+export AGENTPAY_X402_MAX_PAYMENT="1.00"
+```
+
+Host-app settings used by the example code:
+
+```bash
 export AGENTPAY_DEFAULT_MAX_USDC="1.00"
 export AGENTPAY_APPROVAL_MODE="human_required"
 export AGENTPAY_MANIFEST_MAX_AGE_SECONDS="300"
@@ -57,7 +67,16 @@ const agentpay = new AgentpayMcp({
   connectionId: conn.connectionId,
 });
 
-// Check manifest freshness and request human approval before calling agentpay.tools.x402_pay.
+// Check manifest freshness, read the terms with x402_quote (no payment),
+// and request human approval before calling x402_pay.
+const quote = await agentpay.tools.x402_quote({ url: process.env.AGENTPAY_PAID_URL! });
+// ...human approves one validated offer from `quote`...
+const result = await agentpay.tools.x402_pay({
+  url: process.env.AGENTPAY_PAID_URL!,
+  max_payment_eth: "1.00",          // required cap, whole units of the selected asset
+  pay_to: "0x<approved-payee>",     // required; must match the approved offer
+  network: "base-sepolia:84532",
+});
 ```
 
 See `docs/smithery-paid-mcp-installation.md` for the full proof and acceptance checklist.

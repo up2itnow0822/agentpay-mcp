@@ -30,12 +30,14 @@ the proxy holding pooled service credentials.
   operate credentials or pool downstream tokens.
 - **Approval gate:** AgentPay can require policy and human approval before
   signing. Proxy behavior depends on its implementation.
-- **Spend caps:** AgentPay applies transaction, daily, session, and policy caps
+- **Spend caps:** AgentPay requires a per-call cap and an approved payee on
+  every x402 payment and applies transaction, daily, session, and policy caps
   before payment. A proxy may rely on external billing or account limits.
-- **Audit trail:** AgentPay records tool, merchant, amount, policy result,
-  receipt, and transaction history. Proxy evidence varies by implementation.
+- **Audit trail:** AgentPay records on-chain wallet events and process-lifetime
+  x402 settlement receipts (payee, amount, token, tx hash). It does not log
+  rejected attempts or policy results. Proxy evidence varies by implementation.
 - **Directory proof:** AgentPay packages Glama, Smithery, Docker, npm, and
-  27-tool introspection evidence. Do not assume equivalent proxy evidence until
+  28-tool introspection evidence. Do not assume equivalent proxy evidence until
   it is published and verified.
 - **Failure mode:** AgentPay fails closed when the policy, chain, asset, or
   approval state is unsupported. Proxy behavior varies by implementation.
@@ -45,12 +47,14 @@ the proxy holding pooled service credentials.
 AgentPay MCP keeps the payment contract visible to the agent runtime:
 
 1. The agent sees a paid endpoint or paid MCP tool.
-2. AgentPay checks policy before any signature is produced.
+2. `x402_quote` reads the offered terms without paying; `x402_pay` must name
+   the approved payee and a cap. AgentPay checks both, and the policy, before
+   any signature is produced.
 3. If human approval is required, the payment waits.
 4. If the policy rejects, the request fails closed.
 5. If approved, `x402_pay` signs and submits through the configured x402 path.
-6. The audit trail records the tool, amount, policy version, approval state, and
-   receipt.
+6. `get_transaction_history` lists the settlement (payee, amount, token, tx
+   hash) for the life of the server process, alongside on-chain wallet events.
 
 That is different from routing every paid call through a proxy that owns the
 downstream service account. A proxy can be useful, but it does not automatically
@@ -64,7 +68,8 @@ AgentPay MCP currently has public discovery and package proof:
 - npm package: `agentpay-mcp@4.1.8` or newer
 - Packaged catalog metadata: `glama.json` and `smithery.yaml`
 - Packaged install paths: `npx` and Docker
-- Introspection proof: 27 MCP tools, including `x402_pay`, `check_budget`,
+- Introspection proof: 28 MCP tools as of v5.0.0 (27 before `x402_quote` was
+  added), including `x402_quote`, `x402_pay`, `check_budget`,
   `set_spend_policy`, and `otel_evaluate_spend`
 - Readiness note: `docs/directory-introspection-readiness.md`
 
