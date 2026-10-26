@@ -1,7 +1,7 @@
 {
   "name": "agentpay-value-packs",
   "version": "1.0.0",
-  "description": "Drop-in value packs — copy, run, and customize x402 payment flows for AI agents",
+  "description": "Drop-in value packs \u2014 copy, run, and customize x402 payment flows for AI agents",
   "private": true,
   "type": "module",
   "scripts": {
@@ -12,7 +12,8 @@
   },
   "dependencies": {
     "agentpay-mcp": "^4.0.0",
-    "agentwallet-sdk": "^6.0.0"
+    "agentwallet-sdk": "7.0.0",
+    "viem": "2.57.4"
   },
   "devDependencies": {
     "@types/node": "^20.11.0",

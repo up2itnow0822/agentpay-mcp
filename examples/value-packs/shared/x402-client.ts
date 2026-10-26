@@ -175,7 +175,7 @@ export async function probeEndpoint(
         method,
         network: network.network,
         payable: false,
-        reason: `refused outbound request: ${err.message}`,
+        reason: err.message, // already "Refused outbound request: …"
       };
     }
     return null; // Network error — treat as unavailable

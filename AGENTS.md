@@ -69,7 +69,7 @@
   `tests/x402-session-start-idempotency.test.ts`,
   `tests/x402-payment-locks.test.ts`, `tests/spend-intent.test.ts`,
   `tests/spend-journal-compaction.test.ts`,
-  `tests/value-pack-safe-transport.test.ts`,
+  `tests/value-pack-safe-transport.test.ts`, `tests/value-pack-manifest.test.ts`,
   `tests/workflow-security-policy.test.ts`,
   `tests/daily-repair-publisher.test.ts` and
   `tests/daily-review-publisher.test.ts` (run the real workflow publishers

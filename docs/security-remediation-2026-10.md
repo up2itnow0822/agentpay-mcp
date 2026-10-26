@@ -139,3 +139,10 @@ two repairs still partial and one new low regression; all were repaired in
 | P1 durable idempotency tombstones evicted after 16,384 | Never evicted (128-bit digests); at 1,048,576 durable identities new keyed spends are refused | `tests/spend-intent.test.ts` |
 | P2 append-only journal unbounded | Crash-safe compaction (temp, fsync, rename, dir fsync) to live state: in-flight begins, locks with scope, tombstones; runs on load and above a size threshold, before the next append | `tests/spend-journal-compaction.test.ts` |
 | P1 value-pack examples bypassed the safe transport | Probe, paid retry (`settle402AndRetry` with the same transport) and free fetches use `src/utils/safe-fetch.ts`; bodies read with caps | `tests/value-pack-safe-transport.test.ts` |
+
+## Codex review of `a33d18f`
+
+| Finding | Repair | Proof |
+| --- | --- | --- |
+| P1 value-pack subpackage still installed `agentwallet-sdk` 6.0.4 (no `settle402AndRetry`) | The value-pack manifest pins `agentwallet-sdk` 7.0.0 and declares `viem` 2.57.4 (the root's exact versions); the lockfile is regenerated from scratch (`npm audit`: 0 vulnerabilities, down from 16), and the subpackage's own `npm ci` + `npm run typecheck` pass | `tests/value-pack-manifest.test.ts` |
+

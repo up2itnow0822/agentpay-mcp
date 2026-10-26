@@ -52,7 +52,9 @@ which maps each finding to its repair and proving test.
   0.77% protocol fee) and a single-use approval record bound to the final
   offer; a paid body that fails mid-read is a payment-aware error; every
   request (probe, paid retry, free fetch) uses the server's safe transport;
-  mainnet requires an explicit opt-in.
+  the value-pack manifest and lockfile pin the root's `agentwallet-sdk` and
+  `viem` (lockfile audit: 0 vulnerabilities); mainnet requires an explicit
+  opt-in.
 - F6, F13, F17: Workflow actions pinned to full commit SHAs; review-gate
   passes once Codex has reviewed the PR (any commit, after the last retarget)
   and every Codex review thread is resolved — no second Codex pass is required
