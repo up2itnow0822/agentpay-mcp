@@ -47,8 +47,8 @@ describe('agentpay-mcp spend-intents', () => {
     expect(listed.code).toBe(0)
     expect(listed.out).toContain('send_payment:8453:0x0:0xabc:1')
 
-    expect(run(['resolve', 'send_payment:8453:0x0:0xabc:1']).code).toBe(0)
-    expect(run(['resolve', 'nope']).code).toBe(1)
+    expect(run(['resolve', 'send_payment:8453:0x0:0xabc:1', 'unsettled']).code).toBe(0)
+    expect(run(['resolve', 'nope', 'unsettled']).code).toBe(1)
 
     _resetSpendIntentStore() // next server start
     expect(run(['list']).out).toContain('No locked spend intents')

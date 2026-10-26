@@ -48,7 +48,7 @@ cannot be changed through MCP:
 | `AGENTPAY_POLICY_ALLOWED_RECIPIENTS` | unset | Comma-separated operator recipient allowlist |
 | `AGENTPAY_ALLOW_UNPOLICED_SPEND` | off | `1` permits value movement with no operator policy, relying only on on-chain limits |
 | `AGENTPAY_X402_MAX_PAYMENT` | unset | USDC ceiling applied on top of every per-call x402 cap; non-USDC x402 payments are refused while set |
-| `AGENTPAY_STATE_DIR` | unset | Directory for the fsync'd spend-intent journal; locks and keyed settlements survive restarts, and the journal is compacted to its live state automatically. If the journal cannot be read or fsync'd, value movement is refused |
+| `AGENTPAY_STATE_DIR` | unset | Directory for the fsync'd spend-intent journal; locks and keyed settlements survive restarts, and the journal is compacted to its live state automatically. One process owns the directory at a time (`spend-intents.lock`). If the journal cannot be read or fsync'd, or another live process owns the directory, value movement is refused |
 | `AGENTPAY_ALLOWED_PRIVATE_HOSTS` | unset | Comma-separated hosts whose private address may be reached by outbound requests |
 | `AGENTPAY_ALLOW_PRIVATE_NETWORK` | off | Development only: permit private destinations and plain `http` |
 
@@ -134,8 +134,18 @@ These boundaries matter more than the feature list:
   `idempotencyKey` distinguishes equal payments; an unclear post-broadcast
   outcome locks the intent with no timer. Locks are process-local unless
   `AGENTPAY_STATE_DIR` journals them. Reconcile with
-  `agentpay-mcp spend-intents list` and `resolve <key>`, which is a local CLI,
-  never an MCP tool.
+  `agentpay-mcp spend-intents list` and
+  `resolve <id> settled|unsettled`, which is a local CLI, never an MCP tool.
+  `<id>` is the shell-safe `id:` handle `list` prints for each intent.
+  `settled` (the value moved) clears the lock and retires a keyed intent's
+  `idempotencyKey` for good; a keyless intent has no key to retire, so an
+  identical new request is a new payment (use `idempotencyKey` for retry
+  safety). `unsettled` (nothing moved) clears the lock so a retry may pay.
+  Only one process may use a state directory at a time: stop the server
+  before `resolve` (`list` shows a read-only snapshot while it runs), and
+  give each server its own `AGENTPAY_STATE_DIR`.
+- `idempotencyKey` may not contain control, invisible formatting, or
+  line-separator characters; keys are printed escaped and shell-inert.
 - `send_payment` takes decimals from the token registry or the token
   contract; a differing `token_decimals` is refused before signing.
 - On-chain limits exist only when the wallet owner configures them directly on

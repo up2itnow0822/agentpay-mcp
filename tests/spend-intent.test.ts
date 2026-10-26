@@ -519,7 +519,7 @@ describe('withSpendIntent', () => {
     expect(retriedOldest).not.toHaveBeenCalled()
 
     // Operator reconciliation frees exactly one slot.
-    expect(resolveSpendIntent('unknown#0')).toBe(true)
+    expect(resolveSpendIntent('unknown#0', 'unsettled')).toMatchObject({ outcome: 'unsettled', keyRetired: false })
     await expect(withSpendIntent('unknown#overflow', fresh)).resolves.toEqual({
       value: '0xfresh',
       replayed: false,
@@ -909,7 +909,7 @@ describe('spend-intent journal (opt-in durability)', () => {
         throw new Error('rpc timeout')
       })
     ).rejects.toThrow()
-    expect(resolveSpendIntent('lock#1')).toBe(true)
+    expect(resolveSpendIntent('lock#1', 'unsettled')).toMatchObject({ outcome: 'unsettled' })
     _resetSpendIntentStore()
     await expect(withSpendIntent('lock#1', async () => 'after')).resolves.toEqual({
       value: 'after',

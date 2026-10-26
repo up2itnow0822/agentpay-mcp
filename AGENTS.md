@@ -36,6 +36,17 @@
   and that payee until the operator CLI resolves it. Intents sharing a scope
   key run one at a time. Settled idempotency keys are never evicted; the
   spend journal is compacted only to live state (temp + fsync + rename).
+- Operator reconciliation states the on-chain outcome: `resolve <id>
+  settled` retires a keyed intent's key (tombstone), `unsettled` clears the
+  lock. One process owns an `AGENTPAY_STATE_DIR` (`spend-intents.lock`:
+  inode + nonce re-verified before every journal write; heartbeat through
+  the owner's own descriptor; pid liveness trusted only within one host,
+  boot and PID namespace; takeovers serialised). Never write the journal
+  from a second process. Operator commands select intents by the `id:`
+  handle (`spendIntentHandle`) or a shell-plain key, never by printed key
+  text; keys are printed only through `displaySpendIntentKey`.
+  `idempotencyKey` input rejects control, invisible-formatting and
+  line-separator characters.
 - Spend policy: the operator policy comes only from the environment; MCP
   callers may only tighten. No MCP tool may loosen policy or clear spend locks.
 - Remote free text (HTTP bodies, registry metadata, error strings) reaches
@@ -70,6 +81,8 @@
   `tests/x402-session-start-idempotency.test.ts`,
   `tests/x402-payment-locks.test.ts`, `tests/spend-intent.test.ts`,
   `tests/spend-journal-compaction.test.ts`,
+  `tests/spend-intent-reconciliation.test.ts` (real child processes),
+  `tests/spend-state-lock-no-hardlinks.test.ts`,
   `tests/value-pack-safe-transport.test.ts`, `tests/value-pack-manifest.test.ts`,
   `tests/workflow-security-policy.test.ts`,
   `tests/daily-repair-publisher.test.ts` and

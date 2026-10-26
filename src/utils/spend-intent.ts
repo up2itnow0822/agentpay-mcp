@@ -1,19 +1,25 @@
 import { AsyncLocalStorage } from 'node:async_hooks'
-import { createHash } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import {
   appendFileSync,
   closeSync,
   existsSync,
   fstatSync,
   fsyncSync,
+  linkSync,
   mkdirSync,
   openSync,
   readFileSync,
   readSync,
+  readlinkSync,
   renameSync,
+  statSync,
+  unlinkSync,
   writeFileSync,
+  writeSync,
 } from 'node:fs'
-import { join } from 'node:path'
+import { hostname } from 'node:os'
+import { dirname, join } from 'node:path'
 import { classifySpendError, isEvmTxHash } from 'agentwallet-sdk'
 import { z } from 'zod'
 import { normalizeHost } from './net-guard.js'
@@ -55,7 +61,9 @@ import { normalizeHost } from './net-guard.js'
  * is replayed at startup: an intent that began but never reached a terminal
  * record — including one interrupted by a crash mid-broadcast — comes back
  * locked, and keyed settlements come back as tombstones. Operators reconcile
- * with `agentpay-mcp spend-intents list|resolve`.
+ * with `agentpay-mcp spend-intents list | resolve <id> settled|unsettled`.
+ * Exactly one process owns a state directory at a time (see "State-directory
+ * ownership" below), so no other writer's record can be lost to compaction.
  */
 export const SEND_TOKEN_INTENT_TTL_MS = 5 * 60 * 1000
 export const DEFAULT_SWAP_SLIPPAGE_BPS = 50
@@ -75,28 +83,116 @@ export const SPEND_JOURNAL_FILE = 'spend-intents.jsonl'
  */
 export const SPEND_JOURNAL_COMPACT_BYTES = 1024 * 1024
 
+export const SPEND_STATE_LOCK_FILE = 'spend-intents.lock'
+/**
+ * A state-directory lock held by a process on ANOTHER host (shared volume)
+ * is presumed abandoned once its heartbeat is this old. On the same host,
+ * the holder's pid liveness decides instead.
+ */
+export const SPEND_STATE_LOCK_STALE_MS = 2 * 60 * 1000
+const SPEND_STATE_LOCK_HEARTBEAT_MS = 30 * 1000
+
+/**
+ * Characters an idempotency key may not contain: C0/C1 controls and DEL,
+ * plus invisible formatting, bidi overrides and line/paragraph separators.
+ * Keys are echoed to operators (`spend-intents list`); none of these may
+ * reach a terminal or forge an output line.
+ */
+const KEY_FORBIDDEN =
+  '\\u0000-\\u001f\\u007f-\\u009f\\u00ad\\u061c\\u180e\\u200b-\\u200f\\u2028-\\u202e\\u2060-\\u2064\\u2066-\\u206f\\ufeff\\ufff9-\\ufffb'
+
 /**
  * Published MCP JSON Schema for optional idempotencyKey on spend tools.
- * Runtime Zod applies the same minLength / maxLength / non-whitespace
- * pattern to the raw string (no trim-before-length). Identity lookup still
- * trims after validation.
+ * Runtime Zod applies the same minLength / maxLength / pattern to the raw
+ * string (no trim-before-length); identity lookup still trims after
+ * validation. The pattern requires a non-whitespace character and forbids
+ * KEY_FORBIDDEN. It is deterministic (leading whitespace, then the first
+ * non-whitespace character, then the rest), so it runs in linear time.
  */
 export const IDEMPOTENCY_KEY_JSON_SCHEMA = {
   type: 'string' as const,
   minLength: 1,
   maxLength: 128,
-  pattern: /.*\S.*/.source,
+  pattern: `^[^${KEY_FORBIDDEN}\\S]*[^${KEY_FORBIDDEN}\\s][^${KEY_FORBIDDEN}]*$`,
 }
 
 /**
- * Runtime check matching IDEMPOTENCY_KEY_JSON_SCHEMA: length and
- * non-whitespace apply to the raw string. Do not trim before min/max.
+ * Runtime check matching IDEMPOTENCY_KEY_JSON_SCHEMA: length and pattern
+ * apply to the raw string (do not trim before min/max). Runtime also
+ * rejects unpaired UTF-16 surrogates, which a JSON Schema pattern cannot
+ * express portably.
  */
 export const IdempotencyKeyZodSchema = z
   .string()
   .min(1)
   .max(128)
-  .regex(/.*\S.*/)
+  .regex(new RegExp(IDEMPOTENCY_KEY_JSON_SCHEMA.pattern), {
+    message:
+      'idempotencyKey needs a non-whitespace character and may not contain control, invisible formatting, or line-separator characters',
+  })
+  .refine((key) => !/[\uD800-\uDFFF]/u.test(key), {
+    message: 'idempotencyKey may not contain unpaired surrogate characters',
+  })
+
+/**
+ * Keys that are inert in a POSIX shell and are passed through it unchanged:
+ * safe to print raw and to accept back as a command-line argument.
+ */
+const SHELL_PLAIN_KEY = /^[A-Za-z0-9][A-Za-z0-9_.:#-]*$/
+
+/**
+ * Operator handle for an intent: `id:` plus a 128-bit digest of its key.
+ * Shell-safe and collision-resistant, so pasting it can never select a
+ * different intent than the one printed — whatever characters the
+ * (caller-chosen) key contains.
+ */
+export function spendIntentHandle(key: string): string {
+  return `id:${identityDigest(key)}`
+}
+
+/**
+ * Operator-safe rendering of an intent key, for information only. Plain
+ * keys (SHELL_PLAIN_KEY) print as is. Anything else prints single-quoted —
+ * inert if pasted into a shell — with a backslash doubled, and `'` and every
+ * non-printable or non-ASCII UTF-16 unit escaped as \uXXXX, so no key can inject a
+ * terminal control sequence or forge an output line. Commands select such
+ * intents by spendIntentHandle, never by this text.
+ */
+export function displaySpendIntentKey(key: string): string {
+  if (SHELL_PLAIN_KEY.test(key)) {
+    return key
+  }
+  let out = "'"
+  for (let i = 0; i < key.length; i++) {
+    const unit = key.charCodeAt(i)
+    if (unit === 0x5c) {
+      out += '\\\\'
+    } else if (unit >= 0x20 && unit <= 0x7e && unit !== 0x27) {
+      out += key[i]
+    } else {
+      out += '\\u' + unit.toString(16).padStart(4, '0')
+    }
+  }
+  return out + "'"
+}
+
+/**
+ * Resolve a command-line selector to an intent key: an `id:` handle, or a
+ * key that is shell-plain (and so reached the process exactly as typed).
+ * Anything else is refused — its printed form may not survive a shell.
+ */
+export function spendIntentKeyFromSelector(
+  selector: string,
+  keys: Iterable<string>
+): { key: string } | { error: 'not-found' | 'not-plain' } {
+  if (selector.startsWith('id:')) {
+    for (const key of keys) {
+      if (spendIntentHandle(key) === selector) return { key }
+    }
+    return { error: 'not-found' }
+  }
+  return SHELL_PLAIN_KEY.test(selector) ? { key: selector } : { error: 'not-plain' }
+}
 
 export interface SpendIntentIdentity {
   key: string
@@ -119,6 +215,11 @@ interface UnresolvedIntent {
    * cannot be lost to a crash or a torn record written after it.
    */
   scope?: readonly string[]
+  /**
+   * Keyed by a caller idempotencyKey: an operator "settled" resolution
+   * retires the key permanently (tombstone) instead of freeing it.
+   */
+  durable?: boolean
 }
 
 interface InflightIntent {
@@ -126,6 +227,7 @@ interface InflightIntent {
   fingerprint: string
   startedAt: number
   scope?: readonly string[]
+  durable?: boolean
 }
 
 const settledEphemeral = new Map<string, SettledIntent<unknown>>()
@@ -720,6 +822,8 @@ export function _resetSpendIntentStore(): void {
   journalBytes = 0
   compactedBytes = 0
   journalLoaded = false
+  releaseStateDirLock()
+  stateLockLost = null
 }
 
 export function _spendIntentStoreSizes(): {
@@ -736,34 +840,113 @@ export function _spendIntentStoreSizes(): {
   }
 }
 
-/** Unresolved intents awaiting reconciliation (keys are opaque identities). */
-export function listUnresolvedSpendIntents(): Array<{
+export interface UnresolvedSpendIntentEntry {
+  /** Opaque identity; render with displaySpendIntentKey before printing. */
   key: string
+  /** Shell-safe selector for operator commands (spendIntentHandle). */
+  handle: string
   since: number
   /** Human-readable payment locks this intent holds (hosts, payees). */
   blocks: string[]
-}> {
-  ensureJournalLoaded()
-  return Array.from(unresolved.entries()).map(([key, entry]) => ({
+  /** Keyed by a caller idempotencyKey ("settled" retires the key). */
+  keyed: boolean
+}
+
+function unresolvedEntry(key: string, entry: UnresolvedIntent): UnresolvedSpendIntentEntry {
+  return {
     key,
+    handle: spendIntentHandle(key),
     since: entry.settledAt,
     blocks: (entry.scope ?? []).map(describeLockKey),
-  }))
+    keyed: isKeyedIntent(key, entry.durable),
+  }
+}
+
+/** Unresolved intents awaiting reconciliation (keys are opaque identities). */
+export function listUnresolvedSpendIntents(): UnresolvedSpendIntentEntry[] {
+  ensureJournalLoaded()
+  return Array.from(unresolved.entries()).map(([key, entry]) => unresolvedEntry(key, entry))
 }
 
 /**
- * Operator reconciliation: the intent was checked on-chain and is known
- * either to have settled or to have moved nothing. Clears the lock (and
- * journals that decision). Not exposed as an MCP tool on purpose — the
- * constrained agent must not be able to unlock its own ambiguous payments.
+ * Read-only view of the journaled locks, for `spend-intents list` while
+ * another process owns the state directory. Takes no lock and writes
+ * nothing; the owner journals every change before applying it, so this is
+ * the owner's state as of the read.
  */
-export function resolveSpendIntent(key: string): boolean {
-  ensureJournalLoaded()
-  const existed = unresolved.delete(key)
-  if (existed) {
-    journal({ op: 'release', key })
+export function snapshotUnresolvedSpendIntents(): UnresolvedSpendIntentEntry[] {
+  const path = spendJournalPath()
+  if (!path || !existsSync(path)) {
+    return []
   }
-  return existed
+  const { open } = replayJournal(readFileSync(path, 'utf8'))
+  return Array.from(open.entries()).map(([key, entry]) =>
+    unresolvedEntry(key, {
+      settledAt: entry.at,
+      fingerprint: entry.fp,
+      ...(entry.scope ? { scope: entry.scope } : {}),
+      ...(entry.durable !== undefined ? { durable: entry.durable } : {}),
+    })
+  )
+}
+
+/**
+ * What the operator found on-chain for a locked intent:
+ * - `settled`: the value moved. A keyed intent's idempotencyKey is retired
+ *   for good (tombstone), so a retry with it is refused, never paid again.
+ * - `unsettled`: nothing moved. The lock is cleared and a retry may pay.
+ */
+export type SpendIntentOutcome = 'settled' | 'unsettled'
+
+export interface ResolvedSpendIntent {
+  key: string
+  outcome: SpendIntentOutcome
+  /** The settled intent's idempotencyKey is now permanently refused. */
+  keyRetired: boolean
+}
+
+/**
+ * Operator reconciliation of one locked intent, journaled before it takes
+ * effect. Not exposed as an MCP tool on purpose — the constrained agent
+ * must not be able to unlock its own ambiguous payments.
+ */
+export function resolveSpendIntent(key: string, outcome: SpendIntentOutcome): ResolvedSpendIntent | null {
+  if (outcome !== 'settled' && outcome !== 'unsettled') {
+    throw new TypeError(`Unknown spend-intent outcome: ${String(outcome)} (expected settled or unsettled)`)
+  }
+  ensureJournalLoaded()
+  const entry = unresolved.get(key)
+  if (!entry) {
+    return null
+  }
+  const keyRetired = outcome === 'settled' && isKeyedIntent(key, entry.durable)
+  journal(
+    outcome === 'settled'
+      ? { op: 'settle', key, fp: entry.fingerprint, durable: keyRetired }
+      : { op: 'release', key }
+  )
+  unresolved.delete(key)
+  if (keyRetired) {
+    rememberTombstone(key, entry.fingerprint)
+  }
+  return { key, outcome, keyRetired }
+}
+
+/**
+ * Whether an intent is keyed by a caller idempotencyKey. Records written
+ * before the flag existed fall back to the key shape (`tool#key`), which
+ * errs toward retiring the key — refusing a retry, never paying twice.
+ */
+function isKeyedIntent(key: string, durable: boolean | undefined): boolean {
+  return durable ?? key.includes('#')
+}
+
+function keyedUnresolvedCount(): number {
+  let count = 0
+  for (const [key, entry] of unresolved) {
+    if (isKeyedIntent(key, entry.durable)) count++
+  }
+  return count
 }
 
 /**
@@ -772,6 +955,7 @@ export function resolveSpendIntent(key: string): boolean {
  * Never touches unresolved locks.
  */
 export function forgetSettledIntent(key: string): void {
+  ensureJournalLoaded()
   settledEphemeral.delete(key)
   settledDurable.delete(key)
   tombstones.delete(identityDigest(key))
@@ -839,10 +1023,10 @@ function assertFingerprint(stored: string, incoming: string): void {
 // ─── Journal (opt-in durability) ───────────────────────────────────────────
 
 type JournalRecord =
-  | { op: 'begin'; key: string; fp: string; scope?: readonly string[] }
+  | { op: 'begin'; key: string; fp: string; scope?: readonly string[]; durable?: boolean }
   | { op: 'settle'; key: string; fp: string; durable: boolean }
   | { op: 'definite'; key: string }
-  | { op: 'lock'; key: string; fp: string; scope?: readonly string[] }
+  | { op: 'lock'; key: string; fp: string; scope?: readonly string[]; durable?: boolean }
   | { op: 'release'; key: string }
   | { op: 'forget'; key: string }
   /** Compacted durable tombstone: digests of key and fingerprint. */
@@ -868,7 +1052,12 @@ function journal(record: JournalRecord): void {
   if (!path) {
     return
   }
-  const dir = join(path, '..')
+  ensureJournalLoaded()
+  // Re-checked before EVERY write: if another process took the state
+  // directory over (e.g. it judged this one dead), stop writing for good —
+  // its journal is now authoritative and this process's memory is stale.
+  assertStateDirOwnership(path)
+  const dir = dirname(path)
   // Compact BEFORE appending: in-memory state already reflects every earlier
   // record, and this record lands after the compacted state, so nothing it
   // guards (e.g. a begin for a wallet write about to start) can be dropped.
@@ -901,16 +1090,22 @@ function journal(record: JournalRecord): void {
  * scope), open locks (with scope), and durable tombstones (digests). Crash
  * safe: temp file, fsync, atomic rename, directory fsync — a crash at any
  * point leaves either the old or the new journal, both complete. Failure is
- * non-fatal (the old journal stays authoritative) and backs off.
+ * non-fatal (the old journal stays authoritative) and backs off. Runs only
+ * in the process that owns the state directory, so no other writer's
+ * record can be renamed away.
  */
 function compactJournal(path: string, dir: string): void {
   const lines: string[] = []
   const rec = (record: Record<string, unknown>) => lines.push(JSON.stringify({ v: 1, ...record }))
+  const extras = (entry: { scope?: readonly string[]; durable?: boolean }) => ({
+    ...(entry.scope ? { scope: entry.scope } : {}),
+    ...(entry.durable !== undefined ? { durable: entry.durable } : {}),
+  })
   for (const [key, entry] of inflight) {
-    rec({ at: entry.startedAt, op: 'begin', key, fp: entry.fingerprint, ...(entry.scope ? { scope: entry.scope } : {}) })
+    rec({ at: entry.startedAt, op: 'begin', key, fp: entry.fingerprint, ...extras(entry) })
   }
   for (const [key, entry] of unresolved) {
-    rec({ at: entry.settledAt, op: 'lock', key, fp: entry.fingerprint, ...(entry.scope ? { scope: entry.scope } : {}) })
+    rec({ at: entry.settledAt, op: 'lock', key, fp: entry.fingerprint, ...extras(entry) })
   }
   for (const [kd, fd] of tombstones) rec({ op: 'tomb', kd, fd })
   for (const [key, entry] of settledDurable) {
@@ -972,7 +1167,16 @@ export function ensureJournalLoaded(): void {
     return
   }
   const path = spendJournalPath()
-  if (!path || !existsSync(path)) {
+  if (!path) {
+    journalLoaded = true
+    return
+  }
+  // One owner per state directory, taken BEFORE the read: a second writer
+  // (another server, or the operator CLI while the server runs) could
+  // otherwise append records this process never sees, and the next
+  // compaction would rename them away — losing a lock or a settled key.
+  acquireStateDirLock(path)
+  if (!existsSync(path)) {
     journalLoaded = true
     return
   }
@@ -987,7 +1191,37 @@ export function ensureJournalLoaded(): void {
         'refusing value movement until it can be replayed.'
     )
   }
-  const open = new Map<string, { fp: string; at: number; scope?: readonly string[] }>()
+  const { open, tombs } = replayJournal(text)
+  for (const [kd, fd] of tombs) {
+    tombstones.set(kd, fd)
+  }
+  for (const [key, entry] of open) {
+    unresolved.set(key, {
+      settledAt: entry.at,
+      fingerprint: entry.fp,
+      ...(entry.scope ? { scope: entry.scope } : {}),
+      ...(entry.durable !== undefined ? { durable: entry.durable } : {}),
+    })
+  }
+  journalLoaded = true
+  journalBytes = Buffer.byteLength(text)
+  compactedBytes = 0
+  if (journalBytes >= compactThreshold) {
+    compactJournal(path, dirname(path))
+  }
+}
+
+interface ReplayedIntent {
+  fp: string
+  at: number
+  scope?: readonly string[]
+  durable?: boolean
+}
+
+/** Pure replay: the open (locked) intents and durable tombstones a journal holds. */
+function replayJournal(text: string): { open: Map<string, ReplayedIntent>; tombs: Map<string, string> } {
+  const open = new Map<string, ReplayedIntent>()
+  const tombs = new Map<string, string>()
   for (const line of text.split('\n')) {
     if (!line.trim()) {
       continue
@@ -1006,14 +1240,21 @@ export function ensureJournalLoaded(): void {
       case 'lock': {
         // The begin record carries the payment locks, so a torn or missing
         // lock record after it cannot drop them.
-        const scope = journalScope(rec.scope) ?? open.get(rec.key)?.scope
-        open.set(rec.key, { fp: rec.fp, at, ...(scope ? { scope } : {}) })
+        const previous = open.get(rec.key)
+        const scope = journalScope(rec.scope) ?? previous?.scope
+        const durable = typeof rec.durable === 'boolean' ? rec.durable : previous?.durable
+        open.set(rec.key, {
+          fp: rec.fp,
+          at,
+          ...(scope ? { scope } : {}),
+          ...(durable !== undefined ? { durable } : {}),
+        })
         break
       }
       case 'settle':
         open.delete(rec.key)
         if (rec.durable) {
-          rememberTombstone(rec.key, rec.fp)
+          tombs.set(identityDigest(rec.key), identityDigest(rec.fp))
         }
         break
       case 'definite':
@@ -1022,32 +1263,482 @@ export function ensureJournalLoaded(): void {
         break
       case 'forget':
         open.delete(rec.key)
-        tombstones.delete(identityDigest(rec.key))
+        tombs.delete(identityDigest(rec.key))
         break
       case 'tomb':
-        if (typeof rec.kd === 'string' && typeof rec.fd === 'string') tombstones.set(rec.kd, rec.fd)
+        if (typeof rec.kd === 'string' && typeof rec.fd === 'string') tombs.set(rec.kd, rec.fd)
         break
     }
   }
-  for (const [key, entry] of open) {
-    unresolved.set(key, {
-      settledAt: entry.at,
-      fingerprint: entry.fp,
-      ...(entry.scope ? { scope: entry.scope } : {}),
-    })
-  }
-  journalLoaded = true
-  journalBytes = Buffer.byteLength(text)
-  compactedBytes = 0
-  if (journalBytes >= compactThreshold) {
-    compactJournal(path, join(path, '..'))
-  }
+  return { open, tombs }
 }
 
 function journalScope(value: unknown): readonly string[] | undefined {
   if (!Array.isArray(value)) return undefined
   const keys = value.filter((key): key is string => typeof key === 'string')
   return keys.length > 0 ? keys : undefined
+}
+
+// ─── State-directory ownership ─────────────────────────────────────────────
+//
+// Exactly one process owns an AGENTPAY_STATE_DIR at a time: it alone appends
+// to and compacts the journal. The owner creates `spend-intents.lock`
+// atomically with its full content and keeps a descriptor on it. Ownership
+// means "the lock path still holds my inode and my nonce"; it is checked
+// before every journal write and by a heartbeat that rewrites the lock
+// through that descriptor, so the filesystem (not a host clock) stamps its
+// mtime and another process's lock is never touched.
+//
+// A lock is taken over only when its holder is provably gone:
+// - same host, boot and PID namespace: its pid is not running, or is running
+//   with a different start time (pid reuse);
+// - otherwise (another host, or another container's PID namespace on a
+//   shared volume): its heartbeat is older than SPEND_STATE_LOCK_STALE_MS,
+//   measured against a fresh file on the same filesystem.
+// Takeovers are serialised by `spend-intents.lock.takeover`, and the lock is
+// re-verified under it, so only the exact lock judged stale is ever removed.
+
+interface ProcessIdentity {
+  pid: number
+  host: string
+  /** Linux: kernel boot id. */
+  boot?: string
+  /** Linux: PID namespace — pid liveness means something only inside one. */
+  pidns?: string
+  /** Linux: start time in clock ticks since boot (detects pid reuse). */
+  start?: string
+}
+
+interface StateLockHolder extends ProcessIdentity {
+  nonce: string
+  at: number
+}
+
+interface OwnedStateLock {
+  path: string
+  fd: number
+  ino: bigint
+  dev: bigint
+  nonce: string
+  content: string
+  heartbeat: ReturnType<typeof setInterval>
+}
+
+/** Another process owns the state directory (or took it over from this one). */
+export class SpendStateDirBusyError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'SpendStateDirBusyError'
+  }
+}
+
+const TAKEOVER_MUTEX_STALE_MS = 30 * 1000
+const NO_HARD_LINKS = new Set(['EPERM', 'ENOTSUP', 'EOPNOTSUPP', 'ENOSYS'])
+
+let ownedStateLock: OwnedStateLock | null = null
+let stateLockLost: string | null = null
+let exitHookInstalled = false
+let selfIdentity: ProcessIdentity | undefined
+
+function stateLockPathFor(journalPath: string): string {
+  return join(dirname(journalPath), SPEND_STATE_LOCK_FILE)
+}
+
+function errorCode(error: unknown): string | undefined {
+  return typeof error === 'object' && error !== null && 'code' in error
+    ? String((error as { code: unknown }).code)
+    : undefined
+}
+
+function readProcStart(pid: number | 'self'): string | undefined {
+  try {
+    const stat = readFileSync(`/proc/${pid}/stat`, 'utf8')
+    // Fields after "(comm) " start at field 3; starttime is field 22.
+    return stat.slice(stat.lastIndexOf(')') + 2).split(' ')[19]
+  } catch {
+    return undefined
+  }
+}
+
+function processIdentity(): ProcessIdentity {
+  if (selfIdentity?.pid === process.pid) {
+    return selfIdentity
+  }
+  const identity: ProcessIdentity = { pid: process.pid, host: hostname() }
+  if (process.platform === 'linux') {
+    try {
+      identity.boot = readFileSync('/proc/sys/kernel/random/boot_id', 'utf8').trim()
+    } catch {
+      // unavailable: treated as a different scope (heartbeat rule)
+    }
+    try {
+      identity.pidns = readlinkSync('/proc/self/ns/pid')
+    } catch {
+      // unavailable: treated as a different scope (heartbeat rule)
+    }
+    const start = readProcStart('self')
+    if (start !== undefined) identity.start = start
+  }
+  selfIdentity = identity
+  return identity
+}
+
+/** Whether pid liveness of `holder` can be checked from this process. */
+function sameProcessScope(holder: ProcessIdentity, me: ProcessIdentity): boolean {
+  if (holder.host !== me.host || holder.boot !== me.boot || holder.pidns !== me.pidns) {
+    return false
+  }
+  // On Linux, identical-but-missing ids prove nothing about the namespace.
+  return process.platform !== 'linux' || (me.boot !== undefined && me.pidns !== undefined)
+}
+
+function pidAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch (error: unknown) {
+    // EPERM: the process exists but belongs to another user.
+    return errorCode(error) !== 'ESRCH'
+  }
+}
+
+/** Same scope only. Unverifiable start times count as running (fail closed). */
+function holderRunning(holder: StateLockHolder): boolean {
+  if (!pidAlive(holder.pid)) {
+    return false
+  }
+  if (holder.start === undefined) {
+    return true
+  }
+  const start = readProcStart(holder.pid)
+  return start === undefined || start === holder.start
+}
+
+/** undefined: no lock file. null: present but unreadable or malformed. */
+function readStateLockHolder(path: string): StateLockHolder | null | undefined {
+  let text: string
+  try {
+    text = readFileSync(path, 'utf8')
+  } catch (error: unknown) {
+    return errorCode(error) === 'ENOENT' ? undefined : null
+  }
+  try {
+    const value = JSON.parse(text) as Partial<StateLockHolder>
+    if (
+      Number.isSafeInteger(value.pid) &&
+      (value.pid as number) > 0 &&
+      typeof value.host === 'string' &&
+      typeof value.nonce === 'string'
+    ) {
+      const optional = (field: unknown) => (typeof field === 'string' ? field : undefined)
+      const boot = optional(value.boot)
+      const pidns = optional(value.pidns)
+      const start = optional(value.start)
+      return {
+        pid: value.pid as number,
+        host: value.host,
+        nonce: value.nonce,
+        at: typeof value.at === 'number' ? value.at : 0,
+        ...(boot !== undefined ? { boot } : {}),
+        ...(pidns !== undefined ? { pidns } : {}),
+        ...(start !== undefined ? { start } : {}),
+      }
+    }
+  } catch {
+    // fall through: malformed
+  }
+  return null
+}
+
+/**
+ * Age of `path` by the filesystem's own clock: the mtime of a file written
+ * now, minus the mtime of `path`. Immune to clock skew between hosts.
+ */
+function fileAgeMs(path: string, nonce: string): number | undefined {
+  const probe = `${path}.${nonce}.probe`
+  try {
+    writeFileSync(probe, '0', { mode: 0o600 })
+    return statSync(probe).mtimeMs - statSync(path).mtimeMs
+  } catch {
+    return undefined
+  } finally {
+    unlinkQuiet(probe)
+  }
+}
+
+function unlinkQuiet(path: string): void {
+  try {
+    unlinkSync(path)
+  } catch {
+    // already gone
+  }
+}
+
+function sleepSync(ms: number): void {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms)
+}
+
+/**
+ * Create the lock file with its full content in one atomic step (hard link
+ * of a fsync'd temp file) and return a descriptor on it, or null if a lock
+ * exists. Filesystems without hard links fall back to an exclusive create.
+ */
+function createStateLockFile(path: string, content: string, nonce: string): number | null {
+  const tmp = `${path}.${nonce}.tmp`
+  const fd = openSync(tmp, 'wx+', 0o600)
+  let keep = false
+  try {
+    writeSync(fd, content, 0)
+    fsyncSync(fd)
+    try {
+      linkSync(tmp, path)
+      keep = true
+      return fd
+    } catch (error: unknown) {
+      const code = errorCode(error)
+      if (code === 'EEXIST') {
+        return null
+      }
+      if (code !== undefined && NO_HARD_LINKS.has(code)) {
+        return createStateLockFileExclusive(path, content)
+      }
+      throw error
+    }
+  } finally {
+    unlinkQuiet(tmp)
+    if (!keep) closeSync(fd)
+  }
+}
+
+function createStateLockFileExclusive(path: string, content: string): number | null {
+  let fd: number
+  try {
+    fd = openSync(path, 'wx+', 0o600)
+  } catch (error: unknown) {
+    if (errorCode(error) === 'EEXIST') {
+      return null
+    }
+    throw error
+  }
+  try {
+    writeSync(fd, content, 0)
+    fsyncSync(fd)
+  } catch (error: unknown) {
+    closeSync(fd)
+    unlinkQuiet(path)
+    throw error
+  }
+  return fd
+}
+
+function ownsStateLock(owned: OwnedStateLock): boolean {
+  try {
+    const st = statSync(owned.path, { bigint: true })
+    if (st.ino !== owned.ino || st.dev !== owned.dev) {
+      return false
+    }
+  } catch {
+    return false
+  }
+  return readStateLockHolder(owned.path)?.nonce === owned.nonce
+}
+
+function describeHolder(holder: StateLockHolder, me: ProcessIdentity): string {
+  if (sameProcessScope(holder, me)) return `process ${holder.pid} on this host`
+  if (holder.host === me.host) return `process ${holder.pid} in another PID namespace on host ${JSON.stringify(holder.host)}`
+  return `process ${holder.pid} on host ${JSON.stringify(holder.host)}`
+}
+
+function staleVerdict(
+  path: string,
+  holder: StateLockHolder | null,
+  me: StateLockHolder
+): { stale: boolean; reason: string } {
+  const dir = dirname(path)
+  const abandonedAfter = `A lock that cannot be checked by process id is presumed abandoned ${SPEND_STATE_LOCK_STALE_MS / 1000}s after its last heartbeat.`
+  if (holder === null) {
+    const age = fileAgeMs(path, me.nonce)
+    return {
+      stale: age !== undefined && age > SPEND_STATE_LOCK_STALE_MS,
+      reason:
+        `Spend-intent state directory ${dir} is locked by an unreadable ${path}. Refusing value movement. ` +
+        `${abandonedAfter} If no agentpay-mcp process uses this directory, remove that file.`,
+    }
+  }
+  const owner = describeHolder(holder, me)
+  const busy =
+    `Spend-intent state directory ${dir} is owned by ${owner}. Refusing value movement here: only one ` +
+    'agentpay-mcp process (server or spend-intents command) may use a state directory at a time. Stop the ' +
+    'other process, or give each server its own AGENTPAY_STATE_DIR. '
+  if (sameProcessScope(holder, me)) {
+    return {
+      // Same pid as this live process: the holder is this process or its
+      // dead predecessor (live pids are unique within a namespace).
+      stale: holder.pid === me.pid || !holderRunning(holder),
+      reason: busy + `If process ${holder.pid} is not agentpay-mcp, remove ${path}.`,
+    }
+  }
+  const age = fileAgeMs(path, me.nonce)
+  return { stale: age !== undefined && age > SPEND_STATE_LOCK_STALE_MS, reason: busy + abandonedAfter }
+}
+
+/** Run `task` holding the takeover mutex; undefined if it stays contended. */
+function withTakeoverMutex<T>(lockPath: string, nonce: string, task: () => T): T | undefined {
+  const mutex = `${lockPath}.takeover`
+  for (let attempt = 0; attempt < 100; attempt++) {
+    let fd: number
+    try {
+      fd = openSync(mutex, 'wx', 0o600)
+    } catch (error: unknown) {
+      if (errorCode(error) !== 'EEXIST') throw error
+      const age = fileAgeMs(mutex, nonce)
+      if (age !== undefined && age > TAKEOVER_MUTEX_STALE_MS) {
+        // Held for microseconds by design: this one outlived a crash.
+        unlinkQuiet(mutex)
+      } else {
+        sleepSync(10)
+      }
+      continue
+    }
+    closeSync(fd)
+    try {
+      return task()
+    } finally {
+      unlinkQuiet(mutex)
+    }
+  }
+  return undefined
+}
+
+function acquireStateDirLock(journalPath: string): void {
+  const path = stateLockPathFor(journalPath)
+  if (stateLockLost) {
+    throw new SpendStateDirBusyError(stateLockLost)
+  }
+  if (ownedStateLock?.path === path) {
+    return
+  }
+  releaseStateDirLock()
+  const dir = dirname(path)
+  mkdirSync(dir, { recursive: true, mode: 0o700 })
+  const me: StateLockHolder = { ...processIdentity(), nonce: randomUUID(), at: Date.now() }
+  const content = JSON.stringify(me)
+  for (let attempt = 0; attempt < 4; attempt++) {
+    const fd = createStateLockFile(path, content, me.nonce)
+    if (fd !== null) {
+      adoptStateLock(path, fd, me.nonce, content)
+      return
+    }
+    const holder = readStateLockHolder(path)
+    if (holder === undefined) {
+      continue // released between our attempt and the read
+    }
+    const verdict = staleVerdict(path, holder, me)
+    if (!verdict.stale) {
+      throw new SpendStateDirBusyError(verdict.reason)
+    }
+    const removed = withTakeoverMutex(path, me.nonce, () => {
+      // Re-verify under the mutex: remove only the exact lock judged stale.
+      const again = readStateLockHolder(path)
+      if (again === undefined) return true
+      if ((again === null) !== (holder === null) || (again && holder && again.nonce !== holder.nonce)) {
+        return false // replaced meanwhile; re-evaluate the new holder
+      }
+      unlinkQuiet(path)
+      return true
+    })
+    if (removed === undefined) {
+      break
+    }
+  }
+  throw new SpendStateDirBusyError(
+    `Could not take ownership of spend-intent state directory ${dir}; another process is contending for it. Refusing value movement.`
+  )
+}
+
+function adoptStateLock(path: string, fd: number, nonce: string, content: string): void {
+  const st = fstatSync(fd, { bigint: true })
+  const heartbeat = setInterval(heartbeatStateLock, SPEND_STATE_LOCK_HEARTBEAT_MS)
+  heartbeat.unref()
+  ownedStateLock = { path, fd, ino: st.ino, dev: st.dev, nonce, content, heartbeat }
+  if (!exitHookInstalled) {
+    exitHookInstalled = true
+    process.once('exit', releaseStateDirLock)
+  }
+}
+
+/**
+ * Refresh the lock's mtime by rewriting its (unchanged) content through our
+ * own descriptor — never a path-based touch, which could refresh another
+ * process's lock. A lock that is no longer ours ends ownership for good.
+ */
+function heartbeatStateLock(): void {
+  const owned = ownedStateLock
+  if (!owned) {
+    return
+  }
+  if (!ownsStateLock(owned)) {
+    loseStateLock(owned)
+    return
+  }
+  try {
+    writeSync(owned.fd, owned.content, 0)
+    fsyncSync(owned.fd)
+  } catch {
+    loseStateLock(owned)
+  }
+}
+
+/** Test seam: run one heartbeat now. */
+export function _heartbeatSpendStateLockForTests(): void {
+  heartbeatStateLock()
+}
+
+function loseStateLock(owned: OwnedStateLock): void {
+  const holder = readStateLockHolder(owned.path)
+  stateLockLost =
+    `This process lost ownership of spend-intent state directory ${dirname(owned.path)}` +
+    (holder ? ` to ${describeHolder(holder, processIdentity())}` : '') +
+    '. Refusing value movement; restart the server so it replays the current journal.'
+  clearInterval(owned.heartbeat)
+  try {
+    closeSync(owned.fd)
+  } catch {
+    // already closed
+  }
+  ownedStateLock = null
+}
+
+function assertStateDirOwnership(journalPath: string): void {
+  if (stateLockLost) {
+    throw new SpendStateDirBusyError(stateLockLost)
+  }
+  const path = stateLockPathFor(journalPath)
+  if (ownedStateLock?.path !== path) {
+    acquireStateDirLock(journalPath)
+    return
+  }
+  if (!ownsStateLock(ownedStateLock)) {
+    loseStateLock(ownedStateLock)
+    throw new SpendStateDirBusyError(stateLockLost!)
+  }
+}
+
+function releaseStateDirLock(): void {
+  const owned = ownedStateLock
+  if (!owned) {
+    return
+  }
+  ownedStateLock = null
+  clearInterval(owned.heartbeat)
+  if (ownsStateLock(owned)) {
+    unlinkQuiet(owned.path)
+  }
+  try {
+    closeSync(owned.fd)
+  } catch {
+    // already closed
+  }
 }
 
 // ─── Intent execution ──────────────────────────────────────────────────────
@@ -1130,15 +1821,20 @@ async function admitAndRun<T>(
     throw new SpendIntentCapacityError()
   }
   // Durable identities are never forgotten; past the ceiling, refuse new
-  // keyed spends instead (in-flight keyed intents may all settle durably).
-  if (options?.durable && tombstones.size + settledDurable.size + inflight.size >= durableIdentityCeiling) {
+  // keyed spends instead (in-flight keyed intents may all settle durably,
+  // and a locked keyed intent becomes a tombstone if resolved as settled).
+  if (
+    options?.durable &&
+    tombstones.size + settledDurable.size + inflight.size + keyedUnresolvedCount() >= durableIdentityCeiling
+  ) {
     throw new DurableIdentityCapacityError()
   }
 
-  journal({ op: 'begin', key, fp: fingerprint, ...(scope ? { scope } : {}) })
+  const durable = Boolean(options?.durable)
+  journal({ op: 'begin', key, fp: fingerprint, ...(scope ? { scope } : {}), durable })
   const startedAt = Date.now()
   const promise = run()
-  inflight.set(key, { promise, fingerprint, startedAt, ...(scope ? { scope } : {}) })
+  inflight.set(key, { promise, fingerprint, startedAt, ...(scope ? { scope } : {}), durable })
   try {
     const value = await promise
     if (options?.shouldSettle && !options.shouldSettle(value)) {
@@ -1166,8 +1862,8 @@ async function admitAndRun<T>(
     }
     // Possibly broadcast: lock with no timer and no eviction. Admission
     // counted this intent while in flight, so the ceiling holds.
-    unresolved.set(key, { settledAt: Date.now(), fingerprint, ...(scope ? { scope } : {}) })
-    journal({ op: 'lock', key, fp: fingerprint, ...(scope ? { scope } : {}) })
+    unresolved.set(key, { settledAt: Date.now(), fingerprint, ...(scope ? { scope } : {}), durable })
+    journal({ op: 'lock', key, fp: fingerprint, ...(scope ? { scope } : {}), durable })
     throw error
   } finally {
     inflight.delete(key)

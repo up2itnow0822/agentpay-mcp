@@ -307,7 +307,7 @@ describe('durability of host and payee locks', () => {
     expect(out.join('\n')).toContain('merchant.example.com')
     expect(out.join('\n')).toContain(PAYEE)
     const [locked] = listUnresolvedSpendIntents()
-    expect(resolveSpendIntent(locked!.key)).toBe(true)
+    expect(resolveSpendIntent(locked!.key, 'unsettled')).toMatchObject({ outcome: 'unsettled' })
     payingClient(() => new Response('ok', { status: 200 }), payments)
     expect((await pay('https://merchant.example.com/x')).isError).toBeUndefined()
     expect(payments.count).toBe(2)

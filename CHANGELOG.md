@@ -36,6 +36,14 @@ which maps each finding to its repair and proving test.
   is refused (F2).
 - `list_chain_tokens` is paginated; `add_custom_token` accepts only supported
   chains and bounded input (F18).
+- `idempotencyKey` rejects control characters (C0, DEL, C1), invisible
+  formatting and bidi characters, line/paragraph separators, and unpaired
+  surrogates.
+- `AGENTPAY_STATE_DIR` has a single owner process: a second server, or the
+  `spend-intents resolve` command while the server runs, is refused. A lock
+  left by a crashed process is taken over when that process is provably
+  gone: on the same host and PID namespace, its pid is not running (or was
+  reused); otherwise, after 2 minutes without a heartbeat.
 
 ### Security
 - F1: `x402_session_start` is serialised per canonical host; a payment that
@@ -111,8 +119,13 @@ which maps each finding to its repair and proving test.
 ### Added
 - `x402_quote` tool: reads an endpoint's x402 terms without paying (28 MCP
   tools in total).
-- `agentpay-mcp spend-intents list | resolve <key>` operator CLI for
-  reconciling locked spend intents. It is deliberately not an MCP tool.
+- `agentpay-mcp spend-intents list | resolve <id> settled|unsettled`
+  operator CLI for reconciling locked spend intents. It is deliberately not
+  an MCP tool. The outcome is mandatory: `settled` clears the lock and
+  retires a keyed intent's `idempotencyKey` permanently (a retry is refused,
+  never paid again); `unsettled` clears the lock. Intents are selected by the
+  shell-safe `id:` handle `list` prints; keys are shown escaped and
+  shell-inert, for information only.
 - `server.json` declares every environment variable the server reads
   (previously `AGENT_WALLET_ADDRESS` was missing and `BASE_RPC_URL` was
   declared though the server reads `RPC_URL`).

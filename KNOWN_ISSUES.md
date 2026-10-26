@@ -85,8 +85,21 @@ this via config.
   payments and keyed settlements are lost on restart unless
   `AGENTPAY_STATE_DIR` is set. Operators running long-lived production
   servers should set it, and reconcile locks with
-  `agentpay-mcp spend-intents list` / `resolve <key>` while the server is
-  stopped.
+  `agentpay-mcp spend-intents list` /
+  `resolve <id> settled|unsettled` while the server is stopped (the command
+  refuses to resolve while another process owns the state directory).
+- **Keyless intents have no key to retire.** Resolving a keyless locked
+  intent as `settled` clears its lock; an identical new request afterwards
+  is a new payment. Callers that need retry safety across reconciliation
+  should pass `idempotencyKey`.
+- **One process per state directory.** A second server pointed at the same
+  `AGENTPAY_STATE_DIR` refuses value movement. A lock left by a crashed
+  process is taken over automatically when its pid (same host, boot and PID
+  namespace) is not running or was reused; otherwise — another host, or
+  another container's PID namespace on a shared volume — after 2 minutes
+  without a heartbeat. On platforms without `/proc` start times, a crashed
+  server's pid reused by an unrelated process keeps the lock until
+  `spend-intents.lock` is removed by hand.
 - **Settled idempotency keys are never forgotten, so their number has a
   ceiling.** Each one is kept as a compact digest. After 1,048,576 settled
   keys, new spends that carry an `idempotencyKey` are refused (keyless spends
