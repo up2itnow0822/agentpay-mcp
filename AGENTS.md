@@ -19,9 +19,9 @@
   consistent.
 - Treat `dist/`, coverage, dependency folders, and generated repair artifacts
   as outputs unless a closer contract says otherwise.
-- `main` is protected by a GitHub ruleset: changes land only through a pull
-  request with the `build` check green and every review thread resolved.
-  No direct pushes, force-pushes, or branch deletion.
+- Merge policy: a PR merges only with 100% green checks and every review
+  comment resolved. The `main` ruleset enforces the `build` check and thread
+  resolution; no direct pushes, force-pushes, or branch deletion.
 - Every outbound HTTP request to a caller-influenced destination goes through
   `src/utils/safe-fetch.ts` (https, no private destinations, pinned DNS, no
   automatic redirects, capped bodies). Never call global `fetch` for it —
@@ -46,10 +46,11 @@
   artifacts and own every write. No workflow merges automatically. Every
   workflow declares `permissions`; CI that runs PR code is `contents: read`.
 - `server.json` declares every environment variable the server reads.
-- Codex review: Codex reviews each PR; every Codex comment must be resolved
-  (repaired or disposed of in writing). A second Codex pass after fixes is
-  not required. `review-gate` enforces exactly this: a Codex review of any
-  commit of the PR plus zero unresolved Codex review threads.
+- Codex review: the Codex review a PR gets in CI is the only Codex check;
+  every Codex comment must be resolved (repaired or disposed of in writing).
+  No Codex check of each new head commit is required, and a second
+  `@codex review` is never requested. `review-gate` enforces exactly this: a
+  Codex review of any commit of the PR plus zero unresolved Codex threads.
 - The finding-to-fix map in `docs/security-remediation-2026-10.md` must stay
   accurate when any of these controls change.
 
