@@ -71,6 +71,12 @@ function world(opts: {
   reviews?: unknown[]
   /** Every activity-feed request fails (e.g. a transient API error). */
   activityError?: boolean
+  /** Review threads: author of the first comment and resolution. */
+  threads?: Array<{ login: string; isResolved: boolean }>
+  graphqlError?: boolean
+  prCommits?: string[]
+  comments?: unknown[]
+  extraTimeline?: unknown[]
 }) {
   const waived = opts.waived ?? true
   const runs: Run[] = [...opts.priorRuns]
@@ -83,7 +89,7 @@ function world(opts: {
     head: { sha: H, ref: 'security/x' },
     base: { sha: opts.prBase, ref: 'main' },
   }
-  const timeline = !waived ? [] : [
+  const timeline = [...(opts.extraTimeline ?? []), ...(!waived ? [] : [
     {
       id: Number(opts.labelId),
       event: 'labeled',
@@ -91,17 +97,18 @@ function world(opts: {
       actor: { login: 'up2itnow0822' },
       created_at: opts.labeledAt,
     },
-  ]
+  ])]
   const list = {
     pulls: async () => ({ data: [pr] }),
     reviews: async () => ({ data: [] }),
     timeline: async () => ({ data: timeline }),
     comments: async () => ({ data: [] }),
     checks: async () => ({ data: [] }),
+    commits: async () => ({ data: [] }),
   }
   const github = {
     rest: {
-      pulls: { get: async () => ({ data: pr }), list: list.pulls, listReviews: list.reviews },
+      pulls: { get: async () => ({ data: pr }), list: list.pulls, listReviews: list.reviews, listCommits: list.commits },
       issues: { listEventsForTimeline: list.timeline, listComments: list.comments },
       repos: {
         getBranch: async () => ({
@@ -137,9 +144,26 @@ function world(opts: {
       if (fn === list.pulls) return [pr]
       if (fn === list.reviews) return opts.reviews ?? []
       if (fn === list.timeline) return timeline
-      if (fn === list.comments) return []
+      if (fn === list.comments) return opts.comments ?? []
+      if (fn === list.commits) return (opts.prCommits ?? [H]).map((sha) => ({ sha }))
       if (fn === list.checks) return runs.filter((r) => r.head_sha === params.ref && r.name === params.check_name)
       throw new Error('unexpected paginate target')
+    },
+    graphql: async () => {
+      if (opts.graphqlError) throw new Error('GraphQL unavailable')
+      return {
+        repository: {
+          pullRequest: {
+            reviewThreads: {
+              pageInfo: { hasNextPage: false, endCursor: null },
+              nodes: (opts.threads ?? []).map((t) => ({
+                isResolved: t.isResolved,
+                comments: { nodes: [{ author: { login: t.login } }] },
+              })),
+            },
+          },
+        },
+      }
     },
     request: async () => {
       if (opts.activityError) throw new Error('HTTP 502 from the activity API')
@@ -250,13 +274,13 @@ describe('review-gate fails closed without the server-side base timestamp (Codex
     expect(verdict.output.title).toBe('Evaluation failed')
   })
 
-  it('with the feed available, the same pre-advance review does not count', async () => {
+  it('with the feed available, a review from before a base advance still counts (no second Codex pass)', async () => {
     const w = world({
       tip: Y, tipAt: T(19), prBase: Y, labelId: '0', labeledAt: T(1),
       activity: ACTIVITY, priorRuns: [], waived: false, reviews: [EARLY_REVIEW],
     })
     await run(w.github, PUSH, w.core)
-    expect(published(w.runs)!.output.title).toBe('Waiting for Codex on head')
+    expect(published(w.runs)!.output.title).toBe('Codex reviewed PR')
   })
 
   it('a review after the advance passes', async () => {
@@ -265,6 +289,79 @@ describe('review-gate fails closed without the server-side base timestamp (Codex
       activity: ACTIVITY, priorRuns: [], waived: false, reviews: [{ ...EARLY_REVIEW, submitted_at: T(23) }],
     })
     await run(w.github, PUSH, w.core)
-    expect(published(w.runs)!.output.title).toBe('Codex reviewed head')
+    expect(published(w.runs)!.output.title).toBe('Codex reviewed PR')
+  })
+})
+
+describe('review-gate: Codex reviews the PR once; every Codex thread must be resolved (maintainer policy)', () => {
+  const P1 = 'd'.repeat(40) // an earlier commit of the PR
+  const REVIEW = (commit: string, at: string, state = 'COMMENTED') => ({
+    user: { login: 'chatgpt-codex-connector[bot]', type: 'Bot' },
+    commit_id: commit,
+    state,
+    submitted_at: at,
+  })
+  const base = { tip: Y, tipAt: T(22), prBase: Y, labelId: '0', labeledAt: T(1), activity: ACTIVITY, priorRuns: [], waived: false }
+
+  it('a review of an earlier commit passes after later pushes — no re-review', async () => {
+    const w = world({ ...base, prCommits: [P1, H], reviews: [REVIEW(P1, T(23))] })
+    await run(w.github, PUSH, w.core)
+    expect(published(w.runs)!.conclusion).toBe('success')
+    expect(published(w.runs)!.output.title).toBe('Codex reviewed PR')
+  })
+
+  it('an unresolved Codex thread blocks; other reviewers\' threads are left to the ruleset', async () => {
+    const blocked = world({
+      ...base,
+      reviews: [REVIEW(H, T(23))],
+      threads: [{ login: 'chatgpt-codex-connector', isResolved: false }, { login: 'cursor', isResolved: false }],
+    })
+    await run(blocked.github, PUSH, blocked.core)
+    expect(published(blocked.runs)!.output.title).toBe('Codex threads unresolved')
+    expect(published(blocked.runs)!.output.summary).toMatch(/^1 review thread/)
+
+    const clear = world({
+      ...base,
+      reviews: [REVIEW(H, T(23))],
+      threads: [{ login: 'chatgpt-codex-connector', isResolved: true }, { login: 'cursor', isResolved: false }],
+    })
+    await run(clear.github, PUSH, clear.core)
+    expect(published(clear.runs)!.conclusion).toBe('success')
+  })
+
+  it('fails closed when review threads cannot be read', async () => {
+    const w = world({ ...base, reviews: [REVIEW(H, T(23))], graphqlError: true })
+    await expect(run(w.github, PUSH, w.core)).rejects.toThrow(/GraphQL/)
+    expect(published(w.runs)!.output.title).toBe('Evaluation failed')
+  })
+
+  it('a review from before a retarget does not count; a dismissed review never counts', async () => {
+    const retargeted = world({
+      ...base,
+      reviews: [REVIEW(H, T(23))],
+      extraTimeline: [{ event: 'base_ref_changed', created_at: T(24) }],
+    })
+    await run(retargeted.github, PUSH, retargeted.core)
+    expect(published(retargeted.runs)!.output.title).toBe('Waiting for Codex review')
+
+    const dismissed = world({ ...base, reviews: [REVIEW(H, T(23), 'DISMISSED')] })
+    await run(dismissed.github, PUSH, dismissed.core)
+    expect(published(dismissed.runs)!.output.title).toBe('Waiting for Codex review')
+  })
+
+  it('a clean-pass summary counts only for a commit of this PR', async () => {
+    const summary = (sha: string) => ({
+      user: { login: 'chatgpt-codex-connector[bot]', type: 'Bot' },
+      body: `<!-- codex-pull-request-review-summary -->\n| Review | Status | Commit | Trigger |\n| --- | --- | --- | --- |\n| Code Review | Completed | \`${sha}\` | Manual |`,
+      created_at: T(23),
+      updated_at: T(23),
+    })
+    const ok = world({ ...base, prCommits: [P1, H], comments: [summary(P1)] })
+    await run(ok.github, PUSH, ok.core)
+    expect(published(ok.runs)!.output.title).toBe('Codex reviewed PR')
+
+    const foreign = world({ ...base, prCommits: [P1, H], comments: [summary('e'.repeat(40))] })
+    await run(foreign.github, PUSH, foreign.core)
+    expect(published(foreign.runs)!.output.title).toBe('Waiting for Codex review')
   })
 })

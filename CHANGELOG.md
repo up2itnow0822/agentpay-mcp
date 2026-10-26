@@ -54,7 +54,10 @@ which maps each finding to its repair and proving test.
   request (probe, paid retry, free fetch) uses the server's safe transport;
   mainnet requires an explicit opt-in.
 - F6, F13, F17: Workflow actions pinned to full commit SHAs; review-gate
-  evidence and `codex-waived` waivers bound to the live base tip; the daily-review analysis job is
+  passes once Codex has reviewed the PR (any commit, after the last retarget)
+  and every Codex review thread is resolved — no second Codex pass is required
+  after pushes; `codex-waived` waivers are bound to the exact head and the live
+  base tip; the daily-review analysis job is
   read-only and a deterministic job owns the single issue write, validating
   every schema field including optional metrics. Daily repair uses the same
   split: the model plans with a read-only token, a deterministic publisher

@@ -45,7 +45,7 @@ that proves it. It is the source of truth for the v5.0.0 breaking changes.
 | 10 | Medium | Unbounded OTel state | Identifier/window caps; policy, agent, task, record, decision, span-dedupe limits (dedupe keyed per agent/task, replays count only cost increases, a span is marked seen only after it is recorded); compacting rings; O(1) lifetime totals; fail-closed at capacity. | `tests/otel-bounds.test.ts` |
 | 11 | Medium | Caller can weaken its own policy | Operator policy from env (immutable, default deny; a malformed value — including an allowlist that names no address, or a policy with no constraint — denies everything and is reported at startup); caller updates layer and may only tighten; scope/layer caps. `src/tools/budget.ts` | `tests/budget.test.ts` (F11 blocks) |
 | 12 | Medium | Classification race on shared client | Wallet client hooked once; `AsyncLocalStorage` attributes each write to its own spend. No swap/restore. | `tests/spend-intent.test.ts` (F12 block, incl. exact original interleaving) |
-| 13 | Medium | review-gate ignores base advances | Ordinary review evidence and `codex-waived` waivers are bound to the live base tip (read from the branch, not the PR API's possibly lagging `base.sha`). `.github/workflows/review-gate.yml` | `tests/workflow-security-policy.test.ts`, `tests/review-gate-waiver.test.ts` (runs the real gate script) |
+| 13 | Medium | review-gate ignores base advances | `codex-waived` waivers are bound to the exact head and the live base tip (read from the branch, not the PR API's possibly lagging `base.sha`); every evaluation binds and attests (head, live base tip) and fails closed if either moves mid-evaluation or the server-side base timestamp is unavailable; a retarget invalidates earlier Codex evidence. **Maintainer policy:** ordinary Codex evidence is per PR — a review of any commit, with every Codex review thread resolved — and is not re-required after pushes or base advances. `.github/workflows/review-gate.yml` | `tests/workflow-security-policy.test.ts`, `tests/review-gate-waiver.test.ts` (runs the real gate script) |
 | 14 | Medium | Capacity eviction re-enables settlement | Unresolved locks never evicted; new spends refused at capacity; operator reconciliation CLI; optional crash-safe journal (torn-tail safe, directory fsync, compacted to live state); evicted keyed settlements tombstoned as digests that are never evicted (new keyed spends refused at a ceiling instead); `send_token` pre-write failures classified definite. | `tests/spend-intent.test.ts`, `tests/spend-intents-cli.test.ts`, `tests/spend-journal-compaction.test.ts`, `tests/transfers.test.ts` |
 | 15 | Medium | Unrestricted outbound requests | Safe transport on every caller-selected destination (x402, quote, sessions, kill callback); `Host` and TLS SNI come only from the validated URL. | `tests/safe-fetch.test.ts`, `tests/x402-session-start-idempotency.test.ts` |
 | 16 | Medium | `send_payment` has no idempotency | Spend-intent identity, optional `idempotencyKey`, reserved policy, classified broadcast, settlement-hash requirement. `create_escrow` brought under the same contract. | `tests/payments.test.ts` (F16 block), `tests/escrow.test.ts` |
@@ -62,6 +62,11 @@ that proves it. It is the source of truth for the v5.0.0 breaking changes.
   application policy is defence in depth that the agent can no longer weaken.
 - The MCP stdio channel is still the caller boundary: any process that can
   speak to the server can invoke its tools within the limits above.
+- review-gate (maintainer policy): Codex reviews a PR once; every Codex review
+  thread must be resolved, but pushes and base advances after that review are
+  not re-reviewed by Codex. This deliberately relaxes the base-advance binding
+  of the original F13 repair for ordinary review evidence; waivers stay bound
+  to the exact head and live base tip.
 - x402 locks follow the host and the payee. A merchant that changes both its
   host and its payee address is indistinguishable from a new service; the
   caller still approves every `pay_to` and cap explicitly.

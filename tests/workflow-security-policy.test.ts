@@ -300,15 +300,19 @@ describe('review-gate binds ordinary Codex evidence to the current base SHA (F13
     }
   });
 
-  it('accepts reviews and clean-pass summaries only when newer than the current base tip', () => {
+  it('accepts Codex evidence for the PR (any commit, after the last retarget) only with every Codex thread resolved', () => {
+    // Maintainer policy: no second Codex pass after pushes or base advances.
     expect(gate).toBeDefined();
     const evaluate = gate!.slice(gate!.indexOf('async function evaluate(prNumber)'));
     expect(evaluate).toMatch(/const baseBinding = await currentBaseBinding\(prNumber, headSha, baseRef, baseSha, baseChangedMs\)/);
-    expect(evaluate).toContain('postDatesCurrentBase(review.submitted_at, baseBinding)');
-    expect(evaluate).toContain('postDatesCurrentBase(comment.updated_at || comment.created_at ||');
-    // The head-only binding that caused the finding must be gone.
-    expect(gate).not.toMatch(/Date\.parse\(review\.submitted_at \|\| 0\) > baseChangedMs/);
-    expect(gate).not.toMatch(/Date\.parse\(comment\.updated_at \|\| comment\.created_at \|\| 0\) > baseChangedMs/);
+    expect(evaluate).toContain('postDatesRetarget(review.submitted_at)');
+    expect(evaluate).toContain('postDatesRetarget(comment.updated_at || comment.created_at)');
+    expect(evaluate).toContain('prCommits.has(sha) && !dismissedShas.has(sha)');
+    expect(evaluate).toContain('const unresolved = await unresolvedCodexThreads(prNumber);');
+    expect(gate).toContain('reviewThreads(first: 100, after: $after)');
+    // Waivers stay bound to the exact head and the live base tip.
+    expect(evaluate).toContain('postDatesCurrentBase(labeled.lastWaiverEvent.created_at');
+    expect(evaluate).toContain('baseSha: baseBinding.baseTipSha');
   });
 
   it('derives the bound from the live base tip and fails closed when it is unknown', () => {

@@ -46,6 +46,10 @@
   artifacts and own every write. No workflow merges automatically. Every
   workflow declares `permissions`; CI that runs PR code is `contents: read`.
 - `server.json` declares every environment variable the server reads.
+- Codex review: Codex reviews each PR; every Codex comment must be resolved
+  (repaired or disposed of in writing). A second Codex pass after fixes is
+  not required. `review-gate` enforces exactly this: a Codex review of any
+  commit of the PR plus zero unresolved Codex review threads.
 - The finding-to-fix map in `docs/security-remediation-2026-10.md` must stay
   accurate when any of these controls change.
 

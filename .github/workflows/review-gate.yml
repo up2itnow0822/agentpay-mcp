@@ -1,5 +1,5 @@
-# review-gate — required status check that fails until Codex has finished
-# reviewing the current head commit (or Bill applied the codex-waived label).
+# review-gate — required status check that fails until Codex has reviewed the
+# PR and every Codex review thread is resolved (or Bill applied codex-waived).
 #
 # Why: CI goes green minutes before chatgpt-codex-connector posts. Agents
 # merging on Bill's token (and cursor[bot]) were landing money-rail PRs in
@@ -7,19 +7,21 @@
 # exist yet. This check is published as github-actions (app id 15368) so a
 # PAT cannot fake it.
 #
+# Maintainer policy: Codex reviews a PR once. Every Codex comment must be
+# resolved (repaired or disposed of in writing), but a second Codex pass after
+# later pushes or base advances is NOT required.
+#
 # Pass conditions (any one):
-#   1. A non-dismissed, non-pending chatgpt-codex-connector[bot]
-#      (user.type == Bot) review exists with commit_id exactly equal to the
-#      full 40-character head SHA, submitted after BOTH the PR's most recent
-#      base_ref_changed event AND the moment the CURRENT base-branch tip SHA
-#      became the tip (see "Base-SHA binding" below); or, for a clean pass
-#      (Codex submits no review when it has no findings), the Codex bot's own
-#      review-summary comment reports
-#      `Code Review | Completed | <full 40-char head sha>` and was updated
-#      after that same bound. Short SHAs are never accepted. A dismissed
-#      Codex review on this head never counts, including via the summary
-#      shortcut. Findings arrive as review threads, which the ruleset's
-#      thread-resolution rule blocks separately.
+#   1. Codex has reviewed this PR: a non-dismissed, non-pending
+#      chatgpt-codex-connector[bot] (user.type == Bot) review of any commit of
+#      the PR, or — for a clean pass (Codex submits no review when it has no
+#      findings) — the Codex bot's own review-summary comment reporting
+#      `Code Review | Completed | <full 40-char SHA>` for a commit of this PR
+#      that no dismissed Codex review covers; in both cases newer than the
+#      PR's most recent base_ref_changed event (a retarget needs a new
+#      review). Short SHAs are never accepted. AND zero review threads opened
+#      by Codex are unresolved (GraphQL reviewThreads; unreadable threads
+#      fail closed).
 #   2. Waiver bound to THIS PR's label event and current base: an allow-listed
 #      actor (WAIVER_ACTORS) applied `codex-waived` while this exact head SHA
 #      was current. The labeled event publishes a "Codex waived" check whose
@@ -28,18 +30,17 @@
 #      this PR number, this full head SHA, the LIVE base tip (read from the
 #      branch, never the PR API's possibly lagging base.sha) and ref, and the
 #      current LabeledEvent id, and that event post-dates the moment the live
-#      tip became current (the same bound as ordinary evidence, below). A
-#      check waived for another PR, an earlier visit to the same SHA, or an
-#      older base does not transfer. Any push, base advance or retarget needs
-#      a new review or a freshly applied waiver.
+#      tip became current (the bound below). A check waived for another PR,
+#      an earlier visit to the same SHA, or an older base does not transfer;
+#      a waiver covers one exact head only.
 #
-# Base-SHA binding for ordinary Codex evidence (CWE-345 remediation):
+# Base-SHA binding (CWE-345 remediation), used for waivers, the published
+# attestations and the mid-evaluation race guard:
 #   Commits landing on the SAME base branch create no base_ref_changed
-#   timeline event, so binding review evidence to the head SHA alone let a
-#   review stay valid after the base advanced. Ordinary review evidence is
-#   now bound to the exact (headSha, baseTipSha) pair, where baseTipSha is the
-#   LIVE tip of the PR's base branch (repos.getBranch; pr.base.sha can lag).
-#   A review/summary counts only if it post-dates reviewNotBeforeMs:
+#   timeline event. Each evaluation therefore binds to the exact
+#   (headSha, baseTipSha) pair, where baseTipSha is the LIVE tip of the PR's
+#   base branch (repos.getBranch; pr.base.sha can lag). A waiver counts only
+#   if it post-dates reviewNotBeforeMs:
 #     reviewNotBeforeMs = max(
 #       last base_ref_changed event,
 #       committer/author date of baseTipSha        (forgeable; lower bound),
@@ -47,12 +48,15 @@
 #                                                  (server timestamp; REQUIRED),
 #       earliest time a prior review-gate check on this head observed a
 #       DIFFERENT tip for the same base ref        (server completed_at))
+#   Ordinary Codex evidence is NOT re-bound to base advances (maintainer
+#   policy above); only a retarget invalidates it.
 #   Every bound only ever moves reviewNotBeforeMs later (stricter). The base
 #   tip or its commit date being unreadable throws, which fails the gate
 #   closed — and so does a missing server timestamp: an activity feed that is
 #   unavailable (after one retry), unexpected, or without the tip never falls
-#   back to the forgeable commit date. The same binding governs waivers. If the tip moves between the first evaluation and the
-#   pre-publish re-check, the gate fails closed ("Base moved"). Every
+#   back to the forgeable commit date. If the tip moves between the first
+#   evaluation and the pre-publish re-check, the gate fails closed
+#   ("Base moved"). Every
 #   completed verdict embeds a `review-gate-binding` attestation of
 #   {pr, head, base_ref, base (live tip), pr_base, observed_at} so the
 #   evidence/(head, base) pairing is auditable and feeds the
@@ -610,6 +614,42 @@ jobs:
               return openPrs.filter(pr => !pr.draft).map(pr => pr.number);
             }
 
+            // Review threads opened by Codex that are still unresolved (GraphQL:
+            // REST does not expose thread resolution). Fails closed: an error or
+            // an implausibly long thread list throws, failing the gate.
+            async function unresolvedCodexThreads(prNumber) {
+              let after = null;
+              let unresolved = 0;
+              for (let page = 0; page < 20; page++) {
+                const data = await github.graphql(
+                  `query($owner: String!, $repo: String!, $pr: Int!, $after: String) {
+                    repository(owner: $owner, name: $repo) {
+                      pullRequest(number: $pr) {
+                        reviewThreads(first: 100, after: $after) {
+                          pageInfo { hasNextPage endCursor }
+                          nodes { isResolved comments(first: 1) { nodes { author { login } } } }
+                        }
+                      }
+                    }
+                  }`,
+                  { owner: context.repo.owner, repo: context.repo.repo, pr: prNumber, after },
+                );
+                const threads = data && data.repository && data.repository.pullRequest &&
+                  data.repository.pullRequest.reviewThreads;
+                if (!threads || !Array.isArray(threads.nodes)) {
+                  throw new Error(`PR #${prNumber}: review threads could not be read; refusing to pass`);
+                }
+                for (const thread of threads.nodes) {
+                  const first = thread && thread.comments && thread.comments.nodes && thread.comments.nodes[0];
+                  const login = first && first.author && first.author.login;
+                  if (thread && thread.isResolved !== true && isCodexLogin(login)) unresolved++;
+                }
+                if (!threads.pageInfo || !threads.pageInfo.hasNextPage) return unresolved;
+                after = threads.pageInfo.endCursor;
+              }
+              throw new Error(`PR #${prNumber}: too many review threads to evaluate; refusing to pass`);
+            }
+
             async function evaluate(prNumber) {
               const { data: pr } = await github.rest.pulls.get({
                 owner: context.repo.owner,
@@ -721,24 +761,25 @@ jobs:
                 pull_number: prNumber,
                 per_page: 100,
               });
-              const reviewOnHead = (review) => {
-                const commitId = review.commit_id || '';
-                return isCodexUser(review.user) &&
-                  isFullSha(commitId) &&
-                  commitId.toLowerCase() === headSha.toLowerCase();
+              // Maintainer policy: Codex reviews the PR once; later pushes and
+              // base advances do NOT need a second Codex pass. Evidence is any
+              // non-dismissed Codex review of any commit of this PR (or the
+              // Codex clean-pass summary for one), newer than the last
+              // retarget. Every review thread Codex opened must be resolved.
+              const postDatesRetarget = (timestamp) => {
+                const t = parseTimeMs(timestamp || '');
+                return Number.isFinite(t) && t > baseChangedMs;
               };
-              const dismissedOnHead = reviews.filter(review =>
-                reviewOnHead(review) && review.state === 'DISMISSED'
-              );
-              // Ordinary acceptance binds (headSha, baseBinding.baseTipSha):
-              // commit_id must equal the head and submitted_at must post-date
-              // the moment the current base tip became current.
-              const codexOnHead = reviews.filter(review =>
-                reviewOnHead(review) &&
+              const codexReviews = reviews.filter(review =>
+                isCodexUser(review.user) &&
+                isFullSha(review.commit_id || '') &&
                 review.state !== 'DISMISSED' &&
                 review.state !== 'PENDING' &&
-                postDatesCurrentBase(review.submitted_at, baseBinding)
+                postDatesRetarget(review.submitted_at)
               );
+              const dismissedShas = new Set(reviews
+                .filter(review => isCodexUser(review.user) && review.state === 'DISMISSED' && isFullSha(review.commit_id || ''))
+                .map(review => review.commit_id.toLowerCase()));
 
               const comments = await github.paginate(github.rest.issues.listComments, {
                 owner: context.repo.owner,
@@ -751,30 +792,48 @@ jobs:
                 return isCodexUser(comment.user) && /usage limits?/i.test(body);
               });
 
-              // Dismissed reviews never count as clean, including via the
-              // summary-comment shortcut. The bot must attest the complete
-              // 40-character SHA; abbreviations are ignored.
-              const cleanPassOnHead = dismissedOnHead.length === 0 && comments.some(comment => {
+              // Clean pass (Codex posts no review when it finds nothing): its
+              // summary must attest a full 40-char SHA that is a commit of this
+              // PR and was not the subject of a dismissed Codex review.
+              const prCommits = new Set((await github.paginate(github.rest.pulls.listCommits, {
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                pull_number: prNumber,
+                per_page: 100,
+              })).map(c => String(c.sha || '').toLowerCase()));
+              prCommits.add(headSha.toLowerCase());
+              const cleanPass = comments.some(comment => {
                 const body = comment.body || '';
                 if (!isCodexUser(comment.user) || !body.includes(SUMMARY_MARKER)) return false;
-                if (!postDatesCurrentBase(comment.updated_at || comment.created_at || '', baseBinding)) return false;
+                if (!postDatesRetarget(comment.updated_at || comment.created_at)) return false;
                 const row = /^\|[^|\n]*\bCode Review\b[^|\n]*\|[^|\n]*\bCompleted\b[^|\n]*\|\s*`([0-9a-f]{40})`\s*\|/gim;
                 let match;
                 while ((match = row.exec(body)) !== null) {
-                  if (match[1].toLowerCase() === headSha.toLowerCase()) return true;
+                  const sha = match[1].toLowerCase();
+                  if (prCommits.has(sha) && !dismissedShas.has(sha)) return true;
                 }
                 return false;
               });
 
-              if (codexOnHead.length > 0 || cleanPassOnHead) {
+              if (codexReviews.length > 0 || cleanPass) {
+                const unresolved = await unresolvedCodexThreads(prNumber);
+                if (unresolved > 0) {
+                  return {
+                    prNumber, headSha, baseSha, baseRef, baseChangedMs, baseBinding,
+                    conclusion: 'failure',
+                    title: 'Codex threads unresolved',
+                    summary: `${unresolved} review thread(s) opened by chatgpt-codex-connector on PR #${prNumber} are unresolved. ` +
+                      'Resolve every Codex comment (repair it or dispose of it in writing) before merge.',
+                  };
+                }
                 return {
                   prNumber, headSha, baseSha, baseRef, baseChangedMs, baseBinding,
                   conclusion: 'success',
-                  title: 'Codex reviewed head',
-                  summary: (codexOnHead.length > 0
-                    ? `chatgpt-codex-connector reviewed \`${headSha}\` (${codexOnHead.length} review(s))`
-                    : `chatgpt-codex-connector completed a clean review of \`${headSha}\` (no findings)`) +
-                    ` after base \`${baseRef}\` tip \`${baseBinding.baseTipSha}\` became current.`,
+                  title: 'Codex reviewed PR',
+                  summary: (codexReviews.length > 0
+                    ? `chatgpt-codex-connector reviewed PR #${prNumber} (${codexReviews.length} review(s))`
+                    : `chatgpt-codex-connector completed a clean review of PR #${prNumber} (no findings)`) +
+                    ' and every Codex review thread is resolved. A further Codex pass after pushes is not required.',
                 };
               }
 
@@ -783,7 +842,7 @@ jobs:
                   prNumber, headSha, baseSha, baseRef, baseChangedMs, baseBinding,
                   conclusion: 'failure',
                   title: 'Codex unavailable (usage limit)',
-                  summary: `Codex hit usage limits and has not reviewed \`${headSha}\`. ` +
+                  summary: `Codex hit usage limits and has not reviewed PR #${prNumber}. ` +
                     `Fail-closed: apply \`${WAIVE_LABEL}\` only with Bill's explicit GO, or wait for quota.`,
                 };
               }
@@ -791,10 +850,9 @@ jobs:
               return {
                 prNumber, headSha, baseSha, baseRef, baseChangedMs, baseBinding,
                 conclusion: 'failure',
-                title: 'Waiting for Codex on head',
-                summary: `No chatgpt-codex-connector review on \`${headSha}\` newer than base \`${baseRef}\` tip \`${baseBinding.baseTipSha}\`. ` +
-                  `CI alone is not enough, and a review from before the base advanced does not count. ` +
-                  `Gate stays red until Codex re-reviews against the current base or \`${WAIVE_LABEL}\` is applied.`,
+                title: 'Waiting for Codex review',
+                summary: `No chatgpt-codex-connector review of PR #${prNumber} yet. CI alone is not enough. ` +
+                  `Gate stays red until Codex reviews the PR or \`${WAIVE_LABEL}\` is applied.`,
               };
             }
 
