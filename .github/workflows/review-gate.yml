@@ -147,7 +147,7 @@ jobs:
     steps:
       - name: Mark review-gate pending
         id: pending
-        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7.1.0
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         with:
           script: |
             const CHECK_NAME = 'review-gate';
@@ -176,7 +176,7 @@ jobs:
 
       - name: Evaluate and publish review-gate
         id: gate
-        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7.1.0
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         env:
           PENDING_SHA: ${{ steps.pending.outputs.sha }}
           PENDING_CHECK_ID: ${{ steps.pending.outputs.check_id }}
@@ -1019,7 +1019,7 @@ jobs:
 
       - name: Fail-close review-gate on error
         if: failure()
-        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7.1.0
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         env:
           PENDING_SHA: ${{ steps.pending.outputs.sha }}
           PENDING_CHECK_ID: ${{ steps.pending.outputs.check_id }}
