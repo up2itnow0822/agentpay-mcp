@@ -1,0 +1,410 @@
+# =============================================================================
+# Daily Repair — Layer 3 of the Daily Review + Repair kit
+#
+# Runs at 09:00 UTC, two hours after the 07:00 UTC Daily Review (Layer 1) and
+# one hour after the cross-repo brief (Layer 2), so repairs act on findings a
+# human has already had a chance to read.
+#
+# What it does, in order:
+#   1. PREFLIGHT (fail-closed): plain-grep the kill switches in
+#      .github/repair-exclusions.yml. File missing, unparsable, or key absent
+#      means DISABLED. Excluded repos are review-only and exit cleanly.
+#      A missing REPAIR_TOKEN is a hard failure — we never fall back to the
+#      default GITHUB_TOKEN, because PRs created with GITHUB_TOKEN trigger no
+#      CI at all, and an auto-merge gate judging "no failing checks" would
+#      then merge entirely unverified work.
+#   2. Locate the newest open daily-review issue and extract its JSON report.
+#      Repair only acts on a COMPLETE review.
+#   3. Checkout using REPAIR_TOKEN so pushes trigger CI.
+#   4. Run the Claude Code repair agent under the .github/REPAIR.md contract
+#      (tiers GREEN/YELLOW/RED, auto-merge gate, caps, retry budget, dry-run).
+#   5. AUDIT (always runs, plain bash, independent of the agent): flag any
+#      automated-repair PR merged in the last 24h whose merge commit has zero
+#      successful check runs. This catches a misconfigured token even if the
+#      agent's own gate logic is wrong.
+#   6. On any failure: open/update a daily-review-failed issue. Fail loud.
+#
+# Secrets required (per-repo — the owner is a user account, org secrets are
+# not possible):
+#   CLAUDE_CODE_OAUTH_TOKEN  — from `claude setup-token` (subscription OAuth;
+#                              lasts ~1 year, re-run the command to renew)
+#   REPAIR_TOKEN             — fine-grained PAT: Contents R/W, Pull requests
+#                              R/W, Issues R/W, Workflows Read. Nothing else.
+# =============================================================================
+
+name: Daily Repair
+
+on:
+  schedule:
+    - cron: "0 9 * * *"   # 09:00 UTC daily (UTC does not observe DST)
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Plan only: comment what would be done on the review issue; open no branches or PRs"
+        type: boolean
+        required: false
+        default: false
+
+concurrency:
+  group: daily-repair
+  cancel-in-progress: false   # never kill an in-flight repair mid-write
+
+jobs:
+  repair:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read        # writes happen via REPAIR_TOKEN, not this token
+      issues: write         # skip/failure comments and failure issues
+      pull-requests: write  # audit comments on unverified merges
+      checks: read          # auto-merge gate reads check runs
+      actions: read         # CI status of repair PRs
+
+    steps:
+      # -----------------------------------------------------------------
+      # (1) PREFLIGHT — fail-closed. Plain grep on purpose: a broken YAML
+      # parser must never be able to fail OPEN. Runs before checkout, so
+      # it reads repair-exclusions.yml from the default branch via the API.
+      # -----------------------------------------------------------------
+      - name: Preflight (fail-closed kill switches and secrets)
+        id: preflight
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPAIR_TOKEN: ${{ secrets.REPAIR_TOKEN }}
+        run: |
+          set -euo pipefail
+          finish() { echo "proceed=$1" >> "$GITHUB_OUTPUT"; echo "automerge=$2" >> "$GITHUB_OUTPUT"; }
+
+          # Best-effort loud skip (REPAIR.md S2.2/S10, RUNBOOK "Repair opened
+          # nothing"): post the skip reason on the newest open daily-review
+          # issue, so a preflight stop is never visible only in the Actions log.
+          notify() {
+            local num
+            num="$(gh issue list --repo "$GITHUB_REPOSITORY" --label daily-review --state open \
+                   --limit 1 --json number --jq '.[0].number // empty' 2>/dev/null || true)"
+            if [ -n "$num" ]; then
+              gh issue comment "$num" --repo "$GITHUB_REPOSITORY" --body "$1" || true
+            fi
+          }
+
+          RAW="$(gh api -H "Accept: application/vnd.github.raw" \
+                 "/repos/${GITHUB_REPOSITORY}/contents/.github/repair-exclusions.yml" \
+                 2>/dev/null | tr -d '\r' || true)"
+          if [ -z "$RAW" ]; then
+            echo "repair-exclusions.yml missing or unreadable — fail closed, repair disabled"
+            notify "Daily Repair is skipping this run: .github/repair-exclusions.yml is missing or unreadable on the default branch. The kill switches fail closed, so repair is disabled until the file is restored."
+            finish false blocked
+            exit 0
+          fi
+
+          # Kill switch 1: a line exactly matching 'repair_enabled: true' must exist.
+          if ! printf '%s\n' "$RAW" | grep -qE '^repair_enabled:[[:space:]]*true[[:space:]]*$'; then
+            echo "repair_enabled is not 'true' (key absent, false, or malformed) — fail closed, repair disabled"
+            notify "Daily Repair is skipping this run: repair is disabled by kill switch (repair_enabled is not exactly 'true' in .github/repair-exclusions.yml — fail-closed)."
+            finish false blocked
+            exit 0
+          fi
+
+          # Kill switch 2: automerge_enabled, same exact-line rule. Blocked unless true.
+          AUTOMERGE=blocked
+          if printf '%s\n' "$RAW" | grep -qE '^automerge_enabled:[[:space:]]*true[[:space:]]*$'; then
+            AUTOMERGE=allowed
+          fi
+          echo "automerge gate: $AUTOMERGE"
+
+          # Review-only repos: this repo's own name listed under excluded_repos.
+          REPO_NAME="${GITHUB_REPOSITORY##*/}"
+          REPO_RE="${REPO_NAME//./\\.}"
+          if printf '%s\n' "$RAW" \
+               | awk '/^excluded_repos:/{f=1;next} f && /^[^ \t#-]/{f=0} f' \
+               | grep -qE "^[[:space:]]*-[[:space:]]*${REPO_RE}[[:space:]]*$"; then
+            echo "review-only repo — repair disabled here"
+            notify "Daily Repair is skipping this run: this repository is listed under excluded_repos in .github/repair-exclusions.yml, so it is review-only — findings are reported, but no repair PRs are opened here."
+            finish false "$AUTOMERGE"
+            exit 0
+          fi
+
+          # REPAIR_TOKEN must be present and non-empty. PRs created with the
+          # default GITHUB_TOKEN trigger no CI at all; falling back would let
+          # repair PRs merge unverified. Refuse loudly instead. NEVER fall back.
+          if [ -z "${REPAIR_TOKEN:-}" ]; then
+            TITLE="Daily Repair FAILED — ${REPO_NAME}"
+            RUN_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+            BODY="$(printf '%s\n' \
+              "Daily Repair cannot run: the REPAIR_TOKEN secret is missing or empty." \
+              "" \
+              "Repair will not fall back to the default GITHUB_TOKEN: PRs created with it trigger no CI at all, so the auto-merge gate would be judging silence and could merge unverified changes." \
+              "" \
+              "Fix: create a fine-grained PAT (Contents R/W, Pull requests R/W, Issues R/W, Workflows Read — nothing else) and run:" \
+              "    gh secret set REPAIR_TOKEN --repo ${GITHUB_REPOSITORY}" \
+              "" \
+              "Run: ${RUN_URL}")"
+            gh label create daily-review-failed --color B60205 \
+              --description "Daily Review/Repair automation failure" 2>/dev/null || true
+            NUM="$(gh issue list --repo "$GITHUB_REPOSITORY" --state open --label daily-review-failed \
+                   --json number,title --jq ".[] | select(.title == \"$TITLE\") | .number" | head -n1)"
+            if [ -n "$NUM" ]; then
+              gh issue comment "$NUM" --repo "$GITHUB_REPOSITORY" --body "$BODY"
+            else
+              gh issue create --repo "$GITHUB_REPOSITORY" --title "$TITLE" \
+                --label daily-review-failed --body "$BODY"
+            fi
+            finish false "$AUTOMERGE"
+            exit 1
+          fi
+
+          echo "preflight OK — repair enabled, automerge $AUTOMERGE"
+          finish true "$AUTOMERGE"
+
+      # -----------------------------------------------------------------
+      # (2) Find the newest open daily-review issue and pull out its JSON
+      # report. Repair only acts on a COMPLETE review — a PARTIAL or
+      # INCOMPLETE picture is not trustworthy enough to write changes
+      # against. Skips always say why, on the issue when there is one.
+      # -----------------------------------------------------------------
+      - name: Locate the latest COMPLETE review report
+        id: review
+        if: steps.preflight.outputs.proceed == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          finish() { echo "ready=$1" >> "$GITHUB_OUTPUT"; echo "issue_number=$2" >> "$GITHUB_OUTPUT"; }
+
+          NUM="$(gh issue list --repo "$GITHUB_REPOSITORY" --label daily-review --state open \
+                 --limit 1 --json number --jq '.[0].number // empty')"
+          if [ -z "$NUM" ]; then
+            echo "No open daily-review issue found — nothing to repair. Skipping."
+            finish false ""
+            exit 0
+          fi
+
+          gh issue view "$NUM" --repo "$GITHUB_REPOSITORY" --json body --jq .body \
+            | tr -d '\r' \
+            | awk '/^```json[ \t]*$/{f=1;next} f && /^```[ \t]*$/{exit} f' \
+            > "$RUNNER_TEMP/review.json"
+
+          if [ ! -s "$RUNNER_TEMP/review.json" ] || ! jq empty "$RUNNER_TEMP/review.json" 2>/dev/null; then
+            gh issue comment "$NUM" --repo "$GITHUB_REPOSITORY" --body \
+              "Daily Repair is skipping this run: no parsable fenced json block was found in this review issue. Repair only acts on a valid report conforming to .github/review-schema.json."
+            finish false "$NUM"
+            exit 0
+          fi
+
+          # Freshness gate: only act on TODAY's review. If this morning's
+          # review failed to file its issue, the newest open daily-review
+          # issue is an older report — and repairing against a stale picture
+          # reopens PRs for defects already fixed and burns retry budget.
+          TODAY="$(date -u +%Y-%m-%d)"
+          RDATE="$(jq -r '.date // "MISSING"' "$RUNNER_TEMP/review.json")"
+          if [ "$RDATE" != "$TODAY" ]; then
+            gh issue comment "$NUM" --repo "$GITHUB_REPOSITORY" --body \
+              "Daily Repair is skipping this run: the newest open daily-review report is dated $RDATE, not today's UTC date ($TODAY). This usually means today's review did not run or failed to file its issue. Repair never acts on a stale report — fix or re-run the review first (gh workflow run daily-review.yml)."
+            finish false "$NUM"
+            exit 0
+          fi
+
+          STATUS="$(jq -r '.status // "MISSING"' "$RUNNER_TEMP/review.json")"
+          if [ "$STATUS" != "COMPLETE" ]; then
+            gh issue comment "$NUM" --repo "$GITHUB_REPOSITORY" --body \
+              "Daily Repair is skipping this run: review status is $STATUS, and repair only acts on COMPLETE reviews. A PARTIAL or INCOMPLETE review means the repo's state was not fully verified, which is not a safe basis for automated changes."
+            finish false "$NUM"
+            exit 0
+          fi
+
+          echo "Found COMPLETE review report in issue #$NUM"
+          finish true "$NUM"
+
+      # -----------------------------------------------------------------
+      # (3) Checkout with REPAIR_TOKEN so every push the agent makes
+      # triggers CI. Full history so branches and single-commit reverts work.
+      # -----------------------------------------------------------------
+      - name: Checkout (REPAIR_TOKEN, so pushes trigger CI)
+        if: steps.review.outputs.ready == 'true'
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.REPAIR_TOKEN }}
+          fetch-depth: 0
+          # Dry runs must not leave a live write credential on disk; on schedule
+          # events inputs.dry_run is empty, so this resolves to true (live run).
+          persist-credentials: ${{ !(inputs.dry_run == true) }}
+
+      # -----------------------------------------------------------------
+      # (4) The repair agent. github_token is passed explicitly and always:
+      # scheduled runs fail the OIDC token exchange without it
+      # (claude-code-action issues #814, #1017). On live runs GH_TOKEN in
+      # the step env is REPAIR_TOKEN, so every `gh pr create` / `gh pr
+      # merge --auto` the agent runs uses the PAT and its PRs get CI; on
+      # dry runs it is the read-limited GITHUB_TOKEN (defense-in-depth).
+      # -----------------------------------------------------------------
+      - name: Repair agent (Claude Code)
+        if: steps.review.outputs.ready == 'true'
+        uses: anthropics/claude-code-action@v1
+        env:
+          # Dry runs are plan-only, so the agent gets the job's GITHUB_TOKEN
+          # (contents read-only — can comment, cannot push) instead of the live
+          # PAT; inputs.dry_run is empty on schedule events, so those resolve
+          # to REPAIR_TOKEN.
+          GH_TOKEN: ${{ inputs.dry_run == true && secrets.GITHUB_TOKEN || secrets.REPAIR_TOKEN }}
+          REVIEW_JSON_PATH: ${{ runner.temp }}/review.json
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          prompt: |
+            You are the Layer 3 repair agent for ${{ github.repository }}.
+
+            Your contract is .github/REPAIR.md in this repository. Follow it EXACTLY.
+            Where this prompt and REPAIR.md disagree, REPAIR.md wins.
+
+            Inputs for this run:
+            - Review findings: the JSON report (status COMPLETE; parsed but NOT
+              schema-validated — validate it against .github/review-schema.json
+              yourself before acting, per REPAIR.md S2.2.6) extracted from review issue
+              #${{ steps.review.outputs.issue_number }} is saved at the file path in the
+              REVIEW_JSON_PATH environment variable. Read it first.
+            - REVIEW_ISSUE=${{ steps.review.outputs.issue_number }} — post all run commentary on this issue.
+            - DRY_RUN=${{ inputs.dry_run == true }} — when true this is a plan-only run: post ONE
+              comment on the review issue describing, per finding, the tier you would
+              assign, the files you would touch, and the approximate diff size — and
+              open NOTHING: no branches, no commits, no pushes, no PRs, no merges.
+            - AUTOMERGE=${{ steps.preflight.outputs.automerge }} — when this is "blocked", never enable
+              auto-merge or merge anything, regardless of tier or gate results.
+
+            Operating rules (summary — the REPAIR.md sections are authoritative):
+            - One finding, one PR, one branch. Label every PR automated-repair. Every
+              change must revert cleanly with a single git revert.
+            - Load excluded_paths from .github/repair-exclusions.yml and never produce
+              a diff touching a matching path (lockfiles, dist/, vendor/, migrations,
+              the kit's own files). A finding whose fix requires an excluded path is
+              skipped and reported in the run summary.
+            - Tiers: GREEN may auto-merge (gate below); YELLOW opens a PR and waits for
+              a human; RED opens a draft PR or a written plan and can never merge.
+              Anything touching auth, wallets, signers, or settlement is RED.
+            - Auto-merge gate (GREEN only, and only when AUTOMERGE=allowed) — every
+              clause must hold: a test suite actually ran; tests green before AND after
+              the change; at least one check-run concluded "success"; zero failing,
+              cancelled, or timed-out checks; "skipped", "neutral", or NO CHECKS AT ALL
+              are a BLOCK, never a pass; zero unresolved review conversations; diff
+              confined to the finding's files; caps not exceeded.
+            - Caps: 5 auto-merges per day, 15 PRs per day, 400 changed lines max per
+              GREEN PR. Any cap that binds must be named in the run summary — never
+              skip silently.
+            - Retry budget: 2 attempts per finding. After the second failure, apply the
+              repair-abandoned label and stop. Never a third attempt.
+            - Secrets findings (health.secrets_found, or any committed credential):
+              escalate for rotation — never "fix" by deleting the value from HEAD. A key
+              removed from HEAD but live in history and still valid looks solved and is
+              not; rotation comes first.
+            - Tokens: on live runs GH_TOKEN in your environment is REPAIR_TOKEN (a
+              fine-grained PAT), so your pushes and PRs trigger CI; on dry runs it is
+              the read-limited GITHUB_TOKEN, which is all a plan-only run needs. Never
+              mint, swap, or fall back to any other token.
+            - Hard prohibitions: never publish to npm, force-push, rewrite history,
+              delete branches or files wholesale, touch a secret value, or edit
+              .github/REPAIR.md, .github/CODE_REVIEW.md, .github/repair-exclusions.yml,
+              .github/review-schema.json, or anything under .github/workflows/.
+            - Finish EVERY run — including dry runs and runs where you open nothing —
+              by posting the S10 run-summary comment on review issue
+              #${{ steps.review.outputs.issue_number }}: what was attempted, tier per finding, PRs
+              opened/merged/abandoned, caps that bound, and anything skipped and why.
+          claude_args: |
+            --allowedTools "Read,Edit,Write,Glob,Grep,Bash(git:*),Bash(gh:*),Bash(jq:*),Bash(cat:*),Bash(ls:*),Bash(mkdir:*),Bash(npm:*),Bash(npx:*),Bash(yarn:*),Bash(pnpm:*),Bash(node:*),Bash(python:*),Bash(python3:*),Bash(pytest:*),Bash(pip:*),Bash(pip3:*),Bash(make:*),Bash(cargo:*),Bash(go:*)"
+
+      # -----------------------------------------------------------------
+      # (5) AUDIT — always runs, plain bash, deliberately independent of
+      # every line of agent logic. Any automated-repair PR merged in the
+      # last 24h whose merge commit has zero successful check runs merged
+      # unverified (usually: PR was created with GITHUB_TOKEN, so no CI
+      # ran). Comment on the PR and raise/refresh a failure issue.
+      # Uses GITHUB_TOKEN on purpose — it must work when REPAIR_TOKEN is
+      # broken, because that is exactly the failure it exists to catch.
+      # -----------------------------------------------------------------
+      - name: Audit — flag automated-repair PRs merged without CI
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          CUTOFF="$(date -u -d '24 hours ago' '+%Y-%m-%dT%H:%M:%SZ')"
+          RUN_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+
+          gh pr list --repo "$GITHUB_REPOSITORY" --state merged --label automated-repair \
+            --limit 100 --json number,mergedAt,mergeCommit > "$RUNNER_TEMP/audit-prs.json"
+
+          FLAGGED=""
+          while IFS="$(printf '\t')" read -r NUM SHA; do
+            [ -n "$NUM" ] || continue
+            # --paginate emits one JSON object per page, concatenated; jq -s
+            # slurps them so the success count spans every page of check runs.
+            RUNS_JSON="$(gh api --paginate "repos/${GITHUB_REPOSITORY}/commits/${SHA}/check-runs?per_page=100" || true)"
+            SUCCESS="$(printf '%s' "$RUNS_JSON" \
+              | jq -s '[.[].check_runs[]] | map(select(.conclusion == "success")) | length' || echo 0)"
+            if [ "${SUCCESS:-0}" -eq 0 ]; then
+              FLAGGED="$FLAGGED #$NUM"
+              if gh pr view "$NUM" --repo "$GITHUB_REPOSITORY" --json comments \
+                   --jq '.comments[].body' | grep -q 'daily-repair-audit-flag'; then
+                echo "PR #$NUM already carries an audit comment — not duplicating it"
+                continue
+              fi
+              gh pr comment "$NUM" --repo "$GITHUB_REPOSITORY" --body \
+                "AUDIT FAILED: this automated-repair PR merged within the last 24 hours, but its merge commit has ZERO check runs with conclusion \"success\" — it merged unverified. Most likely cause: the PR was created with the default GITHUB_TOKEN (which triggers no CI) instead of REPAIR_TOKEN. Verify this change by hand or git revert it, then check that the REPAIR_TOKEN secret is set and valid. (marker: daily-repair-audit-flag)"
+            fi
+          done < <(jq -r --arg cutoff "$CUTOFF" \
+            '.[] | select(.mergedAt >= $cutoff and .mergeCommit != null)
+                 | [.number, .mergeCommit.oid] | @tsv' "$RUNNER_TEMP/audit-prs.json")
+
+          if [ -n "$FLAGGED" ]; then
+            TITLE="Daily Repair AUDIT — unverified merges in ${GITHUB_REPOSITORY##*/}"
+            BODY="$(printf '%s\n' \
+              "The independent post-repair audit found automated-repair PR(s) merged in the last 24 hours whose merge commit has zero successful check runs:${FLAGGED}" \
+              "" \
+              "These merged unverified. Verify or git revert each one." \
+              "" \
+              "Likely cause: REPAIR_TOKEN missing or invalid, so PRs were created with the default GITHUB_TOKEN and no CI ran. Check the secret (fine-grained PAT: Contents R/W, Pull requests R/W, Issues R/W, Workflows Read)." \
+              "" \
+              "Run: ${RUN_URL}")"
+            gh label create daily-review-failed --color B60205 \
+              --description "Daily Review/Repair automation failure" 2>/dev/null || true
+            NUMI="$(gh issue list --repo "$GITHUB_REPOSITORY" --state open --label daily-review-failed \
+                    --json number,title --jq ".[] | select(.title == \"$TITLE\") | .number" | head -n1)"
+            if [ -n "$NUMI" ]; then
+              gh issue comment "$NUMI" --repo "$GITHUB_REPOSITORY" --body "$BODY"
+            else
+              gh issue create --repo "$GITHUB_REPOSITORY" --title "$TITLE" \
+                --label daily-review-failed --body "$BODY"
+            fi
+            echo "::error::Unverified automated-repair merges detected:${FLAGGED}"
+          else
+            echo "Audit clean: no automated-repair PR merged in the last 24h without a successful check run."
+          fi
+
+      # -----------------------------------------------------------------
+      # (6) Fail loud. A repair system that fails silently manufactures
+      # false confidence; this issue is the tripwire the Layer 2 brief reads.
+      # Skipped when preflight itself failed — it files its own issue before
+      # exiting 1, so a preflight failure reports exactly once.
+      # -----------------------------------------------------------------
+      - name: On failure — open/update daily-review-failed issue
+        if: failure() && steps.preflight.outcome == 'success'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          TITLE="Daily Repair FAILED — ${GITHUB_REPOSITORY##*/}"
+          RUN_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          BODY="$(printf '%s\n' \
+            "The Daily Repair workflow failed." \
+            "" \
+            "Run: ${RUN_URL}" \
+            "" \
+            "Common causes (see RUNBOOK.md Troubleshooting): REPAIR_TOKEN missing or expired; CLAUDE_CODE_OAUTH_TOKEN missing or expired (regenerate locally with: claude setup-token, then reset the secret); the 45-minute job timeout.")"
+          gh label create daily-review-failed --color B60205 \
+            --description "Daily Review/Repair automation failure" 2>/dev/null || true
+          NUM="$(gh issue list --repo "$GITHUB_REPOSITORY" --state open --label daily-review-failed \
+                 --json number,title --jq ".[] | select(.title == \"$TITLE\") | .number" | head -n1)"
+          if [ -n "$NUM" ]; then
+            gh issue comment "$NUM" --repo "$GITHUB_REPOSITORY" --body "$BODY"
+          else
+            gh issue create --repo "$GITHUB_REPOSITORY" --title "$TITLE" \
+              --label daily-review-failed --body "$BODY"
+          fi
