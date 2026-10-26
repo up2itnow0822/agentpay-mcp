@@ -66,18 +66,24 @@ function world(opts: {
   labeledAt: string
   activity: Array<{ after: string; timestamp: string }>
   priorRuns: Run[]
+  /** Default: the codex-waived label is on the PR. */
+  waived?: boolean
+  reviews?: unknown[]
+  /** Every activity-feed request fails (e.g. a transient API error). */
+  activityError?: boolean
 }) {
+  const waived = opts.waived ?? true
   const runs: Run[] = [...opts.priorRuns]
   let nextId = 5000
   const pr = {
     number: 90,
     draft: false,
     state: 'open',
-    labels: [{ name: 'codex-waived' }],
+    labels: waived ? [{ name: 'codex-waived' }] : [],
     head: { sha: H, ref: 'security/x' },
     base: { sha: opts.prBase, ref: 'main' },
   }
-  const timeline = [
+  const timeline = !waived ? [] : [
     {
       id: Number(opts.labelId),
       event: 'labeled',
@@ -129,13 +135,16 @@ function world(opts: {
     },
     paginate: async (fn: unknown, params: { ref?: string; check_name?: string }) => {
       if (fn === list.pulls) return [pr]
-      if (fn === list.reviews) return []
+      if (fn === list.reviews) return opts.reviews ?? []
       if (fn === list.timeline) return timeline
       if (fn === list.comments) return []
       if (fn === list.checks) return runs.filter((r) => r.head_sha === params.ref && r.name === params.check_name)
       throw new Error('unexpected paginate target')
     },
-    request: async () => ({ data: opts.activity }),
+    request: async () => {
+      if (opts.activityError) throw new Error('HTTP 502 from the activity API')
+      return { data: opts.activity }
+    },
   }
   const warnings: string[] = []
   const core = {
@@ -217,5 +226,45 @@ describe('review-gate waivers bind to the live base tip', () => {
     const late = world({ tip: Y, tipAt: T(22), prBase: X, labelId: '902', labeledAt: T(21), activity: ACTIVITY, priorRuns: [] })
     await run(late.github, labeledEvent(T(21)), late.core)
     expect(published(late.runs)!.output.title).not.toBe('Codex waived')
+  })
+})
+
+describe('review-gate fails closed without the server-side base timestamp (Codex pass 4, P1)', () => {
+  // main advanced to Y on day 22, but Y's (caller-controlled) commit date
+  // claims day 19. A Codex review from day 21 predates the advance.
+  const EARLY_REVIEW = {
+    user: { login: 'chatgpt-codex-connector[bot]', type: 'Bot' },
+    commit_id: H,
+    state: 'COMMENTED',
+    submitted_at: T(21),
+  }
+
+  it('an unavailable activity feed is not replaced by the forgeable commit date', async () => {
+    const w = world({
+      tip: Y, tipAt: T(19), prBase: Y, labelId: '0', labeledAt: T(1),
+      activity: ACTIVITY, priorRuns: [], waived: false, reviews: [EARLY_REVIEW], activityError: true,
+    })
+    await expect(run(w.github, PUSH, w.core)).rejects.toThrow(/activity/)
+    const verdict = published(w.runs)!
+    expect(verdict.conclusion).toBe('failure')
+    expect(verdict.output.title).toBe('Evaluation failed')
+  })
+
+  it('with the feed available, the same pre-advance review does not count', async () => {
+    const w = world({
+      tip: Y, tipAt: T(19), prBase: Y, labelId: '0', labeledAt: T(1),
+      activity: ACTIVITY, priorRuns: [], waived: false, reviews: [EARLY_REVIEW],
+    })
+    await run(w.github, PUSH, w.core)
+    expect(published(w.runs)!.output.title).toBe('Waiting for Codex on head')
+  })
+
+  it('a review after the advance passes', async () => {
+    const w = world({
+      tip: Y, tipAt: T(19), prBase: Y, labelId: '0', labeledAt: T(1),
+      activity: ACTIVITY, priorRuns: [], waived: false, reviews: [{ ...EARLY_REVIEW, submitted_at: T(23) }],
+    })
+    await run(w.github, PUSH, w.core)
+    expect(published(w.runs)!.output.title).toBe('Codex reviewed head')
   })
 })

@@ -10,6 +10,8 @@ import {
   openSync,
   readFileSync,
   readSync,
+  renameSync,
+  writeFileSync,
 } from 'node:fs'
 import { join } from 'node:path'
 import { classifySpendError, isEvmTxHash } from 'agentwallet-sdk'
@@ -38,8 +40,10 @@ import { normalizeHost } from './net-guard.js'
  *
  * Keyed settled results stay until the durable LRU evicts them so the same
  * idempotencyKey replays after the keyless MCP-retry window; an evicted key
- * leaves a tombstone so it is refused, never re-executed. Keyless settled
- * results expire after SEND_TOKEN_INTENT_TTL_MS.
+ * leaves a tombstone so it is refused, never re-executed. Tombstones are
+ * NEVER evicted (they are compact digests); at SPEND_INTENT_MAX_TOMBSTONES
+ * durable identities, new keyed spends are refused instead (fail closed).
+ * Keyless settled results expire after SEND_TOKEN_INTENT_TTL_MS.
  *
  * Unresolved (possibly-broadcast) intents are NEVER evicted. When
  * SPEND_INTENT_MAX_UNRESOLVED of them are outstanding, new value movement is
@@ -57,10 +61,19 @@ export const SEND_TOKEN_INTENT_TTL_MS = 5 * 60 * 1000
 export const DEFAULT_SWAP_SLIPPAGE_BPS = 50
 export const SPEND_INTENT_MAX_DURABLE = 1024
 export const SPEND_INTENT_MAX_UNRESOLVED = 1024
-/** Evicted durable keys are remembered (identity only) so reuse is refused. */
-export const SPEND_INTENT_MAX_TOMBSTONES = 16384
+/**
+ * Ceiling on durable (idempotency-keyed) identities. Settled keys are
+ * remembered forever as compact digests so reuse is refused; at this many,
+ * NEW keyed spends are refused (fail closed) — capacity never evicts one.
+ */
+export const SPEND_INTENT_MAX_TOMBSTONES = 1_048_576
 export const STATE_DIR_ENV = 'AGENTPAY_STATE_DIR'
 export const SPEND_JOURNAL_FILE = 'spend-intents.jsonl'
+/**
+ * The journal is compacted (crash-safely) once it exceeds this size and twice
+ * its last compacted size, so terminal histories never accumulate.
+ */
+export const SPEND_JOURNAL_COMPACT_BYTES = 1024 * 1024
 
 /**
  * Published MCP JSON Schema for optional idempotencyKey on spend tools.
@@ -111,14 +124,31 @@ interface UnresolvedIntent {
 interface InflightIntent {
   promise: Promise<unknown>
   fingerprint: string
+  startedAt: number
+  scope?: readonly string[]
 }
 
 const settledEphemeral = new Map<string, SettledIntent<unknown>>()
 const settledDurable = new Map<string, SettledIntent<unknown>>()
 const inflight = new Map<string, InflightIntent>()
 const unresolved = new Map<string, UnresolvedIntent>()
-/** Durable keys whose cached value was evicted (or predates a restart). */
-const tombstones = new Map<string, { fingerprint: string; settledAt: number }>()
+/**
+ * Durable keys whose cached value was evicted (or predates a restart):
+ * digest(key) -> digest(fingerprint). Never evicted.
+ */
+const tombstones = new Map<string, string>()
+let durableIdentityCeiling = SPEND_INTENT_MAX_TOMBSTONES
+
+/** 128-bit digest: tombstones stay small without ever being evicted. */
+function identityDigest(value: string): string {
+  return createHash('sha256').update(value).digest('base64url').slice(0, 22)
+}
+
+/** Test seam: lower the durable-identity ceiling (undefined restores it). */
+export function _setDurableIdentityCeilingForTests(limit?: number): void {
+  durableIdentityCeiling = limit ?? SPEND_INTENT_MAX_TOMBSTONES
+}
+
 
 /** Policy/validation rejected the send before any transfer was broadcast. */
 export class DefiniteSpendFailure extends Error {
@@ -388,6 +418,17 @@ export class SettledIntentTombstoneError extends Error {
         '(evicted or from before a restart). Refusing to settle it again; use a new key.'
     )
     this.name = 'SettledIntentTombstoneError'
+  }
+}
+
+export class DurableIdentityCapacityError extends DefiniteSpendFailure {
+  constructor() {
+    super(
+      'This server has recorded the maximum number of settled idempotency keys. ' +
+        'Refusing new keyed spends rather than forgetting an old key (which could let it settle twice). ' +
+        'Retry without an idempotencyKey, or have the operator archive the spend journal.'
+    )
+    this.name = 'DurableIdentityCapacityError'
   }
 }
 
@@ -674,6 +715,10 @@ export function _resetSpendIntentStore(): void {
   inflight.clear()
   unresolved.clear()
   tombstones.clear()
+  durableIdentityCeiling = SPEND_INTENT_MAX_TOMBSTONES
+  compactThreshold = SPEND_JOURNAL_COMPACT_BYTES
+  journalBytes = 0
+  compactedBytes = 0
   journalLoaded = false
 }
 
@@ -729,7 +774,7 @@ export function resolveSpendIntent(key: string): boolean {
 export function forgetSettledIntent(key: string): void {
   settledEphemeral.delete(key)
   settledDurable.delete(key)
-  tombstones.delete(key)
+  tombstones.delete(identityDigest(key))
   journal({ op: 'forget', key })
 }
 
@@ -744,21 +789,13 @@ function rememberDurable(key: string, value: SettledIntent<unknown>): void {
     const evicted = settledDurable.get(oldest.value)
     settledDurable.delete(oldest.value)
     if (evicted) {
-      rememberTombstone(oldest.value, evicted.fingerprint, evicted.settledAt)
+      rememberTombstone(oldest.value, evicted.fingerprint)
     }
   }
 }
 
-function rememberTombstone(key: string, fingerprint: string, settledAt: number): void {
-  tombstones.delete(key)
-  tombstones.set(key, { fingerprint, settledAt })
-  while (tombstones.size > SPEND_INTENT_MAX_TOMBSTONES) {
-    const oldest = tombstones.keys().next()
-    if (oldest.done) {
-      break
-    }
-    tombstones.delete(oldest.value)
-  }
+function rememberTombstone(key: string, fingerprint: string): void {
+  tombstones.set(identityDigest(key), identityDigest(fingerprint))
 }
 
 function touch<V>(map: Map<string, V>, key: string): V | undefined {
@@ -808,8 +845,18 @@ type JournalRecord =
   | { op: 'lock'; key: string; fp: string; scope?: readonly string[] }
   | { op: 'release'; key: string }
   | { op: 'forget'; key: string }
+  /** Compacted durable tombstone: digests of key and fingerprint. */
+  | { op: 'tomb'; kd: string; fd: string }
 
 let journalLoaded = false
+let compactThreshold = SPEND_JOURNAL_COMPACT_BYTES
+let journalBytes = 0
+let compactedBytes = 0
+
+/** Test seam: lower the compaction threshold (undefined restores it). */
+export function _setJournalCompactionThresholdForTests(bytes?: number): void {
+  compactThreshold = bytes ?? SPEND_JOURNAL_COMPACT_BYTES
+}
 
 export function spendJournalPath(): string | null {
   const dir = process.env[STATE_DIR_ENV]?.trim()
@@ -822,6 +869,12 @@ function journal(record: JournalRecord): void {
     return
   }
   const dir = join(path, '..')
+  // Compact BEFORE appending: in-memory state already reflects every earlier
+  // record, and this record lands after the compacted state, so nothing it
+  // guards (e.g. a begin for a wallet write about to start) can be dropped.
+  if (journalBytes >= Math.max(compactThreshold, 2 * compactedBytes)) {
+    compactJournal(path, dir)
+  }
   const created = !existsSync(path)
   // Synchronous + fsync: a begin record must be on disk before any wallet
   // write it guards, or a crash could lose the evidence that one happened.
@@ -832,6 +885,7 @@ function journal(record: JournalRecord): void {
   const prefix = !created && !endsWithNewline(path) ? '\n' : ''
   const line = prefix + JSON.stringify({ v: 1, at: Date.now(), ...record }) + '\n'
   appendFileSync(path, line, { mode: 0o600 })
+  journalBytes += Buffer.byteLength(line)
   // File fsync failures PROPAGATE: a begin record that may not be durable
   // must abort the spend before any wallet write.
   fsyncFile(path)
@@ -839,6 +893,42 @@ function journal(record: JournalRecord): void {
     // Make the new directory entry itself durable (best effort: directory
     // fsync is unsupported on some platforms).
     fsyncDirBestEffort(dir)
+  }
+}
+
+/**
+ * Rewrite the journal as exactly the live state: in-flight begins (with
+ * scope), open locks (with scope), and durable tombstones (digests). Crash
+ * safe: temp file, fsync, atomic rename, directory fsync — a crash at any
+ * point leaves either the old or the new journal, both complete. Failure is
+ * non-fatal (the old journal stays authoritative) and backs off.
+ */
+function compactJournal(path: string, dir: string): void {
+  const lines: string[] = []
+  const rec = (record: Record<string, unknown>) => lines.push(JSON.stringify({ v: 1, ...record }))
+  for (const [key, entry] of inflight) {
+    rec({ at: entry.startedAt, op: 'begin', key, fp: entry.fingerprint, ...(entry.scope ? { scope: entry.scope } : {}) })
+  }
+  for (const [key, entry] of unresolved) {
+    rec({ at: entry.settledAt, op: 'lock', key, fp: entry.fingerprint, ...(entry.scope ? { scope: entry.scope } : {}) })
+  }
+  for (const [kd, fd] of tombstones) rec({ op: 'tomb', kd, fd })
+  for (const [key, entry] of settledDurable) {
+    rec({ op: 'tomb', kd: identityDigest(key), fd: identityDigest(entry.fingerprint) })
+  }
+  const text = lines.length > 0 ? lines.join('\n') + '\n' : ''
+  const tmp = `${path}.tmp`
+  try {
+    writeFileSync(tmp, text, { mode: 0o600 })
+    fsyncFile(tmp)
+    renameSync(tmp, path)
+    fsyncDirBestEffort(dir)
+    journalBytes = compactedBytes = Buffer.byteLength(text)
+  } catch (error: unknown) {
+    compactedBytes = journalBytes // back off; the old journal is intact
+    console.error(
+      `[agentpay] spend journal compaction failed; keeping the existing journal: ${error instanceof Error ? error.message : String(error)}`
+    )
   }
 }
 
@@ -923,7 +1013,7 @@ export function ensureJournalLoaded(): void {
       case 'settle':
         open.delete(rec.key)
         if (rec.durable) {
-          rememberTombstone(rec.key, rec.fp, at)
+          rememberTombstone(rec.key, rec.fp)
         }
         break
       case 'definite':
@@ -932,7 +1022,10 @@ export function ensureJournalLoaded(): void {
         break
       case 'forget':
         open.delete(rec.key)
-        tombstones.delete(rec.key)
+        tombstones.delete(identityDigest(rec.key))
+        break
+      case 'tomb':
+        if (typeof rec.kd === 'string' && typeof rec.fd === 'string') tombstones.set(rec.kd, rec.fd)
         break
     }
   }
@@ -944,6 +1037,11 @@ export function ensureJournalLoaded(): void {
     })
   }
   journalLoaded = true
+  journalBytes = Buffer.byteLength(text)
+  compactedBytes = 0
+  if (journalBytes >= compactThreshold) {
+    compactJournal(path, join(path, '..'))
+  }
 }
 
 function journalScope(value: unknown): readonly string[] | undefined {
@@ -954,24 +1052,45 @@ function journalScope(value: unknown): readonly string[] | undefined {
 
 // ─── Intent execution ──────────────────────────────────────────────────────
 
+type SpendIntentOptions<T> = {
+  durable?: boolean
+  fingerprint?: string
+  shouldSettle?: (_value: T) => boolean
+  /**
+   * Payment-lock keys (see x402LockScope) this intent blocks if it ends
+   * unresolved. Journaled on the begin record, before `run()` starts.
+   * Intents sharing any scope key also run one at a time: a payment that
+   * has settled but is still delivering holds its host and payee, so a
+   * concurrent payment to either cannot settle in the window before a
+   * post-settlement failure installs the lock.
+   */
+  lockScope?: readonly string[]
+}
+
 export async function withSpendIntent<T>(
   key: string,
   run: () => Promise<T>,
-  options?: {
-    durable?: boolean
-    fingerprint?: string
-    shouldSettle?: (_value: T) => boolean
-    /**
-     * Payment-lock keys (see x402LockScope) this intent blocks if it ends
-     * unresolved. Journaled on the begin record, before `run()` starts.
-     */
-    lockScope?: readonly string[]
-  }
+  options?: SpendIntentOptions<T>
+): Promise<{ value: T; replayed: boolean }> {
+  const scope = options?.lockScope && options.lockScope.length > 0 ? [...new Set(options.lockScope)].sort() : undefined
+  if (!scope) return admitAndRun(key, run, options, undefined)
+  // Sorted acquisition order: two intents can never wait on each other.
+  const acquire = (index: number): Promise<{ value: T; replayed: boolean }> =>
+    index === scope.length
+      ? admitAndRun(key, run, options, scope)
+      : withKeyedLock(`spend-scope:${scope[index]}`, () => acquire(index + 1))
+  return acquire(0)
+}
+
+async function admitAndRun<T>(
+  key: string,
+  run: () => Promise<T>,
+  options: SpendIntentOptions<T> | undefined,
+  scope: string[] | undefined
 ): Promise<{ value: T; replayed: boolean }> {
   ensureJournalLoaded()
   pruneExpired()
   const fingerprint = options?.fingerprint ?? key
-  const scope = options?.lockScope && options.lockScope.length > 0 ? [...options.lockScope] : undefined
 
   const existing = touch(settledDurable, key) ?? settledEphemeral.get(key)
   if (existing) {
@@ -979,9 +1098,9 @@ export async function withSpendIntent<T>(
     return { value: existing.value as T, replayed: true }
   }
 
-  const tombstone = tombstones.get(key)
-  if (tombstone) {
-    assertFingerprint(tombstone.fingerprint, fingerprint)
+  const tombstone = tombstones.get(identityDigest(key))
+  if (tombstone !== undefined) {
+    assertFingerprint(tombstone, identityDigest(fingerprint))
     throw new SettledIntentTombstoneError()
   }
 
@@ -1010,10 +1129,16 @@ export async function withSpendIntent<T>(
   if (unresolved.size + inflight.size >= SPEND_INTENT_MAX_UNRESOLVED) {
     throw new SpendIntentCapacityError()
   }
+  // Durable identities are never forgotten; past the ceiling, refuse new
+  // keyed spends instead (in-flight keyed intents may all settle durably).
+  if (options?.durable && tombstones.size + settledDurable.size + inflight.size >= durableIdentityCeiling) {
+    throw new DurableIdentityCapacityError()
+  }
 
   journal({ op: 'begin', key, fp: fingerprint, ...(scope ? { scope } : {}) })
+  const startedAt = Date.now()
   const promise = run()
-  inflight.set(key, { promise, fingerprint })
+  inflight.set(key, { promise, fingerprint, startedAt, ...(scope ? { scope } : {}) })
   try {
     const value = await promise
     if (options?.shouldSettle && !options.shouldSettle(value)) {

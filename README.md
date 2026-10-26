@@ -48,7 +48,7 @@ cannot be changed through MCP:
 | `AGENTPAY_POLICY_ALLOWED_RECIPIENTS` | unset | Comma-separated operator recipient allowlist |
 | `AGENTPAY_ALLOW_UNPOLICED_SPEND` | off | `1` permits value movement with no operator policy, relying only on on-chain limits |
 | `AGENTPAY_X402_MAX_PAYMENT` | unset | USDC ceiling applied on top of every per-call x402 cap; non-USDC x402 payments are refused while set |
-| `AGENTPAY_STATE_DIR` | unset | Directory for the fsync'd spend-intent journal; locks and keyed settlements survive restarts. If the journal cannot be read or fsync'd, value movement is refused |
+| `AGENTPAY_STATE_DIR` | unset | Directory for the fsync'd spend-intent journal; locks and keyed settlements survive restarts, and the journal is compacted to its live state automatically. If the journal cannot be read or fsync'd, value movement is refused |
 | `AGENTPAY_ALLOWED_PRIVATE_HOSTS` | unset | Comma-separated hosts whose private address may be reached by outbound requests |
 | `AGENTPAY_ALLOW_PRIVATE_NETWORK` | off | Development only: permit private destinations and plain `http` |
 

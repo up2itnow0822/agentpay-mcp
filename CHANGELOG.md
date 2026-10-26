@@ -50,8 +50,9 @@ which maps each finding to its repair and proving test.
   requirement; the zero address is refused as payee and as `pay_to`.
 - F4: Value-pack examples use exact 6-decimal USDC caps (principal plus the
   0.77% protocol fee) and a single-use approval record bound to the final
-  offer; a paid body that fails mid-read is a payment-aware error; mainnet
-  requires an explicit opt-in.
+  offer; a paid body that fails mid-read is a payment-aware error; every
+  request (probe, paid retry, free fetch) uses the server's safe transport;
+  mainnet requires an explicit opt-in.
 - F6, F13, F17: Workflow actions pinned to full commit SHAs; review-gate
   evidence and `codex-waived` waivers bound to the live base tip; the daily-review analysis job is
   read-only and a deterministic job owns the single issue write, validating
@@ -74,8 +75,14 @@ which maps each finding to its repair and proving test.
 - F12: Spend classification uses `AsyncLocalStorage` on a once-hooked wallet
   client, so concurrent spends cannot be misattributed.
 - F14: Unresolved spend-intent locks are never evicted; new spends are refused
-  at capacity; evicted keyed settlements are tombstoned; the journal survives a
-  torn final line.
+  at capacity; settled idempotency keys are never forgotten (compact digests;
+  new keyed spends are refused at a ceiling instead); the journal survives a
+  torn final line and is compacted crash-safely to its live state, so it
+  cannot grow without bound.
+- x402 payments that share a host or payee run one at a time, so a second
+  payment cannot settle while the first is still being delivered.
+- review-gate fails closed when the repository activity feed (the only
+  unforgeable base timestamp) is unavailable.
 - F11: A malformed operator policy — including an allowlist variable that
   names no address, or any operator policy with no constraint — denies all
   spending and is reported at startup.

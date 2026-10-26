@@ -24,7 +24,8 @@
   No direct pushes, force-pushes, or branch deletion.
 - Every outbound HTTP request to a caller-influenced destination goes through
   `src/utils/safe-fetch.ts` (https, no private destinations, pinned DNS, no
-  automatic redirects, capped bodies). Never call global `fetch` for it.
+  automatic redirects, capped bodies). Never call global `fetch` for it —
+  this includes the value-pack examples, which import it directly.
 - Every value-moving handler runs inside `withSpendIntent` and wraps wallet
   writes in `runClassifiedSpend`; failures after a possible broadcast lock the
   intent. Unresolved locks are never evicted; only the operator CLI clears them.
@@ -32,7 +33,9 @@
   signed requirement must match the caller-approved terms. x402 intents carry
   a `lockScope` (canonical host + payee): a paid-but-undelivered payment,
   including a paid non-2xx response, blocks new x402 payments to that host
-  and that payee until the operator CLI resolves it.
+  and that payee until the operator CLI resolves it. Intents sharing a scope
+  key run one at a time. Settled idempotency keys are never evicted; the
+  spend journal is compacted only to live state (temp + fsync + rename).
 - Spend policy: the operator policy comes only from the environment; MCP
   callers may only tighten. No MCP tool may loosen policy or clear spend locks.
 - Remote free text (HTTP bodies, registry metadata, error strings) reaches
@@ -61,6 +64,8 @@
   `tests/x402-onchain-write-fencing.test.ts` (real SDK, zero-write proofs),
   `tests/x402-session-start-idempotency.test.ts`,
   `tests/x402-payment-locks.test.ts`, `tests/spend-intent.test.ts`,
+  `tests/spend-journal-compaction.test.ts`,
+  `tests/value-pack-safe-transport.test.ts`,
   `tests/workflow-security-policy.test.ts`,
   `tests/daily-repair-publisher.test.ts` and
   `tests/daily-review-publisher.test.ts` (run the real workflow publishers

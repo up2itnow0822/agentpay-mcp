@@ -87,9 +87,10 @@ this via config.
   servers should set it, and reconcile locks with
   `agentpay-mcp spend-intents list` / `resolve <key>` while the server is
   stopped.
-- **Tombstones are capped.** Evicted keyed settlements are remembered as
-  tombstones up to 16,384 entries; beyond that, very old idempotency keys may
-  be accepted as new.
+- **Settled idempotency keys are never forgotten, so their number has a
+  ceiling.** Each one is kept as a compact digest. After 1,048,576 settled
+  keys, new spends that carry an `idempotencyKey` are refused (keyless spends
+  still work); an old key is never forgotten to make room.
 - **Application policy is defence in depth.** On-chain AgentAccountV2 limits
   remain the tamper-resistant control. The in-process policy can no longer be
   weakened by the agent, but it is lost on restart and is only as trustworthy

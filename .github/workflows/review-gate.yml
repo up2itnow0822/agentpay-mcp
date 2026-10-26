@@ -44,12 +44,14 @@
 #       last base_ref_changed event,
 #       committer/author date of baseTipSha        (forgeable; lower bound),
 #       latest push/merge activity whose `after` is baseTipSha
-#                                                  (server timestamp),
+#                                                  (server timestamp; REQUIRED),
 #       earliest time a prior review-gate check on this head observed a
 #       DIFFERENT tip for the same base ref        (server completed_at))
 #   Every bound only ever moves reviewNotBeforeMs later (stricter). The base
 #   tip or its commit date being unreadable throws, which fails the gate
-#   closed. If the tip moves between the first evaluation and the
+#   closed — and so does a missing server timestamp: an activity feed that is
+#   unavailable (after one retry), unexpected, or without the tip never falls
+#   back to the forgeable commit date. The same binding governs waivers. If the tip moves between the first evaluation and the
 #   pre-publish re-check, the gate fails closed ("Base moved"). Every
 #   completed verdict embeds a `review-gate-binding` attestation of
 #   {pr, head, base_ref, base (live tip), pr_base, observed_at} so the
@@ -315,17 +317,28 @@ jobs:
             }
 
             // Server-side timestamp of the push/merge that made tipSha the
-            // tip of baseRef (repository activity API). Best effort: an
-            // unavailable or truncated activity feed only drops this one
-            // bound; the commit-date and prior-observation bounds remain.
+            // tip of baseRef (repository activity API). It is the only
+            // bound the base-branch author cannot forge, so the caller fails
+            // closed unless it is found: an unavailable feed (after one
+            // retry), an unexpected payload, or a feed without the tip all
+            // block the evaluation instead of falling back to commit dates.
             async function baseTipActivityMs(baseRef, tipSha) {
               try {
-                const { data } = await github.request('GET /repos/{owner}/{repo}/activity', {
-                  owner: context.repo.owner,
-                  repo: context.repo.repo,
-                  ref: `refs/heads/${baseRef}`,
-                  per_page: 100,
-                });
+                let data;
+                for (let attempt = 0; ; attempt++) {
+                  try {
+                    ({ data } = await github.request('GET /repos/{owner}/{repo}/activity', {
+                      owner: context.repo.owner,
+                      repo: context.repo.repo,
+                      ref: `refs/heads/${baseRef}`,
+                      per_page: 100,
+                    }));
+                    break;
+                  } catch (err) {
+                    if (attempt >= 1) throw err;
+                    await new Promise(resolve => setTimeout(resolve, 2000));
+                  }
+                }
                 if (!Array.isArray(data)) return { ms: 0, source: 'activity-unexpected' };
                 let ms = 0;
                 for (const item of data) {
@@ -411,12 +424,13 @@ jobs:
                 observedAtMs,
               );
               const activity = await baseTipActivityMs(baseRef, baseTipSha);
-              if (activity.source === 'activity-no-match' || activity.source === 'activity-unexpected') {
-                // The feed answered but does not show when this tip became
-                // current. Do not fall back to a fakeable commit date.
+              if (activity.source !== 'activity') {
+                // No server-side proof of when this tip became current (feed
+                // unavailable, unexpected, or without the tip). Never fall
+                // back to a commit date the base-branch author controls.
                 throw new Error(
-                  `PR #${prNumber} base tip ${baseTipSha} is not in the repository activity feed for ` +
-                  `${baseRef}; refusing to bind review evidence to an unprovable base`
+                  `PR #${prNumber} base tip ${baseTipSha}: repository activity for ${baseRef} ` +
+                  `is ${activity.source}; refusing to bind review evidence to an unprovable base`
                 );
               }
               const observedDifferentMs = await priorDifferentBaseObservationMs(headSha, baseRef, baseTipSha);

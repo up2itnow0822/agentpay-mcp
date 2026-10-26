@@ -232,6 +232,49 @@ describe('host and payee locks after a settled-but-undelivered payment', () => {
   })
 })
 
+describe('in-flight payments reserve their host and payee (Codex pass 4, P1)', () => {
+  // The first payment settles, then its body dies a little later: until then
+  // nothing is locked yet, so a concurrent payment must wait, not pay.
+  const slowBrokenBody = () =>
+    new Response(
+      new ReadableStream({
+        start(controller) {
+          setTimeout(() => controller.error(new Error('connection reset mid-body')), 40)
+        },
+      }),
+      { status: 200 }
+    )
+  const later = <T,>(ms: number, f: () => Promise<T>) => new Promise<T>((r) => setTimeout(() => r(f()), ms))
+
+  it.each([
+    ['the same host on another path', 'https://merchant.example.com/other', PAYEE, 'merchant.example.com'],
+    ['the same payee on another host', 'https://unrelated.example.org/x', PAYEE, `payee ${PAYEE}`],
+  ])('a concurrent payment to %s waits and is then refused', async (_label, url, payTo, locked) => {
+    const payments = { count: 0 }
+    payingClient(slowBrokenBody, payments)
+    const [first, second] = await Promise.all([
+      pay('https://merchant.example.com/paid'),
+      later(5, () => pay(url, payTo)),
+    ])
+    expect(first.content[0]!.text).toContain('failed after settlement')
+    expect(second.isError).toBe(true)
+    expect(second.content[0]!.text).toContain(`New x402 payments to ${locked} are locked`)
+    expect(payments.count).toBe(1)
+  })
+
+  it('unrelated payments are not serialised behind each other', async () => {
+    const payments = { count: 0 }
+    payingClient(() => new Response('ok', { status: 200 }), payments)
+    const [a, b] = await Promise.all([
+      pay('https://merchant.example.com/a', PAYEE),
+      pay('https://unrelated.example.org/b', OTHER_PAYEE),
+    ])
+    expect(a.isError).toBeUndefined()
+    expect(b.isError).toBeUndefined()
+    expect(payments.count).toBe(2)
+  })
+})
+
 describe('durability of host and payee locks', () => {
   it('survives a restart, and a torn final record cannot drop it', async () => {
     process.env[STATE_DIR_ENV] = mkdtempSync(join(tmpdir(), 'agentpay-locks-'))

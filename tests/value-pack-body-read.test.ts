@@ -5,7 +5,7 @@
  * would retry (re-entering a consumed approval) or that a caller's daily
  * budget would not count.
  */
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 const TX = '0x' + 'ef'.repeat(32)
 
@@ -19,7 +19,8 @@ vi.mock('agentwallet-sdk', async (importOriginal) => {
       onBeforePayment: (_req: unknown, _url: string) => boolean
       onPaymentComplete: (_log: unknown) => void
     }) => ({
-      fetch: async (url: string) => {
+      // Production probes through the safe transport and hands the 402 here.
+      settle402AndRetry: async (_probe: Response, url: string) => {
         const offer = {
           scheme: 'exact',
           network: 'base-sepolia:84532',
@@ -47,6 +48,8 @@ vi.mock('agentwallet-sdk', async (importOriginal) => {
   }
 })
 
+import { _setSafeTransportTestOverrides } from '../src/utils/safe-fetch.js'
+import { installDefaultTransportOverrides } from './setup/test-env.js'
 import { createPaymentApproval } from '../examples/value-packs/shared/usdc-approval.js'
 import { fetchWithPayment } from '../examples/value-packs/shared/x402-client.js'
 import { PaymentAwareError, settledPaymentAmount, withRetry } from '../examples/value-packs/shared/payment-retry.js'
@@ -67,7 +70,17 @@ function approval() {
 
 const wallet = { chain: { id: 84532 } } as unknown as Parameters<typeof fetchWithPayment>[0]
 
-afterEach(() => vi.restoreAllMocks())
+beforeEach(() => {
+  // The unpaid probe answers 402 through the safe transport.
+  _setSafeTransportTestOverrides({
+    resolver: async () => [{ address: '93.184.215.14', family: 4 }],
+    connector: async () => new Response('payment required', { status: 402 }),
+  })
+})
+afterEach(() => {
+  vi.restoreAllMocks()
+  installDefaultTransportOverrides()
+})
 
 describe('value-pack paid body read after settlement', () => {
   it('surfaces a PaymentAwareError with the settled amount, and withRetry does not re-enter', async () => {

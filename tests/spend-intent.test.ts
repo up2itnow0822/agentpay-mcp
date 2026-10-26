@@ -22,6 +22,7 @@ import {
   withKeyedLock,
   _resetSpendIntentStore,
   _spendIntentStoreSizes,
+  _setDurableIdentityCeilingForTests,
   isConfirmedUnchargedRevert,
   requireSettlementHash,
   runClassifiedSpend,
@@ -439,6 +440,39 @@ describe('withSpendIntent', () => {
       })
     ).rejects.toBeInstanceOf(SpendIntentConflictError)
     expect(run).toHaveBeenCalledTimes(1)
+  })
+
+  it('never evicts a durable tombstone, however many keyed spends settle after it (Codex pass 4, P1)', async () => {
+    await withSpendIntent('durable#first', async () => '0xfirst', { durable: true, fingerprint: 'fp-first' })
+    for (let i = 0; i < SPEND_INTENT_MAX_DURABLE + 16_384 + 16; i++) {
+      await withSpendIntent(`durable#later-${i}`, async () => `0x${i}`, { durable: true })
+    }
+    const retry = vi.fn().mockResolvedValue('0xagain')
+    await expect(
+      withSpendIntent('durable#first', retry, { durable: true, fingerprint: 'fp-first' })
+    ).rejects.toBeInstanceOf(SettledIntentTombstoneError)
+    // A different payload under the old key is still a conflict, not a new spend.
+    await expect(
+      withSpendIntent('durable#first', retry, { durable: true, fingerprint: 'fp-other' })
+    ).rejects.toBeInstanceOf(SpendIntentConflictError)
+    expect(retry).not.toHaveBeenCalled()
+  })
+
+  it('fails closed at the durable-identity ceiling instead of evicting (Codex pass 4, P1)', async () => {
+    _setDurableIdentityCeilingForTests(8)
+    try {
+      for (let i = 0; i < 8; i++) {
+        await withSpendIntent(`keyed#${i}`, async () => `0x${i}`, { durable: true })
+      }
+      const run = vi.fn().mockResolvedValue('0xnew')
+      await expect(withSpendIntent('keyed#8', run, { durable: true })).rejects.toThrow(/idempotency keys/)
+      expect(run).not.toHaveBeenCalled()
+      // Existing keys still replay; keyless spends are unaffected.
+      await expect(withSpendIntent('keyed#0', run, { durable: true })).resolves.toMatchObject({ replayed: true })
+      await expect(withSpendIntent('keyless#1', async () => '0xok')).resolves.toMatchObject({ replayed: false })
+    } finally {
+      _setDurableIdentityCeilingForTests(undefined)
+    }
   })
 
   it('tombstones an evicted durable key so reuse is refused, never re-executed', async () => {

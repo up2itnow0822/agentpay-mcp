@@ -46,7 +46,7 @@ that proves it. It is the source of truth for the v5.0.0 breaking changes.
 | 11 | Medium | Caller can weaken its own policy | Operator policy from env (immutable, default deny; a malformed value — including an allowlist that names no address, or a policy with no constraint — denies everything and is reported at startup); caller updates layer and may only tighten; scope/layer caps. `src/tools/budget.ts` | `tests/budget.test.ts` (F11 blocks) |
 | 12 | Medium | Classification race on shared client | Wallet client hooked once; `AsyncLocalStorage` attributes each write to its own spend. No swap/restore. | `tests/spend-intent.test.ts` (F12 block, incl. exact original interleaving) |
 | 13 | Medium | review-gate ignores base advances | Ordinary review evidence and `codex-waived` waivers are bound to the live base tip (read from the branch, not the PR API's possibly lagging `base.sha`). `.github/workflows/review-gate.yml` | `tests/workflow-security-policy.test.ts`, `tests/review-gate-waiver.test.ts` (runs the real gate script) |
-| 14 | Medium | Capacity eviction re-enables settlement | Unresolved locks never evicted; new spends refused at capacity; operator reconciliation CLI; optional crash-safe journal (torn-tail safe, directory fsync); evicted keyed settlements tombstoned; `send_token` pre-write failures classified definite. | `tests/spend-intent.test.ts`, `tests/spend-intents-cli.test.ts`, `tests/transfers.test.ts` |
+| 14 | Medium | Capacity eviction re-enables settlement | Unresolved locks never evicted; new spends refused at capacity; operator reconciliation CLI; optional crash-safe journal (torn-tail safe, directory fsync, compacted to live state); evicted keyed settlements tombstoned as digests that are never evicted (new keyed spends refused at a ceiling instead); `send_token` pre-write failures classified definite. | `tests/spend-intent.test.ts`, `tests/spend-intents-cli.test.ts`, `tests/spend-journal-compaction.test.ts`, `tests/transfers.test.ts` |
 | 15 | Medium | Unrestricted outbound requests | Safe transport on every caller-selected destination (x402, quote, sessions, kill callback); `Host` and TLS SNI come only from the validated URL. | `tests/safe-fetch.test.ts`, `tests/x402-session-start-idempotency.test.ts` |
 | 16 | Medium | `send_payment` has no idempotency | Spend-intent identity, optional `idempotencyKey`, reserved policy, classified broadcast, settlement-hash requirement. `create_escrow` brought under the same contract. | `tests/payments.test.ts` (F16 block), `tests/escrow.test.ts` |
 | 17 | Medium | Write-capable daily-review agent reads untrusted text | Analysis job is read-only and writes a local report; a deterministic, schema-validating publish job owns the single issue write. Daily repair gets the same split: a read-only `plan` job, a deterministic `publish` job that alone holds `REPAIR_TOKEN`, validates the patch and opens PRs, and never merges. Every workflow declares `permissions`. `.github/workflows/` | `tests/workflow-security-policy.test.ts`, `tests/daily-review-publisher.test.ts`, `tests/daily-repair-publisher.test.ts` |
@@ -56,8 +56,8 @@ that proves it. It is the source of truth for the v5.0.0 breaking changes.
 
 - Spend-intent state is process-local unless `AGENTPAY_STATE_DIR` is set.
   Operators running long-lived production servers should set it.
-- Tombstones for evicted keyed settlements are capped (16,384); beyond that,
-  very old idempotency keys may be accepted as new.
+- Settled idempotency keys are never forgotten; past 1,048,576 of them, new
+  keyed spends are refused (fail closed) rather than evicting an old key.
 - On-chain AgentAccountV2 limits remain the tamper-resistant control; the
   application policy is defence in depth that the agent can no longer weaken.
 - The MCP stdio channel is still the caller boundary: any process that can
@@ -124,3 +124,13 @@ two repairs still partial and one new low regression; all were repaired in
 | P1 value-pack approval cap ignored the fee | Principal plus fee compared to the cap at approval and at the final offer | `tests/value-pack-cap-binding.test.ts` |
 | P1 value-pack paid body read lost settlement state | Body-read failure goes through `wrapPaymentFailure` | `tests/value-pack-body-read.test.ts` |
 | P1 `server.json` missing the v5 policy environment | Every variable the server reads is declared (also fixes missing `AGENT_WALLET_ADDRESS` and the stale `BASE_RPC_URL`) | `tests/server-metadata.test.ts` |
+
+## Codex review of `7f47ee2`
+
+| Finding | Repair | Proof |
+| --- | --- | --- |
+| P1 review-gate fell back to commit dates when the activity feed was unavailable | One retry, then fail closed: only the server-side activity timestamp can bind evidence to the live base | `tests/review-gate-waiver.test.ts` (real gate script; the outage case published success before the fix) |
+| P1 in-flight x402 payments did not reserve their host/payee | Intents sharing a host or payee lock key run one at a time (sorted keyed locks, deadlock-free); a concurrent payment waits and then sees the lock | `tests/x402-payment-locks.test.ts` |
+| P1 durable idempotency tombstones evicted after 16,384 | Never evicted (128-bit digests); at 1,048,576 durable identities new keyed spends are refused | `tests/spend-intent.test.ts` |
+| P2 append-only journal unbounded | Crash-safe compaction (temp, fsync, rename, dir fsync) to live state: in-flight begins, locks with scope, tombstones; runs on load and above a size threshold, before the next append | `tests/spend-journal-compaction.test.ts` |
+| P1 value-pack examples bypassed the safe transport | Probe, paid retry (`settle402AndRetry` with the same transport) and free fetches use `src/utils/safe-fetch.ts`; bodies read with caps | `tests/value-pack-safe-transport.test.ts` |

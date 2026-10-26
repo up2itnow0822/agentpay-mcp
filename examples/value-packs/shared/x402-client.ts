@@ -18,6 +18,19 @@ import { base, baseSepolia } from 'viem/chains';
 import { createWallet } from 'agentwallet-sdk';
 import { printInfo, printWarning, printError } from './ui.js';
 import { wrapPaymentFailure } from './payment-retry.js';
+// The packs use the MCP server's own outbound transport, so there is one
+// implementation of the SSRF defences: https only, private / loopback /
+// link-local / metadata destinations refused, DNS resolved once and pinned,
+// no automatic redirects, bounded bodies. (If you copy a pack out of this
+// repository, keep an equivalent transport — never fall back to bare fetch.)
+import {
+  UnsafeDestinationError,
+  createSafeTransport,
+  readLimitedText,
+} from '../../../src/utils/safe-fetch.js';
+
+/** Most a 402 challenge body may be (it is parsed, not displayed). */
+const MAX_CHALLENGE_BYTES = 64 * 1024;
 import {
   ApprovalRejectedError,
   MAINNET_OPT_IN_ENV,
@@ -150,12 +163,21 @@ export async function probeEndpoint(
   const endpoint = canonicalEndpoint(url);
   let response: Response;
   try {
-    response = await fetch(endpoint, {
+    response = await createSafeTransport()(endpoint, {
       method,
       redirect: 'manual',
       signal: AbortSignal.timeout(timeoutMs),
     });
-  } catch {
+  } catch (err) {
+    if (err instanceof UnsafeDestinationError) {
+      return {
+        endpoint,
+        method,
+        network: network.network,
+        payable: false,
+        reason: `refused outbound request: ${err.message}`,
+      };
+    }
     return null; // Network error — treat as unavailable
   }
 
@@ -169,7 +191,7 @@ export async function probeEndpoint(
   let paymentRequired: unknown = header ? decodePaymentRequiredHeader(header) : null;
   if (!paymentRequired) {
     try {
-      paymentRequired = JSON.parse(await response.text());
+      paymentRequired = JSON.parse((await readLimitedText(response, MAX_CHALLENGE_BYTES)).text);
     } catch {
       paymentRequired = null;
     }
@@ -370,14 +392,27 @@ export async function fetchWithPayment(
     ...(opts.headers ?? {}),
   };
 
+  // Both hops — the unpaid probe and the SDK's paid retry — go through one
+  // safe transport (one DNS pin). Never global fetch.
+  const transport = createSafeTransport();
+  const sdkTransport = ((input: string | URL | Request, init?: RequestInit): Promise<Response> =>
+    typeof input === 'string' || input instanceof URL
+      ? transport(input.toString(), init)
+      : Promise.reject(new TypeError('safe transport accepts URL strings only'))) as typeof globalThis.fetch;
+  const hopInit: RequestInit = {
+    method,
+    headers,
+    ...(opts.body ? { body: opts.body } : {}),
+    signal: AbortSignal.timeout(timeoutMs),
+    redirect: 'manual',
+  };
+
   let response: Response;
   try {
-    response = await x402Client.fetch(url, {
-      method,
-      headers,
-      ...(opts.body ? { body: opts.body } : {}),
-      signal: AbortSignal.timeout(timeoutMs),
-    });
+    const probe = await transport(url, hopInit);
+    response = probe.status === 402
+      ? await x402Client.settle402AndRetry(probe, url, hopInit, sdkTransport)
+      : probe;
   } catch (err) {
     if (offerEvaluated) consumePaymentApproval(approval);
     if (err instanceof Error && err.name === 'X402BudgetExceededError') {
@@ -411,7 +446,8 @@ export async function fetchWithPayment(
   // withRetry would retry or that a caller would not count against its budget.
   let body: string;
   try {
-    body = await response.text();
+    // Bounded read: oversized paid bodies are truncated for display.
+    body = (await readLimitedText(response)).text;
   } catch (err) {
     wrapPaymentFailure(err, {
       paymentInitiated,
@@ -444,7 +480,7 @@ export async function fetchFree(
   } = {}
 ): Promise<{ status: number; body: string } | null> {
   try {
-    const response = await fetch(url, {
+    const response = await createSafeTransport()(url, {
       headers: {
         Accept: 'application/json, text/plain, */*',
         'User-Agent': 'agentpay-value-packs/1.0',
@@ -452,10 +488,10 @@ export async function fetchFree(
       },
       signal: AbortSignal.timeout(opts.timeoutMs ?? 15000),
     });
-    const body = await response.text();
-    return { status: response.status, body };
+    const { text } = await readLimitedText(response);
+    return { status: response.status, body: text };
   } catch {
-    return null;
+    return null; // network error or refused destination
   }
 }
 
