@@ -85,8 +85,11 @@ try {
     const privateKey = '0x59c6995e998f97a5a0044966f094538a827fb7fe6bfe7eda4cbaef250f7892f6';
     const account = privateKeyToAccount(privateKey);
     const walletClient = createWalletClient({ account, chain: baseSepolia, transport: http() });
-    const parsed = x402.X402PaySchema.safeParse({ url: 'https://example.com/paid', max_payment_eth: '0.001', timeout_ms: 1000 });
+    const parsed = x402.X402PaySchema.safeParse({ url: 'https://example.com/paid', max_payment_eth: '0.001', pay_to: '0x1111111111111111111111111111111111111111', timeout_ms: 1000 });
     if (!parsed.success) throw new Error('x402 schema import failed');
+    // 5.0.0 contract: a cap and an approved payee are mandatory.
+    if (x402.X402PaySchema.safeParse({ url: 'https://example.com/paid', timeout_ms: 1000 }).success) throw new Error('x402 schema accepted a call without max_payment_eth/pay_to');
+    if (x402.x402QuoteTool.name !== 'x402_quote') throw new Error('x402_quote tool missing');
     if (x402.x402PayTool.name !== 'x402_pay') throw new Error('x402 tool import failed');
     if (typeof clientUtils.createAgentWallet !== 'function') throw new Error('wallet client utility import failed');
     if (base.id !== 8453 || baseSepolia.id !== 84532) throw new Error('Base chain imports failed');
