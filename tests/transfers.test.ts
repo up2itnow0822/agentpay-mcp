@@ -24,23 +24,28 @@ vi.mock('agentwallet-sdk', () => ({
 
 // ─── Mock client utils ─────────────────────────────────────────────────────
 
+const SHARED_WALLET = vi.hoisted(() => ({
+  address: '0x1234567890123456789012345678901234567890',
+  publicClient: {},
+  walletClient: {
+    account: { address: '0xdeadbeef00000000000000000000000000000001' },
+    writeContract: async () => '0xwrite',
+  },
+  contract: { write: { agentTransferToken: () => undefined } },
+  chain: { id: 8453 },
+}))
+
 vi.mock('../src/utils/client.js', () => ({
   getConfig: vi.fn(() => ({
     chainId: 8453,
     walletAddress: '0x1234567890123456789012345678901234567890',
   })),
-  getWallet: vi.fn(() => ({
-    address: '0x1234567890123456789012345678901234567890',
-    publicClient: {},
-    walletClient: { account: { address: '0xdeadbeef00000000000000000000000000000001' } },
-    contract: { write: { agentTransferToken: vi.fn() } },
-    chain: { id: 8453 },
-  })),
+  getWallet: vi.fn(() => SHARED_WALLET),
 }))
 
 import { handleSendToken, handleGetBalances } from '../src/tools/transfers.js'
 import { getGlobalRegistry, agentTransferToken, getBalances } from 'agentwallet-sdk'
-import { _resetSpendIntentStore } from '../src/utils/spend-intent.js'
+import { _resetSpendIntentStore, _spendIntentStoreSizes } from '../src/utils/spend-intent.js'
 
 const mockGetGlobalRegistry = vi.mocked(getGlobalRegistry)
 const mockAgentTransferToken = vi.mocked(agentTransferToken)
@@ -234,7 +239,11 @@ describe('send_token', () => {
 
   it('fail-closes an identical retry after an unresolved broadcast', async () => {
     mockUsdcRegistry()
-    mockAgentTransferToken.mockRejectedValueOnce(new Error('rpc timeout'))
+    mockAgentTransferToken.mockImplementationOnce(async (wallet: any) => {
+      // The write reached the wallet client, then the receipt was lost.
+      await wallet.walletClient.writeContract({})
+      throw new Error('rpc timeout')
+    })
 
     const failed = await handleSendToken(usdcSend)
     const retry = await handleSendToken(usdcSend)
@@ -244,6 +253,23 @@ describe('send_token', () => {
     expect(retry.isError).toBe(true)
     expect(retry.content[0].text).toContain('did not return a transaction hash')
     expect(mockAgentTransferToken).toHaveBeenCalledTimes(1)
+  })
+
+  it('keeps a failure before any wallet write retryable (does not consume a lock slot)', async () => {
+    mockUsdcRegistry()
+    mockAgentTransferToken
+      .mockRejectedValueOnce(new Error('execution reverted: insufficient balance (simulation)'))
+      .mockResolvedValueOnce('0xc480941a588f513a6f4ecbcee0826ea66147b0f68488131572522830b4ac60fb' as any)
+
+    const failed = await handleSendToken(usdcSend)
+    const retry = await handleSendToken(usdcSend)
+
+    expect(failed.isError).toBe(true)
+    expect(retry.isError).toBeUndefined()
+    expect(JSON.parse(retry.content[0].text).txHash).toBe(
+      '0xc480941a588f513a6f4ecbcee0826ea66147b0f68488131572522830b4ac60fb'
+    )
+    expect(_spendIntentStoreSizes().unresolved).toBe(0)
   })
 
   it('broadcasts two equal payments when idempotency keys differ', async () => {

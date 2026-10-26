@@ -4,8 +4,14 @@
  * x402_pay and x402_session_start used to each construct createX402Client
  * with a copy of the same onBeforePayment guards. One factory owns:
  *   - payable payTo / parsable amount
- *   - max_payment_eth in the selected asset's base units
+ *   - the caller-approved terms (pay_to, optional asset/network) — F3
+ *   - the MANDATORY max_payment_eth cap (and operator ceiling) in the
+ *     selected asset's base units
  *   - SpendingPolicy reserve on approve, commit on payment, release if unused
+ *   - the outbound transport: every hop (the unpaid probe and the paid retry)
+ *     goes through one pinned, byte-capped safe transport (F8, F15). The SDK's
+ *     own fetch() would use globalThis.fetch, so the probe is made here and
+ *     the challenge is handed to settle402AndRetry with the same transport.
  */
 import { createX402Client, type X402TransactionLog } from 'agentwallet-sdk'
 import type { AgentWalletInstance } from './client.js'
@@ -13,9 +19,13 @@ import { supportedX402NetworksForChainId } from './x402-networks.js'
 import {
   assertPayableX402Recipient,
   assertParsableX402Amount,
-  maxPaymentBaseUnits,
+  assertPaymentCap,
+  assertX402TermsApproved,
+  effectiveCapBaseUnits,
   resolveX402AssetDecimals,
+  type ApprovedX402Terms,
 } from './payment-cap.js'
+import type { OutboundFetch } from './safe-fetch.js'
 import {
   commitSpendReservation,
   lockSpendReservation,
@@ -29,13 +39,22 @@ export type AgentPayX402Kind = 'payment' | 'session'
 
 export interface AgentPayX402ClientOptions {
   chainId: number
-  maxPaymentEth?: string
+  /** Mandatory per-call cap (human amount in the selected asset). */
+  maxPaymentEth: string
+  /** Mandatory caller-approved terms. */
+  approved: ApprovedX402Terms
+  /** Pinned, byte-capped transport for every hop of this call. */
+  transport: OutboundFetch
   kind?: AgentPayX402Kind
   onPaymentComplete?: (log: X402TransactionLog) => void
 }
 
+export interface AgentPayX402Fetcher {
+  fetch: (_url: string, _init?: RequestInit) => Promise<Response>
+}
+
 export interface AgentPayX402Client {
-  client: ReturnType<typeof createX402Client>
+  client: AgentPayX402Fetcher
   releaseUnusedReservation: () => void
   lockUnusedReservation: () => void
   /**
@@ -89,9 +108,11 @@ export function createAgentPayX402Client(
   options: AgentPayX402ClientOptions
 ): AgentPayX402Client {
   const kind = options.kind ?? 'payment'
+  const cap = assertPaymentCap(options.maxPaymentEth)
+  const approvedPayTo = assertPayableX402Recipient(options.approved.payTo)
   let reservation: SpendReservation | null = null
 
-  const client = createX402Client(wallet, {
+  const sdk = createX402Client(wallet, {
     autoPay: true,
     maxRetries: 1,
     supportedNetworks: supportedX402NetworksForChainId(options.chainId),
@@ -101,27 +122,20 @@ export function createAgentPayX402Client(
         // messages (SDK allowlist rejection, viem InvalidAddressError).
         // Reject non-addresses before signing or interpolating.
         const merchant = assertPayableX402Recipient(req.payTo)
+        assertX402TermsApproved(req, { ...options.approved, payTo: approvedPayTo })
         // req.amount is remote-controlled; a raw BigInt() here would put the
         // whole value verbatim into V8's "Cannot convert <amount> to a
         // BigInt" message.
         const amount = assertParsableX402Amount(req.amount)
-        if (options.maxPaymentEth) {
-          const maxRaw = maxPaymentBaseUnits(
-            options.maxPaymentEth,
-            req.asset,
-            options.chainId
+        if (amount === 0n) {
+          throw new DefiniteSpendFailure('x402 payment amount is zero; refusing to sign.')
+        }
+        // The cap is mandatory: there is no code path that signs without it.
+        const maxRaw = effectiveCapBaseUnits(cap, req.asset, options.chainId)
+        if (amount > maxRaw) {
+          throw new DefiniteSpendFailure(
+            capExceededMessage(kind, amount, maxRaw, req.asset, cap)
           )
-          if (amount > maxRaw) {
-            throw new DefiniteSpendFailure(
-              capExceededMessage(
-                kind,
-                amount,
-                maxRaw,
-                req.asset,
-                options.maxPaymentEth
-              )
-            )
-          }
         }
 
         // amount is in the offered asset's base units; the decimals thunk
@@ -161,6 +175,27 @@ export function createAgentPayX402Client(
       options.onPaymentComplete?.(log)
     },
   })
+
+  const transport = options.transport
+  // The SDK types its fetch hook like global fetch; we only ever pass URLs.
+  const sdkTransport = (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
+    if (typeof input !== 'string' && !(input instanceof URL)) {
+      return Promise.reject(new TypeError('safe transport accepts URL strings only'))
+    }
+    return transport(input.toString(), init)
+  }
+  const client: AgentPayX402Fetcher = {
+    async fetch(url: string, init: RequestInit = {}) {
+      // Never follow redirects automatically: a 3xx is returned as-is, and
+      // the SDK refuses to pay a challenge reached through one.
+      const hopInit: RequestInit = { ...init, redirect: 'manual' }
+      const probe = await transport(url, hopInit)
+      if (probe.status !== 402) {
+        return probe
+      }
+      return sdk.settle402AndRetry(probe, url, hopInit, sdkTransport)
+    },
+  }
 
   return {
     client,

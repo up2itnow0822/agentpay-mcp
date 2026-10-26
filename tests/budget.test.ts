@@ -34,6 +34,10 @@ import {
   reserveSpendPolicy,
   withReservedSpend,
   _resetPolicyStore,
+  ALLOW_UNPOLICED_SPEND_ENV,
+  MAX_POLICY_LAYERS_PER_SCOPE,
+  MAX_POLICY_SCOPES,
+  OPERATOR_POLICY_ENV,
 } from '../src/tools/budget.js'
 import { SpendingPolicy, checkBudget } from 'agentwallet-sdk'
 import { policyEngine, reservedResult } from './helpers/policy-engine.js'
@@ -78,14 +82,14 @@ describe('set_spend_policy', () => {
 
   it('creates a policy with allowlisted recipients', async () => {
     const result = await handleSetSpendPolicy({
-      allowedRecipients: ['0xabc', '0xdef'],
+      allowedRecipients: ['0x00000000000000000000000000000000000000ab', '0x00000000000000000000000000000000000000de'],
     })
 
     expect(result.isError).toBeUndefined()
     const data = JSON.parse(result.content[0].text)
-    expect(data.policy.allowedRecipients).toEqual(['0xabc', '0xdef'])
+    expect(data.policy.allowedRecipients).toEqual(['0x00000000000000000000000000000000000000ab', '0x00000000000000000000000000000000000000de'])
     expect(MockSpendingPolicy).toHaveBeenCalledWith(
-      expect.objectContaining({ merchantAllowlist: ['0xabc', '0xdef'] })
+      expect.objectContaining({ merchantAllowlist: ['0x00000000000000000000000000000000000000ab', '0x00000000000000000000000000000000000000de'] })
     )
   })
 
@@ -157,7 +161,7 @@ describe('enforceSpendPolicy', () => {
     MockSpendingPolicy.mockImplementation(function() { return policyEngine(reserve) } as any)
 
     await handleSetSpendPolicy({
-      allowedRecipients: ['0xsafe'],
+      allowedRecipients: ['0x0000000000000000000000000000000000005afe'],
     })
 
     const decision = await enforceSpendPolicy({
@@ -525,5 +529,108 @@ describe('reserveSpendPolicy / releaseSpendReservation', () => {
     expect(blocked.decision).toEqual(
       expect.objectContaining({ reason: expect.stringMatching(/Rolling spend cap exceeded/i) })
     )
+  })
+})
+
+// ─── F11: policy administration is monotonic and operator-anchored ─────────
+
+describe('spend policy administration (F11)', () => {
+  const R1 = '0x0000000000000000000000000000000000000001'
+  const R2 = '0x0000000000000000000000000000000000000002'
+
+  beforeEach(() => {
+    vi.clearAllMocks()
+    _resetPolicyStore()
+    MockSpendingPolicy.mockImplementation(function () {
+      return policyEngine(vi.fn().mockResolvedValue(reservedResult()))
+    } as any)
+  })
+
+  it('denies value movement by default when no operator policy is configured', async () => {
+    delete process.env[ALLOW_UNPOLICED_SPEND_ENV]
+    _resetPolicyStore()
+    // A caller-created policy is NOT a trusted policy.
+    await handleSetSpendPolicy({ perTxCapEth: '1000' })
+    const decision = await enforceSpendPolicy({ merchant: R1, amount: 1n, decimals: 18 })
+    expect(decision.status).toBe('rejected')
+    expect((decision as { reason?: string }).reason).toContain('No operator spend policy')
+  })
+
+  it('loads an immutable operator policy from the environment', async () => {
+    delete process.env[ALLOW_UNPOLICED_SPEND_ENV]
+    process.env[OPERATOR_POLICY_ENV.perTxCapEth] = '0.5'
+    process.env[OPERATOR_POLICY_ENV.allowedRecipients] = `${R1},${R2}`
+    try {
+      _resetPolicyStore()
+      const decision = await enforceSpendPolicy({ merchant: R1, amount: 1n, decimals: 18 })
+      expect(decision.status).toBe('approved')
+      expect(MockSpendingPolicy).toHaveBeenCalledWith(
+        expect.objectContaining({ merchantAllowlist: [R1, R2], draftThreshold: 500_000_000 })
+      )
+      const tamper = await handleSetSpendPolicy({ scopeKey: 'operator', perTxCapEth: '100' })
+      expect(tamper.isError).toBe(true)
+      expect(tamper.content[0].text).toContain('reserved for the operator')
+    } finally {
+      delete process.env[OPERATOR_POLICY_ENV.perTxCapEth]
+      delete process.env[OPERATOR_POLICY_ENV.allowedRecipients]
+    }
+  })
+
+  it('refuses to raise a limit, drop a constraint, or widen an allowlist', async () => {
+    await handleSetSpendPolicy({ dailyLimitEth: '1', perTxCapEth: '0.1', allowedRecipients: [R1] })
+    for (const loosen of [
+      { dailyLimitEth: '2', perTxCapEth: '0.1', allowedRecipients: [R1] },
+      { perTxCapEth: '0.1', allowedRecipients: [R1] },
+      { dailyLimitEth: '1', perTxCapEth: '0.2', allowedRecipients: [R1] },
+      { dailyLimitEth: '1', perTxCapEth: '0.1', allowedRecipients: [R1, R2] },
+      { dailyLimitEth: '1', perTxCapEth: '0.1', allowedRecipients: [] },
+      {},
+    ]) {
+      const result = await handleSetSpendPolicy(loosen)
+      expect(result.isError, JSON.stringify(loosen)).toBe(true)
+      expect(result.content[0].text).toContain('can only tighten')
+    }
+    const tighter = await handleSetSpendPolicy({
+      dailyLimitEth: '0.5',
+      perTxCapEth: '0.05',
+      allowedRecipients: [R1],
+    })
+    expect(tighter.isError).toBeUndefined()
+    expect(JSON.parse(tighter.content[0].text).layers).toBe(2)
+  })
+
+  it('keeps earlier layers (and their accounting) in force after tightening', async () => {
+    const firstReserve = vi.fn().mockResolvedValue({ status: 'rejected', reason: 'daily cap spent' })
+    const secondReserve = vi.fn().mockResolvedValue(reservedResult())
+    MockSpendingPolicy.mockImplementationOnce(function () {
+      return policyEngine(firstReserve)
+    } as any).mockImplementationOnce(function () {
+      return policyEngine(secondReserve)
+    } as any)
+
+    await handleSetSpendPolicy({ dailyLimitEth: '1' })
+    await handleSetSpendPolicy({ dailyLimitEth: '0.9' })
+
+    const decision = await enforceSpendPolicy({ merchant: R1, amount: 1n, decimals: 18 })
+    expect(decision).toEqual({ status: 'rejected', reason: 'daily cap spent' })
+    expect(firstReserve).toHaveBeenCalled()
+  })
+
+  it('bounds the number of scopes and layers', async () => {
+    for (let i = 0; i < MAX_POLICY_SCOPES; i++) {
+      expect((await handleSetSpendPolicy({ scopeKey: `s${i}`, perTxCapEth: '1' })).isError).toBeUndefined()
+    }
+    const overflow = await handleSetSpendPolicy({ scopeKey: 'one-too-many', perTxCapEth: '1' })
+    expect(overflow.isError).toBe(true)
+
+    for (let i = 1; i < MAX_POLICY_LAYERS_PER_SCOPE; i++) {
+      expect((await handleSetSpendPolicy({ scopeKey: 's0', perTxCapEth: '1' })).isError).toBeUndefined()
+    }
+    expect((await handleSetSpendPolicy({ scopeKey: 's0', perTxCapEth: '1' })).isError).toBe(true)
+  })
+
+  it('rejects malformed allowlist addresses', async () => {
+    const result = await handleSetSpendPolicy({ allowedRecipients: ['0xnot-an-address'] })
+    expect(result.isError).toBe(true)
   })
 })

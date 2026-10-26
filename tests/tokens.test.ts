@@ -24,6 +24,7 @@ import {
   handleAddCustomToken,
   handleListChainTokens,
   decideCustomTokenRegistration,
+  _resetCustomTokenQuota,
 } from '../src/tools/tokens.js'
 
 describe('lookup_token', () => {
@@ -84,6 +85,7 @@ describe('lookup_token', () => {
 describe('add_custom_token', () => {
   beforeEach(() => {
     vi.clearAllMocks()
+    _resetCustomTokenQuota()
     mockListTokens.mockReturnValue([])
   })
 
@@ -130,7 +132,7 @@ describe('add_custom_token', () => {
         symbol: 'NONAME',
         address: '0xabcdef1234567890abcdef1234567890abcdef12',
         decimals: 8,
-        chainId: 1,
+        chainId: 84532,
         name: 'NONAME',
       })
 
@@ -138,7 +140,7 @@ describe('add_custom_token', () => {
       symbol: 'NONAME',
       address: '0xabcdef1234567890abcdef1234567890abcdef12',
       decimals: 8,
-      chainId: 1,
+      chainId: 84532,
     })
 
     expect(mockAddToken).toHaveBeenCalledWith(
@@ -363,6 +365,8 @@ describe('list_chain_tokens', () => {
     const data = JSON.parse(result.content[0].text)
     expect(data.chainId).toBe(8453)
     expect(data.count).toBe(2)
+    expect(data.total).toBe(2)
+    expect(data.nextOffset).toBeNull()
     expect(data.tokens).toHaveLength(2)
     expect(mockListTokens).toHaveBeenCalledWith(8453)
   })

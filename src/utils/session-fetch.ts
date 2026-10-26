@@ -1,7 +1,7 @@
 /**
  * session-fetch.ts — fetch that attaches x402 session credentials safely.
  *
- * Two invariants for every request that carries a paid session token:
+ * Three invariants for every request that carries a paid session token:
  *
  *   1. Session headers always win. Caller-supplied X-Session-Token /
  *      PAYMENT-SESSION / X-Session-Wallet (any casing) cannot replace the
@@ -15,8 +15,12 @@
  *      session scope. A different origin, or a same-origin path the payment
  *      does not cover (`/v10` when the session is `/v1`), is refused so the
  *      bearer token never leaves the resource that was paid for.
+ *
+ *   3. Destinations go through the safe transport: https only, no private or
+ *      link-local addresses, DNS pinned for the whole call, bodies capped.
  */
 
+import { createSafeTransport, type OutboundFetch } from './safe-fetch.js';
 import {
   isUrlCoveredBySession,
   PAYMENT_SESSION_HEADER,
@@ -174,14 +178,17 @@ export async function fetchWithSessionCredentials(
   url: string,
   init: RequestInit,
   sessionHeaders: Record<string, string>,
-  session: SessionCredentialScope
+  session: SessionCredentialScope,
+  transport: OutboundFetch = createSafeTransport()
 ): Promise<Response> {
   const headers = mergeSessionHeaders(headersToRecord(init.headers), sessionHeaders);
   let currentUrl = url;
   let currentInit: RequestInit = { ...init, headers, redirect: 'manual' };
 
   for (let hop = 0; hop <= MAX_SAME_ORIGIN_REDIRECTS; hop++) {
-    const response = await fetch(currentUrl, currentInit);
+    // Pinned, byte-capped transport: every hop is re-validated and connects
+    // only to the address set validated for this host (F15).
+    const response = await transport(currentUrl, currentInit);
 
     if (!isRedirectStatus(response.status)) {
       return response;

@@ -16,6 +16,7 @@ import {
   IDEMPOTENCY_KEY_JSON_SCHEMA,
   IdempotencyKeyZodSchema,
   requireSettlementHash,
+  runClassifiedSpend,
   sendTokenIntentIdentity,
   withSpendIntent,
 } from '../utils/spend-intent.js'
@@ -114,12 +115,17 @@ export async function handleSendToken(
         )
       }
 
+      // A failure before the wallet write (simulation revert, RPC refusal,
+      // insufficient balance) moved nothing: it is classified definite and
+      // stays retryable instead of occupying an unresolved-lock slot.
       const txHash = requireSettlementHash(
-        await agentTransferToken(wallet, {
-          token: token.address as Address,
-          to: input.recipientAddress as Address,
-          amount: rawAmount,
-        }),
+        await runClassifiedSpend(wallet.walletClient, () =>
+          agentTransferToken(wallet, {
+            token: token.address as Address,
+            to: input.recipientAddress as Address,
+            amount: rawAmount,
+          })
+        ),
         'send_token'
       )
 

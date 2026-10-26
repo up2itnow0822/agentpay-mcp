@@ -3,16 +3,25 @@
  * Executes ETH or ERC20 token transfers via the AgentAccountV2 contract.
  */
 import { z } from 'zod';
-import { zeroAddress, type Address } from 'viem';
+import { getAddress, isAddress, zeroAddress, type Address } from 'viem';
 import { agentExecute, agentTransferToken, getGlobalRegistry } from 'agentwallet-sdk';
-import { getWallet, getConfig } from '../utils/client.js';
+import { getWallet, getConfig, type AgentWalletInstance } from '../utils/client.js';
 import {
   textContent,
   explorerTxUrl,
   chainName,
   formatError,
 } from '../utils/format.js';
-import { enforceSpendPolicy } from './budget.js';
+import { withReservedSpend } from './budget.js';
+import {
+  DefiniteSpendFailure,
+  IDEMPOTENCY_KEY_JSON_SCHEMA,
+  IdempotencyKeyZodSchema,
+  requireSettlementHash,
+  runClassifiedSpend,
+  sendPaymentIntentIdentity,
+  withSpendIntent,
+} from '../utils/spend-intent.js';
 
 const NATIVE_TOKEN = zeroAddress;
 
@@ -43,14 +52,21 @@ export const SendPaymentSchema = z.object({
     .max(18)
     .optional()
     .describe(
-      'Token decimal places. Optional for native ETH (18) and registry-known tokens ' +
-      '(e.g. USDC=6). Required for unknown ERC-20 addresses.'
+      'Optional assertion of the token decimal places. The authoritative value is the ' +
+      'token registry entry or the token contract decimals(); a mismatch is rejected ' +
+      'before policy evaluation or signing.'
     ),
   memo: z
     .string()
     .max(200)
     .optional()
     .describe('Optional memo/note for this payment (logged locally, not on-chain).'),
+  idempotencyKey: IdempotencyKeyZodSchema.optional()
+    .describe(
+      'Caller-supplied idempotency key. The same key replays the original transfer; ' +
+        'reusing it with a different payload is refused; distinct keys allow two equal ' +
+        'payments. Retries without a key collapse on the payment payload for five minutes.'
+    ),
 });
 
 export type SendPaymentInput = z.infer<typeof SendPaymentSchema>;
@@ -63,7 +79,9 @@ export const sendPaymentTool = {
     'Send ETH or ERC20 tokens from the Agent Wallet. ' +
     'If the amount is within the configured spend limits, it executes immediately and returns the tx hash. ' +
     'If it exceeds limits, the transaction is queued for owner approval (use queue_approval to manage). ' +
-    'Always check spend limits first with check_spend_limit to avoid surprises.',
+    'Always check spend limits first with check_spend_limit to avoid surprises. ' +
+    'Identical retries replay the original transfer; pass idempotencyKey to distinguish two equal payments. ' +
+    'An RPC drop after broadcast fail-closes instead of sending a second transfer.',
   inputSchema: {
     type: 'object' as const,
     properties: {
@@ -82,13 +100,18 @@ export const sendPaymentTool = {
       token_decimals: {
         type: 'number',
         description:
-          'Token decimals. Omit for ETH (18) or registry-known tokens like USDC (6). ' +
-          'Required for unknown ERC-20 addresses.',
+          'Optional assertion of the token decimals. The authoritative value comes from the ' +
+          'token registry or the token contract; a mismatching value is rejected.',
       },
       memo: {
         type: 'string',
         description: 'Optional memo for this payment (not stored on-chain)',
         maxLength: 200,
+      },
+      idempotencyKey: {
+        ...IDEMPOTENCY_KEY_JSON_SCHEMA,
+        description:
+          'Optional idempotency key (1-128 non-whitespace chars). Distinct keys allow two equal payments.',
       },
     },
     required: ['to', 'amount_eth'],
@@ -104,68 +127,72 @@ export async function handleSendPayment(
     const wallet = getWallet();
     const config = getConfig();
 
-    // Validate recipient address
-    if (!input.to.startsWith('0x') || input.to.length !== 42) {
+    // Validate recipient address: well-formed and not the burn address.
+    if (!isAddress(input.to, { strict: false })) {
       throw new Error(
         `Invalid recipient address: "${input.to}". Must be a 0x-prefixed 42-character hex string.`
       );
     }
-    const toAddress = input.to as Address;
-
-    // Parse amount
-    const amountCheck = parseFloat(input.amount_eth);
-    if (isNaN(amountCheck) || amountCheck <= 0) {
-      throw new Error(`Invalid amount: "${input.amount_eth}". Must be a positive number.`);
+    const toAddress = getAddress(input.to);
+    if (toAddress === zeroAddress) {
+      throw new Error('Invalid recipient address: the zero address would burn the funds.');
     }
 
-    const isNativeEth = !input.token || input.token === NATIVE_TOKEN || input.token === '0x0000000000000000000000000000000000000000';
-    const tokenAddress = isNativeEth ? NATIVE_TOKEN : (input.token as Address);
-    const tokenLabel = isNativeEth ? 'ETH' : input.token ?? 'ETH';
-    const decimals = resolveTokenDecimals(tokenAddress, input.token_decimals, config.chainId);
-    const amountWei = parseTokenAmount(input.amount_eth, decimals);
+    const isNativeEth = !input.token || input.token.toLowerCase() === NATIVE_TOKEN;
+    if (!isNativeEth && !isAddress(input.token!, { strict: false })) {
+      throw new Error(`Invalid token address: "${input.token}".`);
+    }
+    const tokenAddress = isNativeEth ? NATIVE_TOKEN : getAddress(input.token!);
+    const tokenLabel = isNativeEth ? 'ETH' : tokenAddress;
+    const decimals = await resolveTransferDecimals(
+      wallet,
+      tokenAddress,
+      input.token_decimals,
+      config.chainId
+    );
+    const amountWei = parseExactTokenAmount(input.amount_eth, decimals);
 
-    // Enforce in-process spend policy (set_spend_policy) before any transfer.
-    // amountWei is in the token's own base units; decimals lets the policy
-    // normalise to its 9-decimal ETH-equivalent caps.
-    const policyDecision = await enforceSpendPolicy({
-      merchant: toAddress,
-      amount: amountWei,
-      decimals,
+    const intent = sendPaymentIntentIdentity({
+      chainId: config.chainId,
+      tokenAddress,
+      recipientAddress: toAddress,
+      rawAmount: amountWei,
+      idempotencyKey: input.idempotencyKey,
     });
-    if (policyDecision.status === 'rejected') {
-      throw new Error(
-        policyDecision.reason ??
-          `Payment blocked by spend policy for recipient ${toAddress}.`
-      );
-    }
-    if (policyDecision.status === 'draft') {
-      throw new Error(
-        `Payment exceeds per-tx spend policy and was queued as draft` +
-          `${policyDecision.draftId ? ` (${policyDecision.draftId})` : ''}. ` +
-          (policyDecision.reason ?? 'Approve the draft before executing.')
-      );
-    }
 
-    let txHash: string;
-
-    if (isNativeEth) {
-      // Native ETH transfer via agentExecute
-      const result = await agentExecute(wallet, {
-        to: toAddress,
-        value: amountWei,
-      });
-      txHash = result.txHash;
-    } else {
-      // ERC20 transfer via agentTransferToken
-      txHash = await agentTransferToken(wallet, {
-        token: tokenAddress,
-        to: toAddress,
-        amount: amountWei,
-      });
-    }
+    const { value: txHash, replayed } = await withSpendIntent(
+      intent.key,
+      () =>
+        // Policy is reserved before the write and committed / released /
+        // locked by the classified outcome. amountWei is in the token's own
+        // base units; decimals lets the policy normalise to its caps.
+        withReservedSpend({ merchant: toAddress, amount: amountWei, decimals }, async () =>
+          requireSettlementHash(
+            await runClassifiedSpend(wallet.walletClient, async () => {
+              if (isNativeEth) {
+                const result = await agentExecute(wallet, { to: toAddress, value: amountWei });
+                return result.txHash;
+              }
+              return agentTransferToken(wallet, {
+                token: tokenAddress,
+                to: toAddress,
+                amount: amountWei,
+              });
+            }),
+            'send_payment'
+          )
+        ),
+      {
+        durable: Boolean(input.idempotencyKey?.trim()),
+        fingerprint: intent.fingerprint,
+      }
+    );
 
     const explorerUrl = explorerTxUrl(txHash as `0x${string}`, config.chainId);
     const memoLine = input.memo ? `\n📝 Memo: ${input.memo}` : '';
+    const replayLine = replayed
+      ? '\n♻️ Idempotent retry: original transfer replayed; nothing new was sent.'
+      : '';
 
     return {
       content: [
@@ -177,7 +204,7 @@ export async function handleSendPayment(
           `  Network: ${chainName(config.chainId)}\n` +
           `  TX Hash: ${txHash}\n` +
           `  🔗 ${explorerUrl}` +
-          memoLine + '\n\n' +
+          memoLine + replayLine + '\n\n' +
           `ℹ️  If the transaction was over-limit, it was queued for owner approval.\n` +
           `   Use queue_approval (action="list") to check pending transactions.`
         ),
@@ -203,16 +230,120 @@ export function resolveTokenDecimals(
   explicitDecimals: number | undefined,
   chainId: number
 ): number {
+  const authoritative = knownTokenDecimals(token, chainId);
+  if (authoritative !== undefined) {
+    assertDecimalsMatch(token, explicitDecimals, authoritative);
+    return authoritative;
+  }
   if (explicitDecimals !== undefined) return explicitDecimals;
-  if (token === NATIVE_TOKEN) return 18;
-
-  const entry = getGlobalRegistry().getTokenByAddress(token, chainId);
-  if (entry) return entry.decimals;
 
   throw new Error(
     `Unknown decimals for token ${token} on chain ${chainId}. ` +
-      'Pass token_decimals explicitly (use 6 for USDC).'
+      'Register the token with add_custom_token or use a registry-known token.'
   );
+}
+
+/** Registry / native decimals, or undefined when the token is unknown. */
+function knownTokenDecimals(token: Address, chainId: number): number | undefined {
+  if (token.toLowerCase() === NATIVE_TOKEN) return 18;
+  return getGlobalRegistry().getTokenByAddress(token, chainId)?.decimals;
+}
+
+/**
+ * Caller-supplied decimals are an assertion, never an override. Accepting a
+ * larger value for a six-decimal token used to scale both the raw transfer
+ * and the policy amount by up to 10^12 while the policy saw the small human
+ * figure (F2).
+ */
+function assertDecimalsMatch(
+  token: Address,
+  explicitDecimals: number | undefined,
+  authoritative: number
+): void {
+  if (explicitDecimals !== undefined && explicitDecimals !== authoritative) {
+    throw new DefiniteSpendFailure(
+      `token_decimals ${explicitDecimals} does not match the authoritative ` +
+        `${authoritative} decimals of ${token}. Refusing to sign.`
+    );
+  }
+}
+
+const ERC20_DECIMALS_ABI = [
+  {
+    type: 'function',
+    name: 'decimals',
+    stateMutability: 'view',
+    inputs: [],
+    outputs: [{ name: '', type: 'uint8' }],
+  },
+] as const;
+
+/**
+ * Resolve the decimals a transfer will actually be denominated in.
+ * Registry / native first; otherwise read decimals() from the token contract
+ * on the configured chain. A caller value is only ever cross-checked.
+ */
+export async function resolveTransferDecimals(
+  wallet: AgentWalletInstance,
+  token: Address,
+  explicitDecimals: number | undefined,
+  chainId: number
+): Promise<number> {
+  const known = knownTokenDecimals(token, chainId);
+  if (known !== undefined) {
+    assertDecimalsMatch(token, explicitDecimals, known);
+    return known;
+  }
+  const publicClient = (wallet as unknown as {
+    publicClient?: { readContract?: (_args: unknown) => Promise<unknown> };
+  }).publicClient;
+  let onChain: unknown;
+  try {
+    if (typeof publicClient?.readContract !== 'function') {
+      throw new Error('no public client');
+    }
+    onChain = await publicClient.readContract({
+      address: token,
+      abi: ERC20_DECIMALS_ABI,
+      functionName: 'decimals',
+    });
+  } catch {
+    throw new Error(
+      `Unknown decimals for token ${token} on chain ${chainId}: decimals() could not be read ` +
+        'from the token contract. Register the token with add_custom_token first.'
+    );
+  }
+  const decimals = Number(onChain);
+  if (!Number.isInteger(decimals) || decimals < 0 || decimals > 18) {
+    throw new Error(
+      `Token ${token} reports unsupported decimals ${String(onChain)}; refusing to sign.`
+    );
+  }
+  assertDecimalsMatch(token, explicitDecimals, decimals);
+  return decimals;
+}
+
+/**
+ * Strict parser for amounts that will be SIGNED: plain decimal notation only,
+ * no excess precision (which would silently round), strictly positive.
+ */
+export function parseExactTokenAmount(amount: string, decimals: number): bigint {
+  const trimmed = amount.trim();
+  const match = /^(\d+)(?:\.(\d+))?$/.exec(trimmed);
+  if (!match) {
+    throw new Error(`Invalid amount: "${amount}". Use a plain positive decimal such as "1.5".`);
+  }
+  const [, intPart, fracPart = ''] = match;
+  if (fracPart.length > decimals) {
+    throw new Error(
+      `Invalid amount: "${amount}" has more than ${decimals} decimal places for this token.`
+    );
+  }
+  const raw = BigInt(intPart! + fracPart.padEnd(decimals, '0'));
+  if (raw <= 0n) {
+    throw new Error(`Invalid amount: "${amount}". Must be a positive number.`);
+  }
+  return raw;
 }
 
 /**

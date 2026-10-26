@@ -5,8 +5,8 @@
  * USDC). Comparing those amounts against ETH-wei (×1e18) silently disables the
  * cap for stablecoin payments.
  */
-import { isAddress, type Address } from 'viem'
-import { getGlobalRegistry } from 'agentwallet-sdk'
+import { isAddress, zeroAddress, type Address } from 'viem'
+import { getGlobalRegistry, resolveAssetAddress } from 'agentwallet-sdk'
 import { parseTokenAmount, resolveTokenDecimals } from '../tools/payments.js'
 import { sanitizeUntrustedInline } from './format.js'
 
@@ -68,7 +68,100 @@ export function assertPayableX402Recipient(payTo: string | undefined): Address {
         'AgentPay failed closed and did not sign a payment.'
     )
   }
+  // Syntactically valid is not payable: the zero address burns the principal
+  // (or reverts after the protocol fee already left the wallet). The buyer
+  // verifier in x402-buyer-flow.ts already encodes this invariant (F5).
+  if (candidate.toLowerCase() === zeroAddress) {
+    throw new Error(
+      'x402 payment recipient is the zero address. AgentPay failed closed and did not sign a payment.'
+    )
+  }
   return candidate as Address
+}
+
+/**
+ * Terms the caller approved before any payment may be signed.
+ * `payTo` is mandatory; `asset` and `network` are optional extra bindings.
+ */
+export interface ApprovedX402Terms {
+  payTo: string
+  asset?: string
+  network?: string
+}
+
+/** Canonical comparison form for an x402 asset on a network. */
+function canonicalAsset(asset: string, network: string | undefined): string {
+  const resolved = network ? resolveAssetAddress(asset, network) : null
+  return (resolved ?? asset).toLowerCase()
+}
+
+/**
+ * Bind the remote-selected payment requirement to the caller's approval.
+ * Every comparison runs on the exact values the SDK will sign (F3): a 402
+ * that changes payee, asset, or network after approval is refused before
+ * any fee or principal write.
+ */
+export function assertX402TermsApproved(
+  req: { payTo?: string; asset?: string; network?: string },
+  approved: ApprovedX402Terms
+): void {
+  const payTo = typeof req.payTo === 'string' ? req.payTo : ''
+  if (payTo.toLowerCase() !== approved.payTo.toLowerCase()) {
+    throw new Error(
+      `x402 payee "${sanitizeUntrustedInline(payTo, 48)}" does not match the approved pay_to ` +
+        `${approved.payTo}. AgentPay failed closed and did not sign a payment.`
+    )
+  }
+  const network = typeof req.network === 'string' ? req.network : ''
+  if (approved.network !== undefined && network.toLowerCase() !== approved.network.toLowerCase()) {
+    throw new Error(
+      `x402 network "${sanitizeUntrustedInline(network, 48)}" does not match the approved network ` +
+        `"${sanitizeUntrustedInline(approved.network, 48)}". AgentPay did not sign a payment.`
+    )
+  }
+  if (approved.asset !== undefined) {
+    const offered = typeof req.asset === 'string' ? req.asset : ''
+    if (canonicalAsset(offered, network) !== canonicalAsset(approved.asset, network)) {
+      throw new Error(
+        `x402 asset "${sanitizeUntrustedInline(offered, 48)}" does not match the approved asset ` +
+          `"${sanitizeUntrustedInline(approved.asset, 48)}". AgentPay did not sign a payment.`
+      )
+    }
+  }
+}
+
+/** Operator-wide ceiling applied on top of every per-call cap. */
+export const X402_OPERATOR_MAX_PAYMENT_ENV = 'AGENTPAY_X402_MAX_PAYMENT'
+
+/**
+ * Validate a mandatory human-readable cap: plain positive decimal only.
+ * Returns the trimmed string.
+ */
+export function assertPaymentCap(raw: string | undefined, field = 'max_payment_eth'): string {
+  const value = typeof raw === 'string' ? raw.trim() : ''
+  if (!/^\d+(\.\d+)?$/.test(value) || !/[1-9]/.test(value)) {
+    throw new Error(
+      `${field} is required and must be a positive decimal amount (e.g. "0.01"). ` +
+        'AgentPay never signs an x402 payment without an explicit cap.'
+    )
+  }
+  return value
+}
+
+/**
+ * Effective cap in the selected asset's base units: the smaller of the
+ * caller's cap and the operator ceiling (if configured).
+ */
+export function effectiveCapBaseUnits(
+  callerCap: string,
+  asset: string | undefined,
+  chainId: number
+): bigint {
+  const callerRaw = maxPaymentBaseUnits(callerCap, asset, chainId)
+  const operator = process.env[X402_OPERATOR_MAX_PAYMENT_ENV]?.trim()
+  if (!operator) return callerRaw
+  const operatorRaw = maxPaymentBaseUnits(assertPaymentCap(operator, X402_OPERATOR_MAX_PAYMENT_ENV), asset, chainId)
+  return operatorRaw < callerRaw ? operatorRaw : callerRaw
 }
 
 /**

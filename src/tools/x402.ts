@@ -31,6 +31,16 @@ import {
 import { createAgentPayX402Client } from '../utils/x402-client.js';
 import { findSessionForUrl, buildSessionHeaders } from './session.js';
 import { fetchWithSessionCredentials } from '../utils/session-fetch.js';
+import {
+  assertSafeUrl,
+  createSafeTransport,
+  readLimitedText,
+} from '../utils/safe-fetch.js';
+import {
+  assertPaymentCap,
+  assertPayableX402Recipient,
+} from '../utils/payment-cap.js';
+import { supportedX402NetworksForChainId } from '../utils/x402-networks.js';
 import { recordSessionCall } from '../session/manager.js';
 import {
   DefiniteSpendFailure,
@@ -212,12 +222,27 @@ export const X402PaySchema = z.object({
     .describe('Request body (for POST/PUT/PATCH). Use JSON string for JSON APIs.'),
   max_payment_eth: z
     .string()
-    .optional()
     .describe(
-      'Maximum ETH equivalent to pay for this request. ' +
-      'Rejects the payment if the required amount exceeds this. ' +
-      'E.g. "0.001" to cap at 0.001 ETH.'
+      'REQUIRED. Maximum amount to pay for this request, in whole units of the asset the ' +
+      'server selects (e.g. "0.01" = 0.01 USDC for a USDC offer). The call fails closed ' +
+      'before signing if the required amount exceeds this cap.'
     ),
+  pay_to: z
+    .string()
+    .describe(
+      'REQUIRED. The payee address you approved (from x402_quote or provider docs). ' +
+      'A 402 that names any other payee is refused before signing.'
+    ),
+  asset: z
+    .string()
+    .max(64)
+    .optional()
+    .describe('Optional approved asset (contract address or symbol). Other assets are refused.'),
+  network: z
+    .string()
+    .max(64)
+    .optional()
+    .describe('Optional approved x402 network (e.g. "base:8453"). Other networks are refused.'),
   timeout_ms: z
     .number()
     .int()
@@ -251,7 +276,8 @@ export type X402PayInput = z.infer<typeof X402PaySchema>;
 export const x402PayTool = {
   name: 'x402_pay',
   description:
-    'Use when an agent needs one capped x402 paid HTTP request and has already verified the URL, price, payTo, asset, and Base network. ' +
+    'Use when an agent needs one capped x402 paid HTTP request and has already verified the URL, price, payTo, asset, and Base network (use x402_quote to read the offered terms without paying). ' +
+    'max_payment_eth and pay_to are required: a 402 that names another payee or exceeds the cap is refused before signing. ' +
     'Automatically handles HTTP 402 Payment Required responses with the x402 v2.11 Payment-Signature flow. ' +
     'If an active x402 V2 session covers this URL, the session token is used instead of making a new payment. ' +
     'Identical retries replay the original paid result; pass idempotencyKey to distinguish two equal fetches. ' +
@@ -281,7 +307,19 @@ export const x402PayTool = {
       },
       max_payment_eth: {
         type: 'string',
-        description: 'Maximum ETH-equivalent payment cap for this request. The call fails closed before signing if the required payment exceeds this cap.',
+        description: 'REQUIRED payment cap in whole units of the selected asset (e.g. "0.01" USDC). The call fails closed before signing if the required payment exceeds this cap.',
+      },
+      pay_to: {
+        type: 'string',
+        description: 'REQUIRED approved payee address (from x402_quote). A 402 naming any other payee is refused before signing.',
+      },
+      asset: {
+        type: 'string',
+        description: 'Optional approved asset (address or symbol). Other assets are refused.',
+      },
+      network: {
+        type: 'string',
+        description: 'Optional approved x402 network (e.g. "base:8453"). Other networks are refused.',
       },
       timeout_ms: {
         type: 'number',
@@ -300,7 +338,7 @@ export const x402PayTool = {
           'Optional idempotency key (1-128 non-whitespace chars). Distinct keys allow two equal paid fetches.',
       },
     },
-    required: ['url'],
+    required: ['url', 'max_payment_eth', 'pay_to'],
   },
 };
 
@@ -313,6 +351,10 @@ export async function handleX402Pay(
     const wallet = getWallet();
     const config = getConfig();
     const timeoutMs = input.timeout_ms ?? 30000;
+    // Fail fast on an unsafe destination before any session or payment work.
+    assertSafeUrl(input.url);
+    // One pinned, byte-capped transport for every hop of this call.
+    const transport = createSafeTransport();
 
     // ── Auto-session detection (x402 V2 behaviour) ──────────────────────
     // If there's an active session for this URL and the caller hasn't
@@ -346,11 +388,11 @@ export async function handleX402Pay(
         const response = await fetchWithSessionCredentials(input.url, requestInit, sessionHeaders, {
           endpoint: activeSession.endpoint,
           scope: activeSession.scope,
-        });
+        }, transport);
 
         // If server accepted the session (2xx/3xx), record it and return
         if (response.status !== 402) {
-          const responseText = await response.text();
+          const { text: responseText } = await readLimitedText(response);
           recordSessionCall(activeSession.sessionId);
 
           const ttlRemaining = activeSession.expiresAt - Math.floor(Date.now() / 1000);
@@ -374,6 +416,7 @@ export async function handleX402Pay(
 
         // Server returned 402 despite session headers — fall through to payment
         // (session may be invalid on the server side)
+        await response.body?.cancel().catch(() => undefined);
       }
     }
 
@@ -382,14 +425,8 @@ export async function handleX402Pay(
     // responses are not settled. A drop after a wallet write or
     // onPaymentComplete locks the intent so a retry cannot sign twice.
     const method = input.method ?? 'GET';
-    if (input.max_payment_eth) {
-      const cap = parseFloat(input.max_payment_eth);
-      if (isNaN(cap) || cap <= 0) {
-        throw new DefiniteSpendFailure(
-          `Invalid max_payment_eth: "${input.max_payment_eth}"`
-        );
-      }
-    }
+    const cap = assertPaymentCap(input.max_payment_eth);
+    const approvedPayTo = assertPayableX402Recipient(input.pay_to);
 
     const intent = x402PayIntentIdentity({
       url: input.url,
@@ -397,6 +434,12 @@ export async function handleX402Pay(
       body: input.body,
       headers: input.headers,
       idempotencyKey: input.idempotencyKey,
+      terms: {
+        cap,
+        payTo: approvedPayTo.toLowerCase(),
+        asset: input.asset ?? '',
+        network: input.network ?? '',
+      },
     });
 
     const { value, replayed } = await withSpendIntent(
@@ -416,7 +459,9 @@ export async function handleX402Pay(
           wallet,
           {
             chainId: config.chainId,
-            maxPaymentEth: input.max_payment_eth,
+            maxPaymentEth: cap,
+            approved: { payTo: approvedPayTo, asset: input.asset, network: input.network },
+            transport,
             kind: 'payment',
             onPaymentComplete: (log) => {
               paymentMade = true;
@@ -459,7 +504,11 @@ export async function handleX402Pay(
             async () => {
               const next = await x402Client.fetch(input.url, requestInit);
               paidResponseUrl = next.url || undefined;
-              return { response: next, responseText: await next.text() };
+              // Bounded read: the body is truncated for display, never
+              // buffered whole (F8). A stream error after payment is still
+              // classified post-settlement below.
+              const { text } = await readLimitedText(next);
+              return { response: next, responseText: text };
             },
             { lockAfterBroadcast: true }
           );
@@ -622,5 +671,133 @@ export async function handleX402Pay(
       content: [textContent(formatError(error, 'x402_pay'))],
       isError: true,
     };
+  }
+}
+
+// ─── x402_quote ────────────────────────────────────────────────────────────
+
+export const X402QuoteSchema = z.object({
+  url: noControlChars(z.string().url())
+    .describe('URL to probe. No payment is ever signed by this tool.'),
+  method: z
+    .enum(['GET', 'POST', 'PUT', 'PATCH', 'DELETE'])
+    .optional()
+    .default('GET')
+    .describe('HTTP method the paid request will use (default: GET)'),
+  timeout_ms: z
+    .number()
+    .int()
+    .min(1000)
+    .max(60000)
+    .optional()
+    .default(15000)
+    .describe('Request timeout in milliseconds (default: 15000)'),
+});
+
+export type X402QuoteInput = z.infer<typeof X402QuoteSchema>;
+
+export const x402QuoteTool = {
+  name: 'x402_quote',
+  description:
+    'Read the x402 payment terms an endpoint offers WITHOUT paying. Returns, for each offer on the ' +
+    'configured network, the payee (pay_to), asset, network and amount, so a human or policy can ' +
+    'approve them before calling x402_pay / x402_session_start with pay_to and max_payment_eth. ' +
+    'The request is sent without a body; it never signs or transfers anything.',
+  inputSchema: {
+    type: 'object' as const,
+    properties: {
+      url: { type: 'string', description: 'Absolute https URL to probe.' },
+      method: {
+        type: 'string',
+        enum: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE'],
+        description: 'HTTP method (default: GET)',
+        default: 'GET',
+      },
+      timeout_ms: { type: 'number', description: 'Timeout in ms (default 15000)', default: 15000 },
+    },
+    required: ['url'],
+  },
+};
+
+const MAX_QUOTED_OFFERS = 8;
+
+export async function handleX402Quote(
+  input: X402QuoteInput
+): Promise<{ content: Array<{ type: 'text'; text: string }>; isError?: boolean }> {
+  try {
+    const config = getConfig();
+    const transport = createSafeTransport();
+    const response = await transport(input.url, {
+      method: input.method ?? 'GET',
+      headers: { Accept: 'application/json, text/plain, */*' },
+      redirect: 'manual',
+      signal: AbortSignal.timeout(input.timeout_ms ?? 15000),
+    });
+    const { text: responseText } = await readLimitedText(response, 64 * 1024);
+
+    if (response.status !== 402) {
+      return {
+        content: [
+          textContent(
+            `ℹ️ **No x402 Payment Required**\n\n` +
+              `  URL:    ${sanitizeUntrustedUrl(input.url)}\n` +
+              `  Status: ${formatHttpStatus(response.status)}\n\n` +
+              `The endpoint did not answer with HTTP 402, so there are no terms to approve.`
+          ),
+        ],
+      };
+    }
+
+    const requirements =
+      parsePaymentRequiredFromHeader(response.headers.get('payment-required')) ??
+      parsePaymentRequiredFromHeader(response.headers.get('x-payment-required')) ??
+      parsePaymentRequiredFromBody(responseText);
+    const supported = new Set(supportedX402NetworksForChainId(config.chainId));
+    const offers = (requirements?.accepts ?? [])
+      .filter((offer) => typeof offer === 'object' && offer !== null)
+      .map((offer) => offer as Record<string, unknown>)
+      .filter(
+        (offer) =>
+          offer.scheme === 'exact' &&
+          typeof offer.network === 'string' &&
+          supported.has(offer.network)
+      )
+      .slice(0, MAX_QUOTED_OFFERS);
+
+    // Only validated, typed values appear outside the untrusted fence.
+    const trusted = offers.flatMap((offer) => {
+      try {
+        const payTo = assertPayableX402Recipient(offer.payTo as string | undefined);
+        const amount = typeof offer.amount === 'string' && /^\d{1,78}$/.test(offer.amount)
+          ? offer.amount
+          : null;
+        const asset =
+          typeof offer.asset === 'string' && /^(0x[0-9a-fA-F]{40}|[A-Za-z0-9]{1,16})$/.test(offer.asset)
+            ? offer.asset
+            : null;
+        if (!amount || !asset) return [];
+        return [{ pay_to: payTo, asset, network: offer.network as string, amount_base_units: amount }];
+      } catch {
+        return [];
+      }
+    });
+
+    let out = `🧾 **x402 Quote** (no payment made)\n\n`;
+    out += `  URL:       ${sanitizeUntrustedUrl(input.url)}\n`;
+    out += `  Supported: ${describeSupportedX402Networks(config.chainId)}\n\n`;
+    if (trusted.length === 0) {
+      out += `No payable offer on the configured network was found. x402_pay would fail closed.\n`;
+    } else {
+      out += `Payable offers (validated):\n`;
+      out += JSON.stringify(trusted, null, 2) + '\n\n';
+      out +=
+        `To pay, call x402_pay with pay_to (and optionally asset/network) copied from the offer ` +
+        `you approve, and max_payment_eth set to the most you accept in whole units of that asset.\n`;
+    }
+    out += `\n📄 **402 Response Body**\n`;
+    out += formatUntrustedBody(responseText, 4000);
+    return { content: [textContent(out)] };
+  } catch (error: unknown) {
+    return { content: [textContent(formatError(error, 'x402_quote'))], isError: true };
   }
 }

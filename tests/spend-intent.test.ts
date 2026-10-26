@@ -9,8 +9,17 @@ import {
   SEND_TOKEN_INTENT_TTL_MS,
   SPEND_INTENT_MAX_DURABLE,
   SPEND_INTENT_MAX_UNRESOLVED,
+  SpendIntentCapacityError,
   SpendIntentConflictError,
+  SettledIntentTombstoneError,
   UnresolvedSpendIntentError,
+  STATE_DIR_ENV,
+  ensureJournalLoaded,
+  forgetSettledIntent,
+  listUnresolvedSpendIntents,
+  originalWalletMethod,
+  resolveSpendIntent,
+  withKeyedLock,
   _resetSpendIntentStore,
   _spendIntentStoreSizes,
   isConfirmedUnchargedRevert,
@@ -29,6 +38,7 @@ import { SwapTokensSchema, swapTokensTool } from '../src/tools/swap.js'
 import { BridgeUsdcSchema, bridgeUsdcTool } from '../src/tools/bridge.js'
 import { SendTokenSchema, sendTokenTool } from '../src/tools/transfers.js'
 import { X402PaySchema, x402PayTool } from '../src/tools/x402.js'
+import { SendPaymentSchema, sendPaymentTool } from '../src/tools/payments.js'
 
 describe('sendTokenIntentKey', () => {
   it('normalises address case so checksum retries collide', () => {
@@ -431,7 +441,7 @@ describe('withSpendIntent', () => {
     expect(run).toHaveBeenCalledTimes(1)
   })
 
-  it('evicts the oldest durable result when the LRU cap is exceeded', async () => {
+  it('tombstones an evicted durable key so reuse is refused, never re-executed', async () => {
     const run = vi.fn().mockResolvedValue('0xnew')
     for (let i = 0; i < SPEND_INTENT_MAX_DURABLE; i++) {
       await withSpendIntent(`durable#${i}`, async () => `0x${i}`, { durable: true })
@@ -440,14 +450,16 @@ describe('withSpendIntent', () => {
 
     await withSpendIntent('durable#overflow', run, { durable: true })
     expect(_spendIntentStoreSizes().durable).toBe(SPEND_INTENT_MAX_DURABLE)
+    expect(_spendIntentStoreSizes().tombstones).toBe(1)
 
     const evicted = vi.fn().mockResolvedValue('0xevicted-retry')
-    const replay = await withSpendIntent('durable#0', evicted, { durable: true })
-    expect(replay).toEqual({ value: '0xevicted-retry', replayed: false })
-    expect(evicted).toHaveBeenCalledTimes(1)
+    await expect(
+      withSpendIntent('durable#0', evicted, { durable: true })
+    ).rejects.toBeInstanceOf(SettledIntentTombstoneError)
+    expect(evicted).not.toHaveBeenCalled()
   })
 
-  it('caps unresolved locks so the permanent map cannot grow without bound', async () => {
+  it('never evicts unresolved locks; admission fails closed at capacity (F14)', async () => {
     for (let i = 0; i < SPEND_INTENT_MAX_UNRESOLVED; i++) {
       await expect(
         withSpendIntent(`unknown#${i}`, async () => {
@@ -457,16 +469,51 @@ describe('withSpendIntent', () => {
     }
     expect(_spendIntentStoreSizes().unresolved).toBe(SPEND_INTENT_MAX_UNRESOLVED)
 
-    await expect(
-      withSpendIntent('unknown#overflow', async () => {
-        throw new Error('rpc timeout')
-      })
-    ).rejects.toThrow('rpc timeout')
+    // At capacity a NEW intent is refused before its callback runs.
+    const fresh = vi.fn().mockResolvedValue('0xfresh')
+    await expect(withSpendIntent('unknown#overflow', fresh)).rejects.toBeInstanceOf(
+      SpendIntentCapacityError
+    )
+    expect(fresh).not.toHaveBeenCalled()
     expect(_spendIntentStoreSizes().unresolved).toBe(SPEND_INTENT_MAX_UNRESOLVED)
 
+    // The oldest lock is still in force: its retry never reaches the wallet.
     const retriedOldest = vi.fn().mockResolvedValue('0xafter-evict')
-    const result = await withSpendIntent('unknown#0', retriedOldest)
-    expect(result).toEqual({ value: '0xafter-evict', replayed: false })
+    await expect(withSpendIntent('unknown#0', retriedOldest)).rejects.toBeInstanceOf(
+      UnresolvedSpendIntentError
+    )
+    expect(retriedOldest).not.toHaveBeenCalled()
+
+    // Operator reconciliation frees exactly one slot.
+    expect(resolveSpendIntent('unknown#0')).toBe(true)
+    await expect(withSpendIntent('unknown#overflow', fresh)).resolves.toEqual({
+      value: '0xfresh',
+      replayed: false,
+    })
+  })
+
+  it('locks an in-flight ambiguous spend even when it finishes above capacity', async () => {
+    let release!: () => void
+    const gate = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    const inFlight = withSpendIntent('late#ambiguous', async () => {
+      await gate
+      throw new Error('rpc timeout')
+    })
+    for (let i = 0; i < SPEND_INTENT_MAX_UNRESOLVED; i++) {
+      await expect(
+        withSpendIntent(`fill#${i}`, async () => {
+          throw new Error('rpc timeout')
+        })
+      ).rejects.toThrow('rpc timeout')
+    }
+    release()
+    await expect(inFlight).rejects.toThrow('rpc timeout')
+    expect(_spendIntentStoreSizes().unresolved).toBe(SPEND_INTENT_MAX_UNRESOLVED + 1)
+    await expect(withSpendIntent('late#ambiguous', vi.fn())).rejects.toBeInstanceOf(
+      UnresolvedSpendIntentError
+    )
   })
 })
 
@@ -480,7 +527,7 @@ describe('runClassifiedSpend', () => {
         throw new Error('quote rpc timeout')
       })
     ).rejects.toBeInstanceOf(DefiniteSpendFailure)
-    expect(walletClient.sendTransaction).not.toHaveBeenCalled()
+    expect(originalWalletMethod(walletClient.sendTransaction)).not.toHaveBeenCalled()
   })
 
   it('keeps an ambiguous post-broadcast error unknown', async () => {
@@ -559,6 +606,7 @@ describe('idempotencyKey discovery schema', () => {
     bridgeUsdcTool.inputSchema.properties.idempotencyKey,
     sendTokenTool.inputSchema.properties.idempotencyKey,
     x402PayTool.inputSchema.properties.idempotencyKey,
+    sendPaymentTool.inputSchema.properties.idempotencyKey,
   ]
   const discoveryPattern = new RegExp(IDEMPOTENCY_KEY_JSON_SCHEMA.pattern)
   const swapBase = {
@@ -574,7 +622,11 @@ describe('idempotencyKey discovery schema', () => {
     recipientAddress: '0xrecipient00000000000000000000000000000001',
     amount: '1',
   }
-  const x402Base = { url: 'https://api.example.com/premium' }
+  const x402Base = {
+    url: 'https://api.example.com/premium',
+    max_payment_eth: '0.01',
+    pay_to: '0xfeedfacefeedfacefeedfacefeedfacefeedface',
+  }
 
   it('publishes the non-whitespace pattern on swap, bridge, send, and x402_pay', () => {
     for (const schema of published) {
@@ -591,6 +643,10 @@ describe('idempotencyKey discovery schema', () => {
     expect(BridgeUsdcSchema.safeParse({ ...bridgeBase, idempotencyKey: '   ' }).success).toBe(false)
     expect(SendTokenSchema.safeParse({ ...sendBase, idempotencyKey: '   ' }).success).toBe(false)
     expect(X402PaySchema.safeParse({ ...x402Base, idempotencyKey: '   ' }).success).toBe(false)
+    expect(
+      SendPaymentSchema.safeParse({ to: '0x' + '1'.repeat(40), amount_eth: '1', idempotencyKey: '   ' })
+        .success
+    ).toBe(false)
     expect(SwapTokensSchema.safeParse({ ...swapBase, idempotencyKey: 'invoice-1' }).success).toBe(
       true
     )
@@ -612,5 +668,223 @@ describe('idempotencyKey discovery schema', () => {
     expect(SwapTokensSchema.safeParse({ ...swapBase, idempotencyKey: 'x'.repeat(128) }).success).toBe(
       true
     )
+  })
+})
+
+describe('runClassifiedSpend concurrency (F12)', () => {
+  it('keeps broadcast detection request-scoped across interleaved spends', async () => {
+    const walletClient = {
+      sendTransaction: vi.fn().mockResolvedValue('0xsend'),
+      writeContract: vi.fn().mockResolvedValue('0xwrite'),
+    }
+    const step = () => new Promise((resolve) => setTimeout(resolve, 5))
+
+    // A writes, then fails late. B starts after A and finishes (successfully)
+    // BEFORE A fails — the old swap/restore implementation restored A's
+    // captured originals at that point and lost A's broadcast flag.
+    const a = runClassifiedSpend(walletClient, async () => {
+      await step()
+      await walletClient.sendTransaction({ to: '0xa' })
+      await step()
+      await step()
+      await step()
+      throw new Error('receipt polling failed')
+    })
+    const b = runClassifiedSpend(walletClient, async () => {
+      await step()
+      return 'b-ok'
+    })
+    // C never writes and fails: must stay definite despite A's write.
+    const c = runClassifiedSpend(walletClient, async () => {
+      await step()
+      await step()
+      throw new Error('quote failed')
+    })
+
+    const aSettled = a.catch((e: unknown) => e)
+    const cSettled = c.catch((e: unknown) => e)
+    await expect(b).resolves.toBe('b-ok')
+    const aErr = await aSettled
+    expect(aErr).toBeInstanceOf(Error)
+    expect(aErr).not.toBeInstanceOf(DefiniteSpendFailure)
+    expect(await cSettled).toBeInstanceOf(DefiniteSpendFailure)
+
+    // The hook is installed once and never torn down mid-flight.
+    expect(originalWalletMethod(walletClient.sendTransaction)).toHaveBeenCalledTimes(1)
+    await walletClient.sendTransaction({ to: '0xoutside' })
+    expect(originalWalletMethod(walletClient.sendTransaction)).toHaveBeenCalledTimes(2)
+  })
+
+  it('a spend that started later and wrote after an earlier one finished stays locked', async () => {
+    // Reproduces the original race exactly: B installs, A installs over it,
+    // B finishes and "restores" — the old code stripped A's detector here and
+    // A's real broadcast was then released as definitely uncharged.
+    const walletClient = { sendTransaction: vi.fn().mockResolvedValue('0xsend') }
+    let finishA!: () => void
+    let finishB!: () => void
+    const gateA = new Promise<void>((r) => (finishA = r))
+    const gateB = new Promise<void>((r) => (finishB = r))
+    const b = runClassifiedSpend(walletClient, async () => {
+      await gateB
+      return 'b'
+    })
+    const a = runClassifiedSpend(walletClient, async () => {
+      await gateA
+      await walletClient.sendTransaction({})
+      throw new Error('receipt lost')
+    })
+    const aSettled = a.catch((e: unknown) => e)
+    finishB()
+    await b
+    finishA()
+    const err = await aSettled
+    expect(err).toBeInstanceOf(Error)
+    expect(err).not.toBeInstanceOf(DefiniteSpendFailure)
+  })
+
+  it('every restore ordering keeps both flags accurate', async () => {
+    for (const aFirst of [true, false]) {
+      const walletClient = { writeContract: vi.fn().mockResolvedValue('0xw') }
+      let finishA!: () => void
+      let finishB!: () => void
+      const gateA = new Promise<void>((r) => (finishA = r))
+      const gateB = new Promise<void>((r) => (finishB = r))
+      const a = runClassifiedSpend(walletClient, async () => {
+        await walletClient.writeContract({})
+        await gateA
+        throw new Error('ambiguous A')
+      })
+      const b = runClassifiedSpend(walletClient, async () => {
+        await gateB
+        throw new Error('pre-write B')
+      })
+      const aSettled = a.catch((e: unknown) => e)
+      const bSettled = b.catch((e: unknown) => e)
+      if (aFirst) {
+        finishA()
+        await aSettled
+        finishB()
+      } else {
+        finishB()
+        await bSettled
+        finishA()
+      }
+      expect(await aSettled).not.toBeInstanceOf(DefiniteSpendFailure)
+      expect(await bSettled).toBeInstanceOf(DefiniteSpendFailure)
+    }
+  })
+})
+
+describe('spend-intent journal (opt-in durability)', () => {
+  let dir: string
+  beforeEach(async () => {
+    const { mkdtempSync } = await import('node:fs')
+    const { tmpdir } = await import('node:os')
+    const { join } = await import('node:path')
+    dir = mkdtempSync(join(tmpdir(), 'agentpay-journal-'))
+    process.env[STATE_DIR_ENV] = dir
+    _resetSpendIntentStore()
+  })
+  afterEach(() => {
+    delete process.env[STATE_DIR_ENV]
+    _resetSpendIntentStore()
+  })
+
+  it('restores an ambiguous lock after a restart', async () => {
+    await expect(
+      withSpendIntent('send_token:8453:a:b:1', async () => {
+        throw new Error('rpc timeout')
+      })
+    ).rejects.toThrow('rpc timeout')
+
+    _resetSpendIntentStore() // simulate restart: memory gone, journal kept
+    ensureJournalLoaded()
+    expect(listUnresolvedSpendIntents().map((e) => e.key)).toContain('send_token:8453:a:b:1')
+    const retry = vi.fn()
+    await expect(withSpendIntent('send_token:8453:a:b:1', retry)).rejects.toBeInstanceOf(
+      UnresolvedSpendIntentError
+    )
+    expect(retry).not.toHaveBeenCalled()
+  })
+
+  it('treats a begin without a terminal record (crash mid-spend) as locked', async () => {
+    const { appendFileSync } = await import('node:fs')
+    const { join } = await import('node:path')
+    appendFileSync(
+      join(dir, 'spend-intents.jsonl'),
+      JSON.stringify({ v: 1, at: 1, op: 'begin', key: 'k#crash', fp: 'fp' }) + '\n' +
+        '{"v":1,"op":"settle","key":"k#crash"' // torn line from the crash
+    )
+    const retry = vi.fn()
+    await expect(withSpendIntent('k#crash', retry, { fingerprint: 'fp' })).rejects.toBeInstanceOf(
+      UnresolvedSpendIntentError
+    )
+    expect(retry).not.toHaveBeenCalled()
+  })
+
+  it('keyed settlements survive a restart as tombstones; definite failures do not lock', async () => {
+    await withSpendIntent('send_token#key-1', async () => '0xsettled', {
+      durable: true,
+      fingerprint: 'fp1',
+    })
+    await expect(
+      withSpendIntent('send_token#key-2', async () => {
+        throw new DefiniteSpendFailure('policy said no')
+      })
+    ).rejects.toBeInstanceOf(DefiniteSpendFailure)
+
+    _resetSpendIntentStore()
+    const rerun = vi.fn()
+    await expect(
+      withSpendIntent('send_token#key-1', rerun, { durable: true, fingerprint: 'fp1' })
+    ).rejects.toBeInstanceOf(SettledIntentTombstoneError)
+    expect(rerun).not.toHaveBeenCalled()
+    await expect(
+      withSpendIntent('send_token#key-2', async () => 'ok')
+    ).resolves.toEqual({ value: 'ok', replayed: false })
+  })
+
+  it('operator resolve clears a lock durably; forget clears a settled result', async () => {
+    await expect(
+      withSpendIntent('lock#1', async () => {
+        throw new Error('rpc timeout')
+      })
+    ).rejects.toThrow()
+    expect(resolveSpendIntent('lock#1')).toBe(true)
+    _resetSpendIntentStore()
+    await expect(withSpendIntent('lock#1', async () => 'after')).resolves.toEqual({
+      value: 'after',
+      replayed: false,
+    })
+    forgetSettledIntent('lock#1')
+    await expect(withSpendIntent('lock#1', async () => 'again')).resolves.toEqual({
+      value: 'again',
+      replayed: false,
+    })
+  })
+})
+
+describe('withKeyedLock', () => {
+  it('serialises tasks per key and isolates failures', async () => {
+    const order: string[] = []
+    const slow = withKeyedLock('origin-a', async () => {
+      order.push('a1-start')
+      await new Promise((r) => setTimeout(r, 10))
+      order.push('a1-end')
+      throw new Error('boom')
+    })
+    const second = withKeyedLock('origin-a', async () => {
+      order.push('a2')
+      return 2
+    })
+    const other = withKeyedLock('origin-b', async () => {
+      order.push('b1')
+      return 3
+    })
+    await expect(slow).rejects.toThrow('boom')
+    await expect(second).resolves.toBe(2)
+    await expect(other).resolves.toBe(3)
+    expect(order.indexOf('a2')).toBeGreaterThan(order.indexOf('a1-end'))
+    expect(order.indexOf('b1')).toBeLessThan(order.indexOf('a1-end'))
   })
 })

@@ -31,7 +31,21 @@ import {
   _resetOTelBudgetState,
 } from '../src/tools/otel-budget.js'
 
+import { _setSafeTransportTestOverrides } from '../src/utils/safe-fetch.js'
+
 const originalFetch = global.fetch
+
+/** Route the safe transport's DNS to the mocked resolver and I/O to global.fetch. */
+function routeTransportThroughMocks(): void {
+  _setSafeTransportTestOverrides({
+    resolver: async (host: string) =>
+      (dnsLookup as unknown as (h: string, o: unknown) => Promise<Array<{ address: string; family: number }>>)(
+        host,
+        { all: true, verbatim: true }
+      ),
+    connector: (url, init) => global.fetch(url.href, init),
+  })
+}
 
 describe('OTel Budget Circuit-Breaker', () => {
   let consoleError: ReturnType<typeof vi.spyOn>
@@ -40,6 +54,7 @@ describe('OTel Budget Circuit-Breaker', () => {
     _resetOTelBudgetState()
     vi.restoreAllMocks()
     dnsLookup.mockResolvedValue([{ address: '93.184.216.34', family: 4 }])
+    routeTransportThroughMocks()
     delete process.env[KILL_CALLBACK_ALLOWLIST_ENV]
     consoleError = vi.spyOn(console, 'error').mockImplementation(() => {})
   })

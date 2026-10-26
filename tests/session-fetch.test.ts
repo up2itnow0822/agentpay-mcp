@@ -14,6 +14,7 @@ import {
   mergeSessionHeaders,
   SessionScopeRedirectError,
 } from '../src/utils/session-fetch.js';
+import { createSafeTransport } from '../src/utils/safe-fetch.js';
 import {
   PAYMENT_SESSION_HEADER,
   SESSION_TOKEN_HEADER,
@@ -276,6 +277,9 @@ describe('fetchWithSessionCredentials', () => {
   });
 });
 
+/** Loopback test servers are private by definition: opt in explicitly. */
+const LOOPBACK_TRANSPORT = () => createSafeTransport({ allowPrivateNetwork: true });
+
 describe('fetchWithSessionCredentials against a local server', () => {
   async function listen(
     handler: (_req: http.IncomingMessage, _res: http.ServerResponse) => void
@@ -317,7 +321,8 @@ describe('fetchWithSessionCredentials against a local server', () => {
         `${server.origin}/v1/item`,
         { method: 'GET' },
         SESSION_HEADERS,
-        { endpoint: `${server.origin}/v1`, scope: 'prefix' }
+        { endpoint: `${server.origin}/v1`, scope: 'prefix' },
+        LOOPBACK_TRANSPORT()
       );
       expect(covered.status).toBe(200);
       expect(await covered.text()).toBe('canonical-body');
@@ -327,7 +332,8 @@ describe('fetchWithSessionCredentials against a local server', () => {
           `${server.origin}/v1/escape`,
           { method: 'GET' },
           SESSION_HEADERS,
-          { endpoint: `${server.origin}/v1`, scope: 'prefix' }
+          { endpoint: `${server.origin}/v1`, scope: 'prefix' },
+          LOOPBACK_TRANSPORT()
         )
       ).rejects.toBeInstanceOf(SessionScopeRedirectError);
     } finally {

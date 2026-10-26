@@ -1,4 +1,7 @@
+import { AsyncLocalStorage } from 'node:async_hooks'
 import { createHash } from 'node:crypto'
+import { appendFileSync, fsyncSync, mkdirSync, openSync, closeSync, readFileSync, existsSync } from 'node:fs'
+import { join } from 'node:path'
 import { classifySpendError, isEvmTxHash } from 'agentwallet-sdk'
 import { z } from 'zod'
 
@@ -23,17 +26,30 @@ import { z } from 'zod'
  * after a payment; an uncharged HTTP response is released and stays retryable.
  *
  * Keyed settled results stay until the durable LRU evicts them so the same
- * idempotencyKey replays after the keyless MCP-retry window. Keyless settled
- * results expire after SEND_TOKEN_INTENT_TTL_MS. Durable and unresolved maps
- * are size-capped so a long-lived process cannot grow them without bound.
+ * idempotencyKey replays after the keyless MCP-retry window; an evicted key
+ * leaves a tombstone so it is refused, never re-executed. Keyless settled
+ * results expire after SEND_TOKEN_INTENT_TTL_MS.
  *
- * This is process-local, matching SpendingPolicy. It prevents duplicate
- * settlement from MCP tool retries; it is not a durable cross-process ledger.
+ * Unresolved (possibly-broadcast) intents are NEVER evicted. When
+ * SPEND_INTENT_MAX_UNRESOLVED of them are outstanding, new value movement is
+ * refused (fail closed) until an operator reconciles them — capacity pressure
+ * can never re-enable a settlement that may already have happened.
+ *
+ * By default this state is process-local. Set AGENTPAY_STATE_DIR to journal
+ * every intent (begin / settle / lock / release) to an append-only file that
+ * is replayed at startup: an intent that began but never reached a terminal
+ * record — including one interrupted by a crash mid-broadcast — comes back
+ * locked, and keyed settlements come back as tombstones. Operators reconcile
+ * with `agentpay-mcp spend-intents list|resolve`.
  */
 export const SEND_TOKEN_INTENT_TTL_MS = 5 * 60 * 1000
 export const DEFAULT_SWAP_SLIPPAGE_BPS = 50
 export const SPEND_INTENT_MAX_DURABLE = 1024
 export const SPEND_INTENT_MAX_UNRESOLVED = 1024
+/** Evicted durable keys are remembered (identity only) so reuse is refused. */
+export const SPEND_INTENT_MAX_TOMBSTONES = 16384
+export const STATE_DIR_ENV = 'AGENTPAY_STATE_DIR'
+export const SPEND_JOURNAL_FILE = 'spend-intents.jsonl'
 
 /**
  * Published MCP JSON Schema for optional idempotencyKey on spend tools.
@@ -84,6 +100,8 @@ const settledEphemeral = new Map<string, SettledIntent<unknown>>()
 const settledDurable = new Map<string, SettledIntent<unknown>>()
 const inflight = new Map<string, InflightIntent>()
 const unresolved = new Map<string, UnresolvedIntent>()
+/** Durable keys whose cached value was evicted (or predates a restart). */
+const tombstones = new Map<string, { fingerprint: string; settledAt: number }>()
 
 /** Policy/validation rejected the send before any transfer was broadcast. */
 export class DefiniteSpendFailure extends Error {
@@ -213,12 +231,13 @@ export async function runClassifiedSpend<T>(
   run: () => Promise<T>,
   options?: { lockAfterBroadcast?: boolean }
 ): Promise<T> {
-  const state = { broadcastStarted: false }
-  const restore = instrumentWalletBroadcast(walletClient, () => {
-    state.broadcastStarted = true
-  })
+  installBroadcastHook(walletClient)
+  const state: BroadcastState = { broadcastStarted: false }
   try {
-    return await run()
+    // The hook reports writes to the store of the async context that made
+    // them, so concurrent spends on the shared singleton client each see only
+    // their own broadcasts. Nothing is swapped in or restored per call.
+    return await broadcastContext.run(state, run)
   } catch (error: unknown) {
     if (error instanceof DefiniteSpendFailure) {
       throw error
@@ -241,40 +260,62 @@ export async function runClassifiedSpend<T>(
       )
     }
     throw error
-  } finally {
-    restore()
   }
 }
 
-function instrumentWalletBroadcast(
-  walletClient: { sendTransaction?: unknown; writeContract?: unknown } | null | undefined,
-  onWrite: () => void
-): () => void {
+interface BroadcastState {
+  broadcastStarted: boolean
+}
+
+/**
+ * Request-scoped broadcast detection.
+ *
+ * The wallet client is a process-wide singleton. Earlier versions swapped
+ * sendTransaction/writeContract for wrappers at the start of each spend and
+ * restored the captured originals at the end, which raced when two spends
+ * interleaved: one restore could strip the other's detector (a real
+ * broadcast then classified as "definitely uncharged" and released for
+ * retry) or leave a stale wrapper installed.
+ *
+ * Now each client is wrapped exactly once, permanently, and the wrapper
+ * marks whichever spend's AsyncLocalStorage context issued the write. Writes
+ * made outside any classified spend are passed straight through.
+ */
+const broadcastContext = new AsyncLocalStorage<BroadcastState>()
+const HOOKED = Symbol.for('agentpay.broadcastHook')
+
+function installBroadcastHook(
+  walletClient: { sendTransaction?: unknown; writeContract?: unknown } | null | undefined
+): void {
   if (!walletClient) {
-    return () => undefined
+    return
   }
-  const client = walletClient as {
-    sendTransaction?: (..._args: unknown[]) => unknown
-    writeContract?: (..._args: unknown[]) => unknown
+  const client = walletClient as Record<string | symbol, unknown>
+  if (client[HOOKED]) {
+    return
   }
-  const originalSend = client.sendTransaction
-  const originalWrite = client.writeContract
-  if (typeof originalSend === 'function') {
-    client.sendTransaction = (...args: unknown[]) => {
-      onWrite()
-      return originalSend.apply(client, args)
+  for (const method of ['sendTransaction', 'writeContract'] as const) {
+    const original = client[method]
+    if (typeof original !== 'function') {
+      continue
     }
-  }
-  if (typeof originalWrite === 'function') {
-    client.writeContract = (...args: unknown[]) => {
-      onWrite()
-      return originalWrite.apply(client, args)
+    const wrapped = function (this: unknown, ...args: unknown[]): unknown {
+      const store = broadcastContext.getStore()
+      if (store) {
+        store.broadcastStarted = true
+      }
+      return (original as (..._a: unknown[]) => unknown).apply(this ?? walletClient, args)
     }
+    Object.defineProperty(wrapped, 'agentpayOriginal', { value: original })
+    client[method] = wrapped
   }
-  return () => {
-    client.sendTransaction = originalSend
-    client.writeContract = originalWrite
-  }
+  Object.defineProperty(client, HOOKED, { value: true })
+}
+
+/** The un-hooked method behind a broadcast hook (for tests and diagnostics). */
+export function originalWalletMethod<T>(method: T): T {
+  const original = (method as { agentpayOriginal?: unknown } | undefined)?.agentpayOriginal
+  return (original ?? method) as T
 }
 
 const POST_VALUE_MOVE =
@@ -304,6 +345,32 @@ export class SpendIntentConflictError extends Error {
   constructor(message: string) {
     super(message)
     this.name = 'SpendIntentConflictError'
+  }
+}
+
+/**
+ * Too many intents are awaiting reconciliation. Nothing was broadcast for the
+ * refused call, so it is definite; it stays refused until locks are cleared.
+ */
+export class SpendIntentCapacityError extends DefiniteSpendFailure {
+  constructor() {
+    super(
+      `${SPEND_INTENT_MAX_UNRESOLVED} spend intents are awaiting reconciliation. ` +
+        'Refusing new value movement until an operator reconciles them ' +
+        '(agentpay-mcp spend-intents list / resolve).'
+    )
+    this.name = 'SpendIntentCapacityError'
+  }
+}
+
+/** A keyed settlement predates the in-memory cache; it is never re-executed. */
+export class SettledIntentTombstoneError extends Error {
+  constructor() {
+    super(
+      'This idempotency key already settled, but its result is no longer cached ' +
+        '(evicted or from before a restart). Refusing to settle it again; use a new key.'
+    )
+    this.name = 'SettledIntentTombstoneError'
   }
 }
 
@@ -362,6 +429,28 @@ export function sendTokenIntentIdentity(input: {
     input.rawAmount.toString(),
   ].join(':')
   return spendIntentIdentity('send_token', fingerprint, input.idempotencyKey)
+}
+
+/**
+ * send_payment identity. Its own namespace (not send_token's) because the two
+ * tools have different payload semantics; the native-ETH branch uses the zero
+ * address as the token.
+ */
+export function sendPaymentIntentIdentity(input: {
+  chainId: number
+  tokenAddress: string
+  recipientAddress: string
+  rawAmount: bigint
+  idempotencyKey?: string
+}): SpendIntentIdentity {
+  const fingerprint = [
+    'send_payment',
+    String(input.chainId),
+    input.tokenAddress.toLowerCase(),
+    input.recipientAddress.toLowerCase(),
+    input.rawAmount.toString(),
+  ].join(':')
+  return spendIntentIdentity('send_payment', fingerprint, input.idempotencyKey)
 }
 
 export function sendTokenIntentKey(input: {
@@ -438,6 +527,7 @@ function encodeX402PayFingerprint(input: {
   method: string
   body?: string
   headers?: Record<string, string>
+  terms?: Record<string, string>
 }): string {
   const headers = Object.entries(input.headers ?? {})
     .map(([name, value]) => [name.toLowerCase(), value] as const)
@@ -456,6 +546,7 @@ function encodeX402PayFingerprint(input: {
     input.url,
     input.body ?? '',
     headers,
+    ...(input.terms ? [Object.entries(input.terms).sort(([a], [b]) => (a < b ? -1 : 1))] : []),
   ])
   return `x402_pay:${createHash('sha256').update(encoded).digest('hex')}`
 }
@@ -466,12 +557,37 @@ export function x402PayIntentIdentity(input: {
   body?: string
   headers?: Record<string, string>
   idempotencyKey?: string
+  /** Caller-approved terms (cap, payee, …) — part of the payload identity. */
+  terms?: Record<string, string>
 }): SpendIntentIdentity {
   return spendIntentIdentity(
     'x402_pay',
     encodeX402PayFingerprint(input),
     input.idempotencyKey
   )
+}
+
+/**
+ * x402_session_start identity: the endpoint (fragment removed) and scope.
+ * Deliberately excludes method/body/headers and any caller key, so a
+ * reworded request cannot step around a post-settlement lock on the same
+ * paid resource (F1).
+ */
+export function sessionStartIntentIdentity(input: {
+  endpoint: string
+  scope: string
+}): SpendIntentIdentity {
+  let endpoint = input.endpoint
+  try {
+    const parsed = new URL(input.endpoint)
+    parsed.hash = ''
+    endpoint = parsed.href
+  } catch {
+    // validated upstream; fall back to the raw string
+  }
+  const encoded = JSON.stringify(['x402_session_start', endpoint, input.scope])
+  const fingerprint = `x402_session_start:${createHash('sha256').update(encoded).digest('hex')}`
+  return { key: fingerprint, fingerprint }
 }
 
 export function x402PayIntentKey(input: {
@@ -489,31 +605,85 @@ export function _resetSpendIntentStore(): void {
   settledDurable.clear()
   inflight.clear()
   unresolved.clear()
+  tombstones.clear()
+  journalLoaded = false
 }
 
 export function _spendIntentStoreSizes(): {
   ephemeral: number
   durable: number
   unresolved: number
+  tombstones: number
 } {
   return {
     ephemeral: settledEphemeral.size,
     durable: settledDurable.size,
     unresolved: unresolved.size,
+    tombstones: tombstones.size,
   }
 }
 
-function remember<V>(map: Map<string, V>, key: string, value: V, max: number): void {
-  if (map.has(key)) {
-    map.delete(key)
+/** Unresolved intents awaiting reconciliation (keys are opaque identities). */
+export function listUnresolvedSpendIntents(): Array<{ key: string; since: number }> {
+  ensureJournalLoaded()
+  return Array.from(unresolved.entries()).map(([key, entry]) => ({
+    key,
+    since: entry.settledAt,
+  }))
+}
+
+/**
+ * Operator reconciliation: the intent was checked on-chain and is known
+ * either to have settled or to have moved nothing. Clears the lock (and
+ * journals that decision). Not exposed as an MCP tool on purpose — the
+ * constrained agent must not be able to unlock its own ambiguous payments.
+ */
+export function resolveSpendIntent(key: string): boolean {
+  ensureJournalLoaded()
+  const existed = unresolved.delete(key)
+  if (existed) {
+    journal({ op: 'release', key })
   }
-  map.set(key, value)
-  while (map.size > max) {
-    const oldest = map.keys().next().value
-    if (oldest === undefined) {
+  return existed
+}
+
+/**
+ * Forget a settled result so the next identical call is a new purchase.
+ * Used when the purchased thing was explicitly discarded (x402_session_end).
+ * Never touches unresolved locks.
+ */
+export function forgetSettledIntent(key: string): void {
+  settledEphemeral.delete(key)
+  settledDurable.delete(key)
+  tombstones.delete(key)
+  journal({ op: 'forget', key })
+}
+
+function rememberDurable(key: string, value: SettledIntent<unknown>): void {
+  settledDurable.delete(key)
+  settledDurable.set(key, value)
+  while (settledDurable.size > SPEND_INTENT_MAX_DURABLE) {
+    const oldest = settledDurable.keys().next()
+    if (oldest.done) {
       break
     }
-    map.delete(oldest)
+    const evicted = settledDurable.get(oldest.value)
+    settledDurable.delete(oldest.value)
+    if (evicted) {
+      rememberTombstone(oldest.value, evicted.fingerprint, evicted.settledAt)
+    }
+  }
+}
+
+function rememberTombstone(key: string, fingerprint: string, settledAt: number): void {
+  tombstones.delete(key)
+  tombstones.set(key, { fingerprint, settledAt })
+  while (tombstones.size > SPEND_INTENT_MAX_TOMBSTONES) {
+    const oldest = tombstones.keys().next()
+    if (oldest.done) {
+      break
+    }
+    tombstones.delete(oldest.value)
   }
 }
 
@@ -555,6 +725,93 @@ function assertFingerprint(stored: string, incoming: string): void {
   }
 }
 
+// ─── Journal (opt-in durability) ───────────────────────────────────────────
+
+type JournalRecord =
+  | { op: 'begin'; key: string; fp: string }
+  | { op: 'settle'; key: string; fp: string; durable: boolean }
+  | { op: 'definite'; key: string }
+  | { op: 'lock'; key: string; fp: string }
+  | { op: 'release'; key: string }
+  | { op: 'forget'; key: string }
+
+let journalLoaded = false
+
+export function spendJournalPath(): string | null {
+  const dir = process.env[STATE_DIR_ENV]?.trim()
+  return dir ? join(dir, SPEND_JOURNAL_FILE) : null
+}
+
+function journal(record: JournalRecord): void {
+  const path = spendJournalPath()
+  if (!path) {
+    return
+  }
+  const line = JSON.stringify({ v: 1, at: Date.now(), ...record }) + '\n'
+  // Synchronous + fsync: a begin record must be on disk before any wallet
+  // write it guards, or a crash could lose the evidence that one happened.
+  mkdirSync(join(path, '..'), { recursive: true, mode: 0o700 })
+  appendFileSync(path, line, { mode: 0o600 })
+  const fd = openSync(path, 'r')
+  try {
+    fsyncSync(fd)
+  } finally {
+    closeSync(fd)
+  }
+}
+
+/** Replay the journal once per process (or after a test reset). */
+export function ensureJournalLoaded(): void {
+  if (journalLoaded) {
+    return
+  }
+  journalLoaded = true
+  const path = spendJournalPath()
+  if (!path || !existsSync(path)) {
+    return
+  }
+  const open = new Map<string, { fp: string; at: number }>()
+  for (const line of readFileSync(path, 'utf8').split('\n')) {
+    if (!line.trim()) {
+      continue
+    }
+    let rec: (JournalRecord & { at?: number }) | null = null
+    try {
+      rec = JSON.parse(line) as JournalRecord & { at?: number }
+    } catch {
+      // A torn final line from a crash: ignore it. A torn BEGIN means the
+      // write it guarded never started (journal precedes the wallet call).
+      continue
+    }
+    const at = typeof rec.at === 'number' ? rec.at : Date.now()
+    switch (rec.op) {
+      case 'begin':
+      case 'lock':
+        open.set(rec.key, { fp: rec.fp, at })
+        break
+      case 'settle':
+        open.delete(rec.key)
+        if (rec.durable) {
+          rememberTombstone(rec.key, rec.fp, at)
+        }
+        break
+      case 'definite':
+      case 'release':
+        open.delete(rec.key)
+        break
+      case 'forget':
+        open.delete(rec.key)
+        tombstones.delete(rec.key)
+        break
+    }
+  }
+  for (const [key, entry] of open) {
+    unresolved.set(key, { settledAt: entry.at, fingerprint: entry.fp })
+  }
+}
+
+// ─── Intent execution ──────────────────────────────────────────────────────
+
 export async function withSpendIntent<T>(
   key: string,
   run: () => Promise<T>,
@@ -564,6 +821,7 @@ export async function withSpendIntent<T>(
     shouldSettle?: (_value: T) => boolean
   }
 ): Promise<{ value: T; replayed: boolean }> {
+  ensureJournalLoaded()
   pruneExpired()
   const fingerprint = options?.fingerprint ?? key
 
@@ -571,6 +829,12 @@ export async function withSpendIntent<T>(
   if (existing) {
     assertFingerprint(existing.fingerprint, fingerprint)
     return { value: existing.value as T, replayed: true }
+  }
+
+  const tombstone = tombstones.get(key)
+  if (tombstone) {
+    assertFingerprint(tombstone.fingerprint, fingerprint)
+    throw new SettledIntentTombstoneError()
   }
 
   const locked = unresolved.get(key)
@@ -586,11 +850,19 @@ export async function withSpendIntent<T>(
     return { value, replayed: true }
   }
 
+  // Fail closed under reconciliation backlog: never evict an unresolved lock
+  // to make room, and never admit new value movement past the ceiling.
+  if (unresolved.size >= SPEND_INTENT_MAX_UNRESOLVED) {
+    throw new SpendIntentCapacityError()
+  }
+
+  journal({ op: 'begin', key, fp: fingerprint })
   const promise = run()
   inflight.set(key, { promise, fingerprint })
   try {
     const value = await promise
     if (options?.shouldSettle && !options.shouldSettle(value)) {
+      journal({ op: 'definite', key })
       return { value, replayed: false }
     }
     const entry: SettledIntent<T> = {
@@ -600,19 +872,54 @@ export async function withSpendIntent<T>(
       fingerprint,
     }
     if (entry.durable) {
-      remember(settledDurable, key, entry, SPEND_INTENT_MAX_DURABLE)
+      rememberDurable(key, entry)
     } else {
       settledEphemeral.set(key, entry)
     }
     unresolved.delete(key)
+    journal({ op: 'settle', key, fp: fingerprint, durable: entry.durable })
     return { value, replayed: false }
   } catch (error: unknown) {
     if (error instanceof DefiniteSpendFailure) {
+      journal({ op: 'definite', key })
       throw error
     }
-    remember(unresolved, key, { settledAt: Date.now(), fingerprint }, SPEND_INTENT_MAX_UNRESOLVED)
+    // Possibly broadcast: lock with no timer and no eviction. The map may
+    // exceed the admission ceiling by at most the number of spends that were
+    // already in flight when it was reached; that overshoot is bounded and
+    // is the price of never dropping a lock.
+    unresolved.set(key, { settledAt: Date.now(), fingerprint })
+    journal({ op: 'lock', key, fp: fingerprint })
     throw error
   } finally {
     inflight.delete(key)
+  }
+}
+
+// ─── Keyed serialisation ───────────────────────────────────────────────────
+
+const keyedTails = new Map<string, Promise<void>>()
+
+/**
+ * Run `task` after every earlier task with the same key has finished.
+ * Used to make "check for an existing purchase, then buy" atomic per
+ * resource (x402_session_start per origin).
+ */
+export async function withKeyedLock<T>(key: string, task: () => Promise<T>): Promise<T> {
+  const previous = keyedTails.get(key) ?? Promise.resolve()
+  let release!: () => void
+  const current = new Promise<void>((resolve) => {
+    release = resolve
+  })
+  const tail = previous.then(() => current)
+  keyedTails.set(key, tail)
+  try {
+    await previous
+    return await task()
+  } finally {
+    release()
+    if (keyedTails.get(key) === tail) {
+      keyedTails.delete(key)
+    }
   }
 }

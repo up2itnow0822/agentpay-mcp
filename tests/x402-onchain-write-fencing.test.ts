@@ -229,6 +229,8 @@ const PAY_INPUT = {
   method: 'GET' as const,
   timeout_ms: 30000,
   skip_session_check: true,
+  max_payment_eth: '10',
+  pay_to: PAYEE,
 };
 
 const SESSION_INPUT = {
@@ -236,6 +238,8 @@ const SESSION_INPUT = {
   method: 'GET' as const,
   scope: 'prefix' as const,
   timeout_ms: 30000,
+  max_payment_eth: '10',
+  pay_to: PAYEE,
 };
 
 describe('x402 on-chain write fencing (real agentwallet-sdk)', () => {
@@ -333,4 +337,89 @@ describe('x402 on-chain write fencing (real agentwallet-sdk)', () => {
     expect(text).toContain('Offered:   not parseable');
     expect(text).not.toContain('Schemes:');
   });
+
+  // ─── F5: the zero address is never a payable recipient ──────────────────
+  it('x402_pay: a zero-address payTo produces zero on-chain writes (F5)', async () => {
+    const ZERO = '0x0000000000000000000000000000000000000000';
+    serve402(ZERO);
+    const result = await handleX402Pay({ ...PAY_INPUT, pay_to: PAYEE });
+    expect(writes).toEqual([]);
+    expect(result.isError).toBe(true);
+    expect(result.content[0]!.text).toContain('did not sign');
+  });
+
+  it('x402_session_start: a zero-address payTo produces zero on-chain writes (F5)', async () => {
+    serve402('0x0000000000000000000000000000000000000000');
+    const result = await handleX402SessionStart(SESSION_INPUT);
+    expect(writes).toEqual([]);
+    expect(result.isError).toBe(true);
+  });
+
+  it('refuses to approve the zero address as pay_to before any request is made (F5)', async () => {
+    serve402(PAYEE);
+    const result = await handleX402Pay({
+      ...PAY_INPUT,
+      pay_to: '0x0000000000000000000000000000000000000000',
+    });
+    expect(writes).toEqual([]);
+    expect(result.isError).toBe(true);
+    expect(vi.mocked(globalThis.fetch)).not.toHaveBeenCalled();
+  });
+
+  // ─── F3: the signature is bound to caller-approved terms ────────────────
+  it('a 402 naming a different payee than the approved pay_to produces zero writes (F3)', async () => {
+    serve402('0x2222222222222222222222222222222222222222');
+    const result = await handleX402Pay(PAY_INPUT);
+    expect(writes).toEqual([]);
+    expect(result.isError).toBe(true);
+    expect(result.content[0]!.text).toContain('does not match the approved pay_to');
+  });
+
+  it('a 402 above the mandatory cap produces zero writes (F3)', async () => {
+    serve402(PAYEE, { amount: '1000000' }); // 1 USDC
+    const result = await handleX402Pay({ ...PAY_INPUT, max_payment_eth: '0.5' });
+    expect(writes).toEqual([]);
+    expect(result.isError).toBe(true);
+    expect(result.content[0]!.text).toContain('exceeds max_payment_eth cap');
+  });
+
+  it('a 402 offering a different asset than the approved one produces zero writes (F3)', async () => {
+    serve402(PAYEE);
+    const result = await handleX402Pay({
+      ...PAY_INPUT,
+      asset: '0x50c5725949A6F0c72E6C4a641F24049A917DB0Cb', // DAI on Base
+    });
+    expect(writes).toEqual([]);
+    expect(result.isError).toBe(true);
+    expect(result.content[0]!.text).toContain('does not match the approved asset');
+  });
+
+  it('the operator ceiling clamps a larger caller cap (F3)', async () => {
+    process.env.AGENTPAY_X402_MAX_PAYMENT = '0.5'
+    try {
+      serve402(PAYEE, { amount: '1000000' });
+      const result = await handleX402Pay({ ...PAY_INPUT, max_payment_eth: '100' });
+      expect(writes).toEqual([]);
+      expect(result.isError).toBe(true);
+      expect(result.content[0]!.text).toContain('exceeds max_payment_eth cap');
+    } finally {
+      delete process.env.AGENTPAY_X402_MAX_PAYMENT
+    }
+  });
+
+  it('x402_pay and x402_session_start refuse to run without a cap or pay_to (F3)', async () => {
+    serve402(PAYEE);
+    const noCap = await handleX402Pay({ ...PAY_INPUT, max_payment_eth: undefined as unknown as string });
+    const noPayee = await handleX402Pay({ ...PAY_INPUT, pay_to: undefined as unknown as string });
+    const sessionNoCap = await handleX402SessionStart({
+      ...SESSION_INPUT,
+      max_payment_eth: undefined as unknown as string,
+    });
+    for (const result of [noCap, noPayee, sessionNoCap]) {
+      expect(result.isError).toBe(true);
+    }
+    expect(writes).toEqual([]);
+    expect(vi.mocked(globalThis.fetch)).not.toHaveBeenCalled();
+  });
 });
+

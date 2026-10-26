@@ -86,6 +86,10 @@ import {
   SpendingPolicy,
 } from 'agentwallet-sdk';
 import { policyEngine, reservedResult } from './helpers/policy-engine.js';
+import {
+  _resetSpendIntentStore,
+  _spendIntentStoreSizes,
+} from '../src/utils/spend-intent.js';
 
 const mockAgentExecute = vi.mocked(agentExecute);
 const mockAgentTransferToken = vi.mocked(agentTransferToken);
@@ -156,6 +160,7 @@ describe('send_payment tool', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     _resetPolicyStore();
+    _resetSpendIntentStore();
     vi.mocked(SpendingPolicy).mockImplementation(function () {
       return policyEngine(vi.fn().mockResolvedValue(reservedResult()));
     } as any);
@@ -176,7 +181,7 @@ describe('send_payment tool', () => {
 
     expect(result.isError).toBeFalsy();
     expect(result.content[0]!.text).toContain('Payment Sent');
-    expect(result.content[0]!.text).toContain(VALID_TO);
+    expect(result.content[0]!.text.toLowerCase()).toContain(VALID_TO);
     expect(result.content[0]!.text).toContain('ETH');
     expect(mockAgentExecute).toHaveBeenCalledOnce();
   });
@@ -332,6 +337,160 @@ describe('send_payment tool', () => {
 
     expect(result.isError).toBe(true);
     expect(result.content[0]!.text).toContain('Insufficient gas');
+  });
+});
+
+describe('send_payment decimals integrity (F2)', () => {
+  const VALID_TO = '0xabcdefabcdefabcdefabcdefabcdefabcdefabcd';
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    _resetPolicyStore();
+    _resetSpendIntentStore();
+    mockAgentTransferToken.mockResolvedValue(MOCK_TX_HASH);
+    mockAgentExecute.mockResolvedValue({ executed: true, txHash: MOCK_TX_HASH });
+  });
+
+  it('rejects a USDC token_decimals override before policy evaluation or signing', async () => {
+    const reserve = vi.fn().mockResolvedValue(reservedResult());
+    vi.mocked(SpendingPolicy).mockImplementation(function () {
+      return policyEngine(reserve);
+    } as any);
+    await handleSetSpendPolicy({ perTxCapEth: '5' });
+
+    const result = await handleSendPayment({
+      to: VALID_TO,
+      amount_eth: '1',
+      token: USDC_BASE,
+      token_decimals: 18,
+    });
+
+    expect(result.isError).toBe(true);
+    expect(result.content[0]!.text).toContain('does not match');
+    expect(reserve).not.toHaveBeenCalled();
+    expect(mockAgentTransferToken).not.toHaveBeenCalled();
+  });
+
+  it('rejects a native ETH decimals override other than 18', async () => {
+    const result = await handleSendPayment({ to: VALID_TO, amount_eth: '1', token_decimals: 6 });
+    expect(result.isError).toBe(true);
+    expect(mockAgentExecute).not.toHaveBeenCalled();
+  });
+
+  it('signs registry decimals regardless of a matching caller value', async () => {
+    await handleSendPayment({ to: VALID_TO, amount_eth: '2.5', token: USDC_BASE, token_decimals: 6 });
+    expect(mockAgentTransferToken.mock.calls[0]![1].amount).toBe(2_500_000n);
+  });
+
+  it('reads decimals() on-chain for an unknown token and rejects a mismatching assertion', async () => {
+    const UNKNOWN = '0x1111111111111111111111111111111111111111';
+    const readContract = vi.fn().mockResolvedValue(6);
+    (MOCK_WALLET.publicClient as any).readContract = readContract;
+    try {
+      const mismatch = await handleSendPayment({
+        to: VALID_TO,
+        amount_eth: '1',
+        token: UNKNOWN,
+        token_decimals: 18,
+      });
+      expect(mismatch.isError).toBe(true);
+      expect(mockAgentTransferToken).not.toHaveBeenCalled();
+
+      const ok = await handleSendPayment({ to: VALID_TO, amount_eth: '1', token: UNKNOWN });
+      expect(ok.isError).toBeFalsy();
+      expect(mockAgentTransferToken.mock.calls[0]![1].amount).toBe(1_000_000n);
+      expect(readContract.mock.calls[0]![0]).toMatchObject({ functionName: 'decimals' });
+    } finally {
+      delete (MOCK_WALLET.publicClient as any).readContract;
+    }
+  });
+
+  it('rejects excess precision, exponents, the zero address, and a zero amount', async () => {
+    for (const bad of [
+      { to: VALID_TO, amount_eth: '0.0000001', token: USDC_BASE },
+      { to: VALID_TO, amount_eth: '1e3' },
+      { to: VALID_TO, amount_eth: '0' },
+      { to: ZERO_ADDRESS, amount_eth: '1' },
+    ]) {
+      const result = await handleSendPayment(bad);
+      expect(result.isError).toBe(true);
+    }
+    expect(mockAgentTransferToken).not.toHaveBeenCalled();
+    expect(mockAgentExecute).not.toHaveBeenCalled();
+  });
+});
+
+describe('send_payment idempotency (F16)', () => {
+  const VALID_TO = '0xabcdefabcdefabcdefabcdefabcdefabcdefabcd';
+  const HASH_2 = '0x66e6299fee8deb3c350e639edf1de966dbbf639b0a4834080e9a98c438b60340';
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    _resetPolicyStore();
+    _resetSpendIntentStore();
+    (MOCK_WALLET as any).walletClient = { sendTransaction: vi.fn().mockResolvedValue('0xsent') };
+    mockAgentExecute.mockResolvedValue({ executed: true, txHash: MOCK_TX_HASH });
+  });
+
+  it('concurrent duplicate delivery produces one wallet write', async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    mockAgentExecute.mockImplementation(async () => {
+      await gate;
+      return { executed: true, txHash: MOCK_TX_HASH } as any;
+    });
+    const first = handleSendPayment({ to: VALID_TO, amount_eth: '0.01', idempotencyKey: 'inv-1' });
+    const second = handleSendPayment({ to: VALID_TO, amount_eth: '0.01', idempotencyKey: 'inv-1' });
+    release();
+    const [a, b] = await Promise.all([first, second]);
+    expect(a.isError).toBeFalsy();
+    expect(b.isError).toBeFalsy();
+    expect(mockAgentExecute).toHaveBeenCalledTimes(1);
+    expect(b.content[0]!.text).toContain('Idempotent retry');
+  });
+
+  it('locks after an ambiguous broadcast and refuses the retry', async () => {
+    mockAgentExecute.mockImplementationOnce(async (wallet: any) => {
+      await wallet.walletClient.sendTransaction({});
+      throw new Error('receipt polling timed out');
+    });
+    const failed = await handleSendPayment({ to: VALID_TO, amount_eth: '0.01', idempotencyKey: 'inv-2' });
+    const retry = await handleSendPayment({ to: VALID_TO, amount_eth: '0.01', idempotencyKey: 'inv-2' });
+    expect(failed.isError).toBe(true);
+    expect(retry.isError).toBe(true);
+    expect(retry.content[0]!.text).toContain('did not return a transaction hash');
+    expect(mockAgentExecute).toHaveBeenCalledTimes(1);
+    expect(_spendIntentStoreSizes().unresolved).toBe(1);
+  });
+
+  it('a pre-broadcast failure stays retryable', async () => {
+    mockAgentExecute.mockRejectedValueOnce(new Error('insufficient funds for gas (simulation)'));
+    const failed = await handleSendPayment({ to: VALID_TO, amount_eth: '0.01' });
+    const retry = await handleSendPayment({ to: VALID_TO, amount_eth: '0.01' });
+    expect(failed.isError).toBe(true);
+    expect(retry.isError).toBeFalsy();
+    expect(mockAgentExecute).toHaveBeenCalledTimes(2);
+  });
+
+  it('refuses key reuse with a changed payload and allows distinct keys', async () => {
+    mockAgentExecute
+      .mockResolvedValueOnce({ executed: true, txHash: MOCK_TX_HASH } as any)
+      .mockResolvedValueOnce({ executed: true, txHash: HASH_2 } as any);
+    await handleSendPayment({ to: VALID_TO, amount_eth: '0.01', idempotencyKey: 'k' });
+    const conflict = await handleSendPayment({ to: VALID_TO, amount_eth: '0.02', idempotencyKey: 'k' });
+    expect(conflict.isError).toBe(true);
+    expect(conflict.content[0]!.text).toContain('different spend payload');
+    const second = await handleSendPayment({ to: VALID_TO, amount_eth: '0.01', idempotencyKey: 'k2' });
+    expect(second.content[0]!.text).toContain(HASH_2);
+    expect(mockAgentExecute).toHaveBeenCalledTimes(2);
+  });
+
+  it('refuses a hashless SDK success instead of caching it', async () => {
+    mockAgentExecute.mockResolvedValueOnce({ executed: true, txHash: 'pending' } as any);
+    const result = await handleSendPayment({ to: VALID_TO, amount_eth: '0.01' });
+    expect(result.isError).toBe(true);
+    const retry = await handleSendPayment({ to: VALID_TO, amount_eth: '0.01' });
+    expect(retry.content[0]!.text).toContain('did not return a transaction hash');
   });
 });
 

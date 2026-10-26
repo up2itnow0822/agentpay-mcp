@@ -29,6 +29,20 @@ import {
 } from '../utils/format.js';
 import { createAgentPayX402Client } from '../utils/x402-client.js';
 import { fetchWithSessionCredentials } from '../utils/session-fetch.js';
+import { assertSafeUrl, createSafeTransport, readLimitedText } from '../utils/safe-fetch.js';
+import { assertPaymentCap, assertPayableX402Recipient } from '../utils/payment-cap.js';
+import {
+  DefiniteSpendFailure,
+  PostSettlementSpendError,
+  runClassifiedSpend,
+  sessionStartIntentIdentity,
+  withKeyedLock,
+  withSpendIntent,
+} from '../utils/spend-intent.js';
+import {
+  nextX402SettlementSeq,
+  recordX402Settlement,
+} from '../utils/x402-receipt-log.js';
 import {
   createSession,
   lookupSession,
@@ -77,8 +91,26 @@ export const X402SessionStartSchema = z.object({
     .describe('Optional human-readable label for this session (e.g. "Premium API session")'),
   max_payment_eth: z
     .string()
+    .describe(
+      'REQUIRED. Maximum amount to pay for the session, in whole units of the asset the ' +
+      'server selects (e.g. "0.05" USDC). Fails closed before signing if exceeded.'
+    ),
+  pay_to: z
+    .string()
+    .describe(
+      'REQUIRED. The approved payee address (from x402_quote). A 402 naming any other ' +
+      'payee is refused before signing.'
+    ),
+  asset: z
+    .string()
+    .max(64)
     .optional()
-    .describe('Maximum ETH to pay for session establishment. Rejects if exceeded.'),
+    .describe('Optional approved asset (contract address or symbol).'),
+  network: z
+    .string()
+    .max(64)
+    .optional()
+    .describe('Optional approved x402 network (e.g. "base:8453").'),
   method: z
     .enum(['GET', 'POST', 'PUT', 'PATCH', 'DELETE'])
     .optional()
@@ -109,6 +141,8 @@ export const x402SessionStartTool = {
   description:
     'Use when a paid endpoint supports a reusable x402 session or entitlement. Makes one capped payment, stores a non-custodial signed session token, and returns a session_id for x402_session_fetch. ' +
     'If an active local session already covers the endpoint, the existing session_id is returned and no new payment is signed. ' +
+    'Concurrent or retried starts for the same endpoint never pay twice: starts are serialised per origin, and a payment that settled but whose session could not be created locks the endpoint until reconciled. ' +
+    'max_payment_eth and pay_to are required. ' +
     'Do not use for providers without session semantics, unknown networks, missing spend caps, or calls where the buyer cannot store and audit the returned mcp-session-id/session_id.',
   inputSchema: {
     type: 'object' as const,
@@ -137,7 +171,19 @@ export const x402SessionStartTool = {
       },
       max_payment_eth: {
         type: 'string',
-        description: 'Maximum ETH-equivalent payment cap for opening the session. The call fails closed before signing if the required payment exceeds this cap.',
+        description: 'REQUIRED payment cap for opening the session, in whole units of the selected asset. The call fails closed before signing if the required payment exceeds this cap.',
+      },
+      pay_to: {
+        type: 'string',
+        description: 'REQUIRED approved payee address (from x402_quote). A 402 naming any other payee is refused before signing.',
+      },
+      asset: {
+        type: 'string',
+        description: 'Optional approved asset (address or symbol).',
+      },
+      network: {
+        type: 'string',
+        description: 'Optional approved x402 network (e.g. "base:8453").',
       },
       method: {
         type: 'string',
@@ -160,154 +206,257 @@ export const x402SessionStartTool = {
         default: 30000,
       },
     },
-    required: ['endpoint'],
+    required: ['endpoint', 'max_payment_eth', 'pay_to'],
   },
 };
 
 export async function handleX402SessionStart(
   input: X402SessionStartInput
 ): Promise<{ content: Array<{ type: 'text'; text: string }>; isError?: boolean }> {
-  let paymentMade = false;
-  let releaseUnusedReservation = (): void => undefined;
-  let disposeUnusedReservation = (_error?: unknown): void => undefined;
   try {
     const config = getConfig();
     const timeoutMs = input.timeout_ms ?? 30000;
+    const cap = assertPaymentCap(input.max_payment_eth);
+    const approvedPayTo = assertPayableX402Recipient(input.pay_to);
+    const endpointUrl = assertSafeUrl(input.endpoint);
+    const scope = input.scope ?? 'prefix';
 
-    if (input.max_payment_eth) {
-      const cap = parseFloat(input.max_payment_eth);
-      if (isNaN(cap) || cap <= 0) {
-        throw new Error(`Invalid max_payment_eth: "${input.max_payment_eth}"`);
-      }
+    // Fast path: an active local session already paid for this URL.
+    const early = findSessionForUrl(input.endpoint);
+    if (early) {
+      return { content: [textContent(describeReusedSession(early, config.chainId))] };
     }
 
-    // Agents retry x402_session_start after timeouts, lost session_id, or
-    // duplicate tool calls. An active local session already paid for this
-    // URL — reuse it instead of signing a second on-chain payment.
-    const activeSession = findSessionForUrl(input.endpoint);
-    if (activeSession) {
-      const ttlRemaining = Math.max(0, activeSession.expiresAt - Math.floor(Date.now() / 1000));
-      const expiresAt = new Date(activeSession.expiresAt * 1000).toISOString();
-
-      let out = `🔐 **Active Session Already Covers This Endpoint**\n\n`;
-      out += `  Session ID:    ${activeSession.sessionId}\n`;
-      out += `  Endpoint:      ${sanitizeUntrustedUrl(activeSession.endpoint)}\n`;
-      out += `  Scope:         ${activeSession.scope}\n`;
-      if (activeSession.label) {
-        out += `  Label:         ${sanitizeUntrustedInline(activeSession.label, 100)}\n`;
+    // Serialise starts per origin, then re-check: two overlapping starts (or
+    // a retry racing the original) can never both reach the wallet (F1).
+    return await withKeyedLock(`x402_session_start:${endpointUrl.origin}`, async () => {
+      const active = findSessionForUrl(input.endpoint);
+      if (active) {
+        return { content: [textContent(describeReusedSession(active, config.chainId))] };
       }
-      out += `  Network:       ${chainName(config.chainId)}\n`;
-      out += `  TTL:           ${Math.ceil(ttlRemaining / 60)}m (expires ${expiresAt})\n`;
-      out += `  Calls:         ${activeSession.callCount}\n\n`;
-      out += `💳 **No New Payment**\n`;
-      out += `  An existing local session already covers this URL, so no second payment was signed.\n`;
-      out += `  Original TX:   ${sanitizeUntrustedInline(activeSession.paymentTxHash, 80)}\n\n`;
-      out += `✅ **Next Steps**\n`;
-      out += `  Use \`x402_session_fetch\` with session_id="${activeSession.sessionId}" for covered requests.\n`;
-      out += `  To open a new paid session, call \`x402_session_end\` first.\n`;
 
-      return { content: [textContent(out)] };
+      const intent = sessionStartIntentIdentity({ endpoint: input.endpoint, scope });
+      const { value } = await withSpendIntent(
+        intent.key,
+        () => startPaidSession(input, { cap, approvedPayTo, timeoutMs, intentKey: intent.key }),
+        {
+          fingerprint: intent.fingerprint,
+          // The session store is the record of a completed purchase; a settled
+          // result is never replayed from this cache (an ended session must be
+          // purchasable again). Failures after settlement still lock.
+          shouldSettle: () => false,
+        }
+      );
+      return value;
+    });
+  } catch (error: unknown) {
+    if (error instanceof PostSettlementSpendError) {
+      let out =
+        '❌ x402_session_start failed after settlement. Do not resubmit — this endpoint is locked ' +
+        'for new session payments until the payment is reconciled.\n\n';
+      out += `  Amount:    ${sanitizeUntrustedInline(error.amount, 64)} (base units)\n`;
+      out += `  Recipient: ${sanitizeUntrustedInline(error.recipient, 64)}\n`;
+      out += `  TX Hash:   ${sanitizeUntrustedInline(error.txHash, 80)}\n`;
+      const cause = error.cause instanceof Error ? error.cause.message : undefined;
+      if (cause) {
+        out += '\nFollow-up error:\n' + formatUntrustedBody(cause, 4000);
+      }
+      return { content: [textContent(out)], isError: true };
     }
+    if (
+      (error instanceof Error && error.name === 'AbortError') ||
+      (error instanceof DefiniteSpendFailure && /abort|timed out/i.test(error.message))
+    ) {
+      return {
+        content: [textContent(`❌ x402_session_start failed: Request timed out after ${input.timeout_ms ?? 30000}ms`)],
+        isError: true,
+      };
+    }
+    return {
+      content: [textContent(formatError(error, 'x402_session_start'))],
+      isError: true,
+    };
+  }
+}
 
-    const wallet = getWallet();
+type ToolResult = { content: Array<{ type: 'text'; text: string }>; isError?: boolean };
 
-    // Track payment
-    let paymentAmount = 0n;
-    let paymentTxHash = '';
-    let paymentRecipient = '';
-    let paymentToken = '0x0000000000000000000000000000000000000000';
+function describeReusedSession(
+  activeSession: ReturnType<typeof findSessionForUrl> & object,
+  chainId: number
+): string {
+  const ttlRemaining = Math.max(0, activeSession.expiresAt - Math.floor(Date.now() / 1000));
+  const expiresAt = new Date(activeSession.expiresAt * 1000).toISOString();
 
-    // Shared x402 client: cap uses the selected asset's decimals (not ETH-wei).
-    const paidClient = createAgentPayX402Client(
-      wallet,
-      {
-        chainId: config.chainId,
-        maxPaymentEth: input.max_payment_eth,
-        kind: 'session',
-        onPaymentComplete: (log) => {
-          paymentMade = true;
-          paymentAmount = log.amount;
-          paymentTxHash = log.txHash;
-          paymentRecipient = log.recipient;
-          paymentToken = log.token ?? '0x0000000000000000000000000000000000000000';
-        },
+  let out = `🔐 **Active Session Already Covers This Endpoint**\n\n`;
+  out += `  Session ID:    ${activeSession.sessionId}\n`;
+  out += `  Endpoint:      ${sanitizeUntrustedUrl(activeSession.endpoint)}\n`;
+  out += `  Scope:         ${activeSession.scope}\n`;
+  if (activeSession.label) {
+    out += `  Label:         ${sanitizeUntrustedInline(activeSession.label, 100)}\n`;
+  }
+  out += `  Network:       ${chainName(chainId)}\n`;
+  out += `  TTL:           ${Math.ceil(ttlRemaining / 60)}m (expires ${expiresAt})\n`;
+  out += `  Calls:         ${activeSession.callCount}\n\n`;
+  out += `💳 **No New Payment**\n`;
+  out += `  An existing local session already covers this URL, so no second payment was signed.\n`;
+  out += `  Original TX:   ${sanitizeUntrustedInline(activeSession.paymentTxHash, 80)}\n\n`;
+  out += `✅ **Next Steps**\n`;
+  out += `  Use \`x402_session_fetch\` with session_id="${activeSession.sessionId}" for covered requests.\n`;
+  out += `  To open a new paid session, call \`x402_session_end\` first.\n`;
+  return out;
+}
+
+/**
+ * The paid part of x402_session_start, run inside withSpendIntent.
+ *
+ * Classification contract:
+ *   - anything before a wallet write → DefiniteSpendFailure (retryable);
+ *   - anything after onPaymentComplete (body read, signing, session storage)
+ *     → PostSettlementSpendError, which withSpendIntent locks. The settlement
+ *     receipt is recorded the moment the payment completes, before any of
+ *     those steps can fail.
+ */
+async function startPaidSession(
+  input: X402SessionStartInput,
+  ctx: { cap: string; approvedPayTo: string; timeoutMs: number; intentKey: string }
+): Promise<ToolResult> {
+  const config = getConfig();
+  const wallet = getWallet();
+  const transport = createSafeTransport();
+
+  let paymentMade = false;
+  let paymentAmount = 0n;
+  let paymentTxHash = '';
+  let paymentRecipient = '';
+  let paymentToken = '0x0000000000000000000000000000000000000000';
+
+  const paidClient = createAgentPayX402Client(wallet, {
+    chainId: config.chainId,
+    maxPaymentEth: ctx.cap,
+    approved: { payTo: ctx.approvedPayTo, asset: input.asset, network: input.network },
+    transport,
+    kind: 'session',
+    onPaymentComplete: (log) => {
+      paymentMade = true;
+      paymentAmount = log.amount;
+      paymentTxHash = log.txHash;
+      paymentRecipient = log.recipient;
+      paymentToken = log.token ?? '0x0000000000000000000000000000000000000000';
+      try {
+        recordX402Settlement({
+          intentKey: ctx.intentKey,
+          url: input.endpoint,
+          seq: nextX402SettlementSeq(),
+          settledAt: log.timestamp,
+          method: input.method ?? 'GET',
+          amount: log.amount.toString(),
+          token: paymentToken,
+          recipient: log.recipient,
+          txHash: log.txHash,
+        });
+      } catch {
+        // A malformed hash cannot be recorded; the post-settlement lock below
+        // still applies.
       }
+    },
+  });
+
+  const method = input.method ?? 'GET';
+  const reqHeaders: Record<string, string> = {
+    'Accept': 'application/json, text/plain, */*',
+    ...(input.headers ?? {}),
+  };
+  if (input.body && ['POST', 'PUT', 'PATCH'].includes(method)) {
+    if (!reqHeaders['Content-Type']) {
+      reqHeaders['Content-Type'] = 'application/json';
+    }
+  }
+  const requestInit: RequestInit = {
+    method,
+    headers: reqHeaders,
+    ...(input.body ? { body: input.body } : {}),
+    signal: AbortSignal.timeout(ctx.timeoutMs),
+  };
+
+  const postSettlement = (cause: unknown): never => {
+    throw new PostSettlementSpendError({
+      txHash: paymentTxHash,
+      amount: paymentAmount,
+      recipient: paymentRecipient,
+      cause,
+    });
+  };
+
+  let response: Response;
+  let responseText: string;
+  try {
+    const result = await runClassifiedSpend(
+      wallet.walletClient,
+      async () => {
+        const next = await paidClient.client.fetch(input.endpoint, requestInit);
+        const { text } = await readLimitedText(next);
+        return { next, text };
+      },
+      { lockAfterBroadcast: true }
     );
-    const x402Client = paidClient.client;
-    releaseUnusedReservation = paidClient.releaseUnusedReservation;
-    disposeUnusedReservation = paidClient.disposeUnusedReservation;
-
-    const method = input.method ?? 'GET';
-    const reqHeaders: Record<string, string> = {
-      'Accept': 'application/json, text/plain, */*',
-      ...(input.headers ?? {}),
-    };
-
-    if (input.body && ['POST', 'PUT', 'PATCH'].includes(method)) {
-      if (!reqHeaders['Content-Type']) {
-        reqHeaders['Content-Type'] = 'application/json';
-      }
+    response = result.next;
+    responseText = result.text;
+  } catch (error: unknown) {
+    if (paymentMade) {
+      return postSettlement(error);
     }
+    paidClient.disposeUnusedReservation(error);
+    throw error;
+  }
 
-    const requestInit: RequestInit = {
-      method,
-      headers: reqHeaders,
-      ...(input.body ? { body: input.body } : {}),
-      signal: AbortSignal.timeout(timeoutMs),
-    };
-
-    // Make the payment request
-    const response = await x402Client.fetch(input.endpoint, requestInit);
-    const responseText = await response.text();
-
-    if (!paymentMade) {
-      releaseUnusedReservation();
-      if (response.status === 402) {
-        return {
-          content: [
-            textContent(
-              `❌ **Unsupported x402 Payment Requirement - Failed Closed**\n\n` +
-              `  Endpoint: ${sanitizeUntrustedUrl(input.endpoint)}\n` +
-              describeFinalUrl(input.endpoint, response) +
-              `  Status:   ${formatHttpStatus(response.status)}\n\n` +
-              `AgentPay failed closed and did not sign a payment. The endpoint returned ` +
-              `HTTP 402, but no payment was completed. A 402 without a completed payment ` +
-              `is not treated as a free endpoint.\n\n` +
-              `📄 **402 Response Body**\n` +
-              formatUntrustedBody(responseText, 4000)
-            ),
-          ],
-          isError: true,
-        };
-      }
-      // Endpoint didn't require payment — still create a session if response was OK
-      // This allows agents to pre-establish sessions for endpoints that may start
-      // requiring payment, or to track usage even for free endpoints.
+  if (!paymentMade) {
+    paidClient.releaseUnusedReservation();
+    if (response.status === 402) {
+      // Definite: nothing was signed. Thrown so withSpendIntent records a
+      // definite outcome; rendered by the caller as a fail-closed report.
       return {
         content: [
           textContent(
-            `ℹ️ **No Payment Required**\n\n` +
+            `❌ **Unsupported x402 Payment Requirement - Failed Closed**\n\n` +
             `  Endpoint: ${sanitizeUntrustedUrl(input.endpoint)}\n` +
             describeFinalUrl(input.endpoint, response) +
             `  Status:   ${formatHttpStatus(response.status)}\n\n` +
-            `No x402 payment was needed. The endpoint responded without requiring payment.\n` +
-            `You do not need a session token — use x402_pay directly for free endpoints.\n\n` +
-            `📄 **Response Body**\n` +
+            `AgentPay failed closed and did not sign a payment. The endpoint returned ` +
+            `HTTP 402, but no payment was completed. A 402 without a completed payment ` +
+            `is not treated as a free endpoint.\n\n` +
+            `📄 **402 Response Body**\n` +
             formatUntrustedBody(responseText, 4000)
           ),
         ],
+        isError: true,
       };
     }
+    return {
+      content: [
+        textContent(
+          `ℹ️ **No Payment Required**\n\n` +
+          `  Endpoint: ${sanitizeUntrustedUrl(input.endpoint)}\n` +
+          describeFinalUrl(input.endpoint, response) +
+          `  Status:   ${formatHttpStatus(response.status)}\n\n` +
+          `No x402 payment was needed. The endpoint responded without requiring payment.\n` +
+          `You do not need a session token — use x402_pay directly for free endpoints.\n\n` +
+          `📄 **Response Body**\n` +
+          formatUntrustedBody(responseText, 4000)
+        ),
+      ],
+    };
+  }
 
-    // Create signed session record
-    // The signMessage function uses viem's wallet client, signing locally with the agent's key
+  // ── Everything below runs after settlement: any failure locks the intent.
+  let session: Awaited<ReturnType<typeof createSession>>;
+  try {
     const signMessage = async (message: string): Promise<string> => {
-      // Access the walletClient from the wallet instance for local signing
+      // Sign locally with the agent key via viem's wallet client.
       const wc = (wallet as unknown as { walletClient: { signMessage: (_args: { message: string }) => Promise<string> } }).walletClient;
       return wc.signMessage({ message });
     };
-
-    const session = await createSession({
+    session = await createSession({
       endpoint: input.endpoint,
       scope: input.scope ?? 'prefix',
       ttlSeconds: input.ttl_seconds,
@@ -319,49 +468,35 @@ export async function handleX402SessionStart(
       walletAddress: config.walletAddress,
       signMessage,
     });
-
-    const ttlRemaining = session.expiresAt - Math.floor(Date.now() / 1000);
-    const expiresAt = new Date(session.expiresAt * 1000).toISOString();
-
-    let out = `🔐 **x402 Session Established**\n\n`;
-    out += `  Session ID:    ${session.sessionId}\n`;
-    out += `  Endpoint:      ${sanitizeUntrustedUrl(session.endpoint)}\n`;
-    out += describeFinalUrl(input.endpoint, response);
-    out += `  Scope:         ${session.scope}\n`;
-    if (session.label) out += `  Label:         ${sanitizeUntrustedInline(session.label, 100)}\n`;
-    out += `  Network:       ${chainName(config.chainId)}\n`;
-    out += `  TTL:           ${Math.ceil(ttlRemaining / 60)}m (expires ${expiresAt})\n\n`;
-    out += `💳 **Session Payment**\n`;
-    out += `  Amount:    ${paymentAmount.toString()} (base units)\n`;
-    // Both come from the SDK's payment log: `recipient` is the 402's own
-    // `payTo`, i.e. remote text, and `txHash` is whatever the write returned.
-    // They sit in the trusted narration region above the fence, so they are
-    // flattened and capped like every other untrusted value echoed there.
-    out += `  Recipient: ${sanitizeUntrustedInline(paymentRecipient, 64)}\n`;
-    out += `  TX Hash:   ${sanitizeUntrustedInline(paymentTxHash, 80)}\n\n`;
-    out += `✅ **Next Steps**\n`;
-    out += `  Use \`x402_session_fetch\` with session_id="${session.sessionId}" for all subsequent\n`;
-    out += `  requests to ${sanitizeUntrustedUrl(input.endpoint)} — no further payments will be made during this session.\n`;
-    out += `  Check session status with \`x402_session_status\`.\n\n`;
-    out += `📄 **Initial Response** (${response.status})\n`;
-    out += formatUntrustedBody(responseText, 4000);
-
-    return { content: [textContent(out)] };
   } catch (error: unknown) {
-    if (!paymentMade) {
-      disposeUnusedReservation(error);
-    }
-    if (error instanceof Error && error.name === 'AbortError') {
-      return {
-        content: [textContent(`❌ x402_session_start failed: Request timed out after ${input.timeout_ms ?? 30000}ms`)],
-        isError: true,
-      };
-    }
-    return {
-      content: [textContent(formatError(error, 'x402_session_start'))],
-      isError: true,
-    };
+    return postSettlement(error);
   }
+
+  const ttlRemaining = session.expiresAt - Math.floor(Date.now() / 1000);
+  const expiresAt = new Date(session.expiresAt * 1000).toISOString();
+
+  let out = `🔐 **x402 Session Established**\n\n`;
+  out += `  Session ID:    ${session.sessionId}\n`;
+  out += `  Endpoint:      ${sanitizeUntrustedUrl(session.endpoint)}\n`;
+  out += describeFinalUrl(input.endpoint, response);
+  out += `  Scope:         ${session.scope}\n`;
+  if (session.label) out += `  Label:         ${sanitizeUntrustedInline(session.label, 100)}\n`;
+  out += `  Network:       ${chainName(config.chainId)}\n`;
+  out += `  TTL:           ${Math.ceil(ttlRemaining / 60)}m (expires ${expiresAt})\n\n`;
+  out += `💳 **Session Payment**\n`;
+  out += `  Amount:    ${paymentAmount.toString()} (base units)\n`;
+  // Both come from the SDK's payment log: `recipient` is the 402's own
+  // `payTo`, i.e. remote text, and `txHash` is whatever the write returned.
+  out += `  Recipient: ${sanitizeUntrustedInline(paymentRecipient, 64)}\n`;
+  out += `  TX Hash:   ${sanitizeUntrustedInline(paymentTxHash, 80)}\n\n`;
+  out += `✅ **Next Steps**\n`;
+  out += `  Use \`x402_session_fetch\` with session_id="${session.sessionId}" for all subsequent\n`;
+  out += `  requests to ${sanitizeUntrustedUrl(input.endpoint)} — no further payments will be made during this session.\n`;
+  out += `  Check session status with \`x402_session_status\`.\n\n`;
+  out += `📄 **Initial Response** (${response.status})\n`;
+  out += formatUntrustedBody(responseText, 4000);
+
+  return { content: [textContent(out)] };
 }
 
 // ─── x402_session_fetch ────────────────────────────────────────────────────
@@ -531,8 +666,8 @@ export async function handleX402SessionFetch(
     const response = await fetchWithSessionCredentials(input.url, requestInit, sessionHeaders, {
       endpoint: session.endpoint,
       scope: session.scope,
-    });
-    const responseText = await response.text();
+    }, createSafeTransport());
+    const { text: responseText } = await readLimitedText(response);
 
     // Record the call in the session
     recordSessionCall(input.session_id);
