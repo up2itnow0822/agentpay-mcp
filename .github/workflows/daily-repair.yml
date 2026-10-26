@@ -380,6 +380,10 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p "$WORK_DIR"
+          # persist-credentials is false, so checkout did not store REPAIR_TOKEN
+          # in .git/config. GH_TOKEN authenticates gh; this helper lets git use
+          # the same credentials without writing the token into git config.
+          gh auth setup-git
           node --input-type=module - <<'NODE'
           import { execFileSync } from 'node:child_process';
           import { existsSync, readFileSync, statSync, writeFileSync } from 'node:fs';

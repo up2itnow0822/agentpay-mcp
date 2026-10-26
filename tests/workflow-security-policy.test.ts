@@ -302,6 +302,35 @@ describe('daily-repair runner and REPAIR_TOKEN checkout (SO F3)', () => {
     ]));
     expect(withBlock!.some((line) => line.includes('inputs.dry_run'))).toBe(false);
   });
+
+  it('runs gh auth setup-git before the publisher git push and keeps persist-credentials: false', () => {
+    const publish = jobs.get('publish')!;
+    const withBlock = checkoutWith(publish, 'secrets.REPAIR_TOKEN');
+    expect(withBlock, 'publish checkout with REPAIR_TOKEN').not.toBeNull();
+    expect(withBlock).toEqual(expect.arrayContaining(['persist-credentials: false']));
+
+    const runBodies: string[] = [];
+    publish.forEach((line, i) => {
+      if (!/^\s*run:\s*\|\s*$/.test(line)) return;
+      const keyIndent = indentOf(line);
+      const body: string[] = [];
+      for (const next of publish.slice(i + 1)) {
+        if (next.trim() !== '' && indentOf(next) <= keyIndent) break;
+        body.push(next);
+      }
+      runBodies.push(body.join('\n'));
+    });
+    const publishStep = runBodies.find((body) => /git push|git\(\['push'/.test(body));
+    expect(publishStep, 'publish step that git-pushes repair branches').toBeDefined();
+    const commands = publishStep!
+      .split('\n')
+      .filter((line) => !/^\s*#/.test(line))
+      .join('\n');
+    const setupAt = commands.indexOf('gh auth setup-git');
+    const pushAt = commands.search(/git push|git\(\['push'/);
+    expect(setupAt, 'gh auth setup-git must run in the publish step').toBeGreaterThanOrEqual(0);
+    expect(pushAt).toBeGreaterThan(setupAt);
+  });
 });
 
 describe('least privilege for every workflow', () => {
