@@ -59,9 +59,9 @@
 - `server.json` declares every environment variable the server reads.
 - Codex review: the Codex review a PR gets in CI is the only Codex check;
   every Codex comment must be resolved (repaired or disposed of in writing).
-  No Codex check of each new head commit is required, and a second
-  `@codex review` is never requested. `review-gate` enforces exactly this: a
-  Codex review of any commit of the PR plus zero unresolved Codex threads.
+  `review-gate` enforces a non-dismissed Codex review of the PR's current
+  head SHA plus zero unresolved Codex threads. A review of an older commit
+  does not count.
 - The finding-to-fix map in `docs/security-remediation-2026-10.md` must stay
   accurate when any of these controls change.
 
