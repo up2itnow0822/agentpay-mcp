@@ -13,8 +13,8 @@
 #
 # Pass conditions (any one):
 #   1. Codex has reviewed this PR: a non-dismissed, non-pending
-#      chatgpt-codex-connector[bot] (user.type == Bot) review of any commit of
-#      the PR, or — for a clean pass (Codex submits no review when it has no
+#      chatgpt-codex-connector[bot] (user.type == Bot) review whose full
+#      commit SHA is one of the PR's commits, or — for a clean pass (Codex submits no review when it has no
 #      findings) — the Codex bot's own review-summary comment reporting
 #      `Code Review | Completed | <full 40-char SHA>` for a commit of this PR
 #      that no dismissed Codex review covers; in both cases newer than the
@@ -264,10 +264,11 @@ jobs:
             }
 
             // ---------------------------------------------------------------
-            // Base-SHA binding (see header comment). Ordinary Codex evidence
-            // must be provably newer than the CURRENT base-branch tip, not
-            // just newer than the last base_ref_changed event: pushes/merges
-            // to the same base branch create no timeline event.
+            // Base-SHA binding (see header comment). Waivers and published
+            // verdicts bind to the CURRENT base-branch tip, not just the last
+            // base_ref_changed event (pushes/merges to the same base branch
+            // create no timeline event). Ordinary Codex review evidence stays
+            // valid across same-branch base advances; a retarget voids it.
             // ---------------------------------------------------------------
             const BINDING_PREFIX = '<!-- review-gate-binding:';
             const BINDING_SUFFIX = ' -->';
@@ -766,6 +767,16 @@ jobs:
               // non-dismissed Codex review of any commit of this PR (or the
               // Codex clean-pass summary for one), newer than the last
               // retarget. Every review thread Codex opened must be resolved.
+              // The PR's commits: a review or clean-pass summary counts only for
+              // code that is actually part of this PR (a force-push that drops
+              // the reviewed commits needs a new review).
+              const prCommits = new Set((await github.paginate(github.rest.pulls.listCommits, {
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                pull_number: prNumber,
+                per_page: 100,
+              })).map(c => String(c.sha || '').toLowerCase()));
+              prCommits.add(headSha.toLowerCase());
               const postDatesRetarget = (timestamp) => {
                 const t = parseTimeMs(timestamp || '');
                 return Number.isFinite(t) && t > baseChangedMs;
@@ -773,6 +784,7 @@ jobs:
               const codexReviews = reviews.filter(review =>
                 isCodexUser(review.user) &&
                 isFullSha(review.commit_id || '') &&
+                prCommits.has(review.commit_id.toLowerCase()) &&
                 review.state !== 'DISMISSED' &&
                 review.state !== 'PENDING' &&
                 postDatesRetarget(review.submitted_at)
@@ -795,13 +807,6 @@ jobs:
               // Clean pass (Codex posts no review when it finds nothing): its
               // summary must attest a full 40-char SHA that is a commit of this
               // PR and was not the subject of a dismissed Codex review.
-              const prCommits = new Set((await github.paginate(github.rest.pulls.listCommits, {
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                pull_number: prNumber,
-                per_page: 100,
-              })).map(c => String(c.sha || '').toLowerCase()));
-              prCommits.add(headSha.toLowerCase());
               const cleanPass = comments.some(comment => {
                 const body = comment.body || '';
                 if (!isCodexUser(comment.user) || !body.includes(SUMMARY_MARKER)) return false;

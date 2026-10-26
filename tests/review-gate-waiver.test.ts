@@ -310,6 +310,13 @@ describe('review-gate: Codex reviews the PR once; every Codex thread must be res
     expect(published(w.runs)!.output.title).toBe('Codex reviewed PR')
   })
 
+  it('a review of a commit that is not part of the PR does not count (e.g. after a force-push)', async () => {
+    const foreign = 'f'.repeat(40)
+    const w = world({ ...base, prCommits: [P1, H], reviews: [REVIEW(foreign, T(23))] })
+    await run(w.github, PUSH, w.core)
+    expect(published(w.runs)!.output.title).toBe('Waiting for Codex review')
+  })
+
   it('an unresolved Codex thread blocks; other reviewers\' threads are left to the ruleset', async () => {
     const blocked = world({
       ...base,
