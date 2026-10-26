@@ -370,7 +370,7 @@ describe('x402_pay tool', () => {
     );
     expect(first.content[0]!.text).toContain('1000000');
     expect(retry.isError).toBe(true);
-    expect(retry.content[0]!.text).toContain('New payments to https://api.example.com are locked');
+    expect(retry.content[0]!.text).toContain('New x402 payments to api.example.com are locked');
     expect(fetches).toBe(1);
 
     mockGetActivityHistory.mockResolvedValueOnce([]);
@@ -413,7 +413,7 @@ describe('x402_pay tool', () => {
       'receipt rpc timeout after fee transfer'
     );
     expect(retry.isError).toBe(true);
-    expect(retry.content[0]!.text).toContain('did not return a transaction hash');
+    expect(retry.content[0]!.text).toContain('New x402 payments to api.example.com are locked');
     expect(fetches).toBe(1);
   });
 
@@ -445,7 +445,7 @@ describe('x402_pay tool', () => {
     expect(first.isError).toBe(true);
     expect(first.content[0]!.text).toContain('malformed transaction hash');
     expect(retry.isError).toBe(true);
-    expect(retry.content[0]!.text).toContain('did not return a transaction hash');
+    expect(retry.content[0]!.text).toContain('New x402 payments to api.example.com are locked');
   });
 
   it('broadcasts two equal paid fetches when idempotency keys differ', async () => {

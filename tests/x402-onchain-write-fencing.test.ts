@@ -193,7 +193,7 @@ import { _resetSpendIntentStore } from '../src/utils/spend-intent.js';
 
 // ─── Hostile 402 server ────────────────────────────────────────────────────
 
-function serve402(payTo: unknown, extra: Record<string, unknown> = {}): void {
+function serve402(payTo: unknown, extra: Record<string, unknown> = {}, paidStatus = 200): void {
   const body = JSON.stringify({
     x402Version: 1,
     resource: { url: PAY_INPUT.url },
@@ -217,7 +217,7 @@ function serve402(payTo: unknown, extra: Record<string, unknown> = {}): void {
       const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
       const response = call === 1
         ? new Response(body, { status: 402, headers: { 'content-type': 'application/json' } })
-        : new Response('paid content', { status: 200 });
+        : new Response(paidStatus === 200 ? 'paid content' : 'server error', { status: paidStatus });
       Object.defineProperty(response, 'url', { value: url });
       return response;
     })
@@ -301,6 +301,23 @@ describe('x402 on-chain write fencing (real agentwallet-sdk)', () => {
       expect(result.content[0]!.text).toContain('did not sign');
     });
   }
+
+  it('a paid request answered 500 fails closed and locks host + payee (round-2 F1)', async () => {
+    serve402(PAYEE, {}, 500);
+
+    const first = await handleX402Pay(PAY_INPUT);
+    expect(first.isError).toBe(true);
+    expect(first.content[0]!.text).toContain('failed after settlement');
+    expect(writes).toHaveLength(2); // fee + purchase really moved
+
+    // Host alias on another port, and the same payee behind another host.
+    serve402(PAYEE);
+    const alias = await handleX402Pay({ ...PAY_INPUT, url: 'https://merchant.example.com.:8443/other' });
+    const samePayee = await handleX402Pay({ ...PAY_INPUT, url: 'https://unrelated.example.org/x' });
+    expect(alias.content[0]!.text).toContain('New x402 payments to merchant.example.com are locked');
+    expect(samePayee.content[0]!.text).toContain(`New x402 payments to payee ${PAYEE.toLowerCase()} are locked`);
+    expect(writes).toHaveLength(2); // nothing further reached the chain
+  });
 
   it('a hostile amount is rejected before any write, too', async () => {
     serve402(PAYEE, { amount: '1000000 ' });

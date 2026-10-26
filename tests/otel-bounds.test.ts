@@ -163,6 +163,16 @@ describe('bounded OTel state (F10)', () => {
     expect(_otelStateSizes().agents).toBe(OTEL_LIMITS.maxAgents)
   })
 
+  it('a span refused at capacity stays refused when replayed (round-2: dedupe after record)', () => {
+    for (let i = 0; i < OTEL_LIMITS.maxAgents; i++) {
+      evaluateSpan({ 'agentcore.agent.id': `a${i}`, 'agentcore.cost.usd': 0.01 })
+    }
+    const span = { 'agentcore.agent.id': 'late', 'agentcore.cost.usd': 5, traceId: 'tr', spanId: 'sp' }
+    expect(evaluateSpan(span)!.action).toBe('block')
+    // The refused span was never counted, so it must not be treated as seen.
+    expect(evaluateSpan(span)!.action).toBe('block')
+  })
+
   it('caps decision history and the history limit', () => {
     registerPolicy({ agentId: 'h', maxSpendUsd: 1e9, windowMs: 0, breachAction: 'block' })
     for (let i = 0; i < OTEL_LIMITS.maxDecisions + 50; i++) {

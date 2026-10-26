@@ -29,6 +29,15 @@ import {
 } from '../utils/format.js'
 import { getConfig, getWallet } from '../utils/client.js'
 import { decimalsVerifierOverride_ } from '../utils/test-seams.js'
+import { withKeyedLock } from '../utils/spend-intent.js'
+
+/**
+ * One registration at a time, across every chain: the decision, the on-chain
+ * decimals check (an await) and the registry write must be atomic, or two
+ * concurrent registrations can both pass the "no overwrite" decision and the
+ * later write silently replaces the earlier one. The quota is global too.
+ */
+const ADD_CUSTOM_TOKEN_LOCK = 'add_custom_token'
 
 type ToolResult = { content: Array<{ type: 'text'; text: string }>; isError?: boolean }
 
@@ -444,72 +453,76 @@ export async function handleAddCustomToken(input: AddCustomTokenInput): Promise<
     // Re-assert the schema invariants: handlers can be called directly
     // (tests, embedders) without going through the dispatcher's zod parse.
     const checked = AddCustomTokenSchema.parse(input)
-
-    const registry = getGlobalRegistry()
-    const symbol = checked.symbol.toUpperCase()
-    const incoming: CustomTokenIdentity = {
-      symbol,
-      address: checked.address,
-      decimals: checked.decimals,
-      chainId: checked.chainId,
-    }
-    const existing = registry.getToken(symbol, checked.chainId)
-
-    const aKey = addressKey(checked.chainId, checked.address)
-    const byAddress =
-      customByAddress.get(aKey) ?? builtinIndexFor(checked.chainId, registry).get(aKey)
-    const existingByAddress =
-      byAddress && byAddress.symbol.toUpperCase() !== symbol ? byAddress : undefined
-
-    const decision = decideCustomTokenRegistration(
-      asIdentity(existing),
-      incoming,
-      existingByAddress
-    )
-
-    if (decision === 'register') {
-      assertQuotaAvailable(checked.chainId)
-      await decimalsVerifier()(
-        checked.chainId,
-        checked.address as `0x${string}`,
-        checked.decimals
-      )
-      registry.addToken({
-        symbol,
-        address: checked.address as `0x${string}`,
-        decimals: checked.decimals,
-        chainId: checked.chainId,
-        name: checked.name ?? checked.symbol,
-      })
-      // Record only after the registry write succeeded.
-      const sKey = `${checked.chainId}:${symbol}`
-      if (!customBySymbol.has(sKey)) {
-        customCountByChain.set(
-          checked.chainId,
-          (customCountByChain.get(checked.chainId) ?? 0) + 1
-        )
-      }
-      customBySymbol.set(sKey, incoming)
-      if (!customByAddress.has(aKey)) customByAddress.set(aKey, incoming)
-    }
-
-    const token = registry.getToken(symbol, checked.chainId)
-    return {
-      content: [
-        textContent(
-          JSON.stringify({
-            success: true,
-            idempotent: decision === 'idempotent',
-            token: token ? presentToken(token) : null,
-          })
-        ),
-      ],
-    }
+    return await withKeyedLock(ADD_CUSTOM_TOKEN_LOCK, () => registerCustomToken(checked))
   } catch (error: unknown) {
     return {
       content: [textContent(formatError(error, 'add_custom_token'))],
       isError: true,
     }
+  }
+}
+
+/** Decide, verify and write — always under ADD_CUSTOM_TOKEN_LOCK. */
+async function registerCustomToken(checked: z.infer<typeof AddCustomTokenSchema>): Promise<ToolResult> {
+  const registry = getGlobalRegistry()
+  const symbol = checked.symbol.toUpperCase()
+  const incoming: CustomTokenIdentity = {
+    symbol,
+    address: checked.address,
+    decimals: checked.decimals,
+    chainId: checked.chainId,
+  }
+  const existing = registry.getToken(symbol, checked.chainId)
+
+  const aKey = addressKey(checked.chainId, checked.address)
+  const byAddress =
+    customByAddress.get(aKey) ?? builtinIndexFor(checked.chainId, registry).get(aKey)
+  const existingByAddress =
+    byAddress && byAddress.symbol.toUpperCase() !== symbol ? byAddress : undefined
+
+  const decision = decideCustomTokenRegistration(
+    asIdentity(existing),
+    incoming,
+    existingByAddress
+  )
+
+  if (decision === 'register') {
+    assertQuotaAvailable(checked.chainId)
+    await decimalsVerifier()(
+      checked.chainId,
+      checked.address as `0x${string}`,
+      checked.decimals
+    )
+    registry.addToken({
+      symbol,
+      address: checked.address as `0x${string}`,
+      decimals: checked.decimals,
+      chainId: checked.chainId,
+      name: checked.name ?? checked.symbol,
+    })
+    // Record only after the registry write succeeded.
+    const sKey = `${checked.chainId}:${symbol}`
+    if (!customBySymbol.has(sKey)) {
+      customCountByChain.set(
+        checked.chainId,
+        (customCountByChain.get(checked.chainId) ?? 0) + 1
+      )
+    }
+    customBySymbol.set(sKey, incoming)
+    if (!customByAddress.has(aKey)) customByAddress.set(aKey, incoming)
+  }
+
+  const token = registry.getToken(symbol, checked.chainId)
+  return {
+    content: [
+      textContent(
+        JSON.stringify({
+          success: true,
+          idempotent: decision === 'idempotent',
+          token: token ? presentToken(token) : null,
+        })
+      ),
+    ],
   }
 }
 

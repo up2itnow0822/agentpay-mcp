@@ -151,13 +151,22 @@ describe('x402_session_start idempotency (F1)', () => {
     ]
     for (const retry of await Promise.all(variants)) {
       expect(retry.isError).toBe(true)
-      expect(retry.content[0]!.text).toContain('New payments to https://api.example.com are locked')
+      expect(retry.content[0]!.text).toContain('New x402 payments to api.example.com are locked')
     }
     expect(payments.count).toBe(1)
 
-    // A different origin is not blocked by this lock (it reaches payment).
-    const elsewhere = await handleX402SessionStart({ ...START, endpoint: 'https://other.example.net/v1' })
-    expect(elsewhere.content[0]!.text).not.toContain('New payments to')
+    // The same payee behind another host is the same payee: refused.
+    const samePayee = await handleX402SessionStart({ ...START, endpoint: 'https://other.example.net/v1' })
+    expect(samePayee.content[0]!.text).toContain(`New x402 payments to payee ${PAYEE} are locked`)
+    expect(payments.count).toBe(1)
+
+    // A different host AND a different payee is not blocked (it reaches payment).
+    const elsewhere = await handleX402SessionStart({
+      ...START,
+      endpoint: 'https://other.example.net/v1',
+      pay_to: '0x1111111111111111111111111111111111111111',
+    })
+    expect(elsewhere.content[0]!.text).not.toContain('New x402 payments to')
     expect(payments.count).toBe(2)
   })
 

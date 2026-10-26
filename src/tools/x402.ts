@@ -45,14 +45,14 @@ import { recordSessionCall } from '../session/manager.js';
 import {
   DefiniteSpendFailure,
   IDEMPOTENCY_KEY_JSON_SCHEMA,
-  assertPaymentOriginUnlocked,
-  lockPaymentOrigin,
   IdempotencyKeyZodSchema,
   PostSettlementSpendError,
   requireSettlementHash,
   runClassifiedSpend,
   withSpendIntent,
+  x402LockScope,
   x402PayIntentIdentity,
+  x402PaymentScope,
 } from '../utils/spend-intent.js';
 import {
   recordX402Settlement,
@@ -428,10 +428,12 @@ export async function handleX402Pay(
     // onPaymentComplete locks the intent so a retry cannot sign twice.
     const method = input.method ?? 'GET';
     const cap = assertPaymentCap(input.max_payment_eth);
-    // An origin that has taken a payment without delivering is locked for
-    // every new payment until reconciled (F1/F14).
-    assertPaymentOriginUnlocked(new URL(input.url).origin);
     const approvedPayTo = assertPayableX402Recipient(input.pay_to);
+    // A host or payee that has taken a payment without delivering is locked
+    // for every new payment until reconciled (F1/F14) — any path, port, host
+    // alias, and (for the payee) any other host. Enforced by withSpendIntent
+    // admission through `lockScope`.
+    const paymentScope = x402PaymentScope(input.url, approvedPayTo);
 
     const intent = x402PayIntentIdentity({
       url: input.url,
@@ -509,6 +511,14 @@ export async function handleX402Pay(
             async () => {
               const next = await x402Client.fetch(input.url, requestInit);
               paidResponseUrl = next.url || undefined;
+              if (paymentMade && !next.ok) {
+                // Paid, but the server answered 402/3xx/4xx/5xx: nothing was
+                // delivered. Post-settlement failure — locks host and payee.
+                await next.body?.cancel().catch(() => undefined);
+                throw new Error(
+                  `The paid request was answered with HTTP ${next.status}; the paid response was not delivered.`
+                );
+              }
               // Bounded read: the body is truncated for display, never
               // buffered whole (F8). A stream error after payment is still
               // classified post-settlement below.
@@ -544,7 +554,8 @@ export async function handleX402Pay(
               // Still fail closed on the post-settlement error even if the
               // callback hash cannot be recorded as a history receipt.
             }
-            lockPaymentOrigin(new URL(input.url).origin);
+            // withSpendIntent locks this intent, and with it the host and
+            // payee (lockScope), until an operator reconciles it.
             throw new PostSettlementSpendError({
               txHash: paymentTxHash,
               amount: paymentAmount,
@@ -572,21 +583,33 @@ export async function handleX402Pay(
         }
 
         if (paymentMade) {
-          paymentTxHash = persistX402Settlement({
-            intentKey: intent.key,
-            // Record the URL that issued the paid 402 (after redirects).
-            // response.url is the final URL of the paid response; under
-            // redirects it may differ from the endpoint that issued the 402.
-            url: response.url || input.url,
-            requestedUrl: input.url,
-            settledAt: paymentSettledAt,
-            seq: paymentSeq,
-            method,
-            amount: paymentAmount,
-            token: paymentToken,
-            recipient: paymentRecipient,
-            txHash: paymentTxHash,
-          });
+          try {
+            paymentTxHash = persistX402Settlement({
+              intentKey: intent.key,
+              // Record the URL that issued the paid 402 (after redirects).
+              // response.url is the final URL of the paid response; under
+              // redirects it may differ from the endpoint that issued the 402.
+              url: response.url || input.url,
+              requestedUrl: input.url,
+              settledAt: paymentSettledAt,
+              seq: paymentSeq,
+              method,
+              amount: paymentAmount,
+              token: paymentToken,
+              recipient: paymentRecipient,
+              txHash: paymentTxHash,
+            });
+          } catch (error: unknown) {
+            // Settled, but the receipt cannot be recorded (e.g. a malformed
+            // hash from the SDK): fail closed as post-settlement so the
+            // caller is told not to resubmit and host + payee lock.
+            throw new PostSettlementSpendError({
+              txHash: paymentTxHash,
+              amount: paymentAmount,
+              recipient: paymentRecipient,
+              cause: error,
+            });
+          }
         }
 
         let out = `🌐 **x402 Fetch Result**\n\n`;
@@ -619,6 +642,7 @@ export async function handleX402Pay(
         durable: Boolean(input.idempotencyKey?.trim()),
         fingerprint: intent.fingerprint,
         shouldSettle: (result) => result.charged,
+        lockScope: x402LockScope(paymentScope),
       }
     );
 
@@ -641,8 +665,8 @@ export async function handleX402Pay(
       const cause =
         error.cause instanceof Error ? error.cause.message : undefined;
       let out =
-        '❌ x402_pay failed after settlement. Do not resubmit — new payments to this origin are ' +
-        'locked until the payment is reconciled.\n\n';
+        '❌ x402_pay failed after settlement. Do not resubmit — new x402 payments to this host ' +
+        'and to this payee are locked until the payment is reconciled.\n\n';
       out += `  Amount:    ${sanitizeUntrustedInline(error.amount, 64)} (base units)\n`;
       out += `  Recipient: ${sanitizeUntrustedInline(error.recipient, 64)}\n`;
       out += `  TX Hash:   ${sanitizeUntrustedInline(error.txHash, 80)}\n`;

@@ -141,9 +141,23 @@ function ensureOperatorPolicy(): void {
   // so every spend is refused (regardless of ALLOW_UNPOLICED_SPEND) until the
   // environment is fixed and the server restarted.
   try {
-    _layersByScope.set(OPERATOR_POLICY_SCOPE, [
-      buildLayer({ dailyLimitEth, perTxCapEth, allowedRecipients }),
-    ])
+    if (allowedRecipients && allowedRecipients.length === 0) {
+      // "," and friends: set, but naming nobody. Never read that as "no
+      // allowlist" — an empty operator layer would bypass the default deny.
+      throw new Error(
+        `${OPERATOR_POLICY_ENV.allowedRecipients} is set but lists no recipient address.`
+      )
+    }
+    const layer = buildLayer({ dailyLimitEth, perTxCapEth, allowedRecipients })
+    if (
+      layer.dailyLimitUnits === undefined &&
+      layer.perTxCapUnits === undefined &&
+      layer.allowedRecipients.length === 0
+    ) {
+      // Any configured operator policy must constrain something.
+      throw new Error('The operator spend policy in the environment sets no constraint.')
+    }
+    _layersByScope.set(OPERATOR_POLICY_SCOPE, [layer])
   } catch (error: unknown) {
     _operatorPolicyError = error instanceof Error ? error.message : String(error)
   }

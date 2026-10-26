@@ -646,7 +646,25 @@ describe('malformed operator policy fails closed (F11 review follow-up)', () => 
   })
   afterEach(() => {
     delete process.env[OPERATOR_POLICY_ENV.perTxCapEth]
+    delete process.env[OPERATOR_POLICY_ENV.allowedRecipients]
   })
+
+  it.each([',', ' , ', ',,,'])(
+    'an allowlist variable that lists no address (%j) denies everything (round-2 fail-open)',
+    async (value) => {
+      delete process.env[ALLOW_UNPOLICED_SPEND_ENV]
+      process.env[OPERATOR_POLICY_ENV.allowedRecipients] = value
+      _resetPolicyStore()
+      const decision = await enforceSpendPolicy({
+        merchant: '0x0000000000000000000000000000000000000009',
+        amount: 10n ** 24n,
+        decimals: 18,
+      })
+      expect(decision.status).toBe('rejected')
+      expect((decision as { reason?: string }).reason).toContain('operator spend policy in the environment is invalid')
+      expect(operatorPolicyError()).toContain(OPERATOR_POLICY_ENV.allowedRecipients)
+    }
+  )
 
   it('denies every spend, even with ALLOW_UNPOLICED_SPEND, and never becomes "no policy"', async () => {
     process.env[OPERATOR_POLICY_ENV.perTxCapEth] = '0.5 ETH'

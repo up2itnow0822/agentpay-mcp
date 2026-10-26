@@ -32,7 +32,8 @@ export function runSpendIntentsCli(
       return 0
     }
     for (const entry of locked) {
-      out(`${new Date(entry.since).toISOString()}  ${entry.key}`)
+      const blocks = entry.blocks.length > 0 ? `  (blocks x402 payments to: ${entry.blocks.join(', ')})` : ''
+      out(`${new Date(entry.since).toISOString()}  ${entry.key}${blocks}`)
     }
     return 0
   }

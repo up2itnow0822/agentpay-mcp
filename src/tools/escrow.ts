@@ -147,7 +147,9 @@ export async function handleCreateEscrow(
 
     // Same spend-intent contract as every other value-moving tool: a
     // duplicate delivery replays, an ambiguous broadcast locks, and a failure
-    // before any wallet write releases the policy reservation.
+    // before any wallet write releases the policy reservation. The identity
+    // covers only what reaches the chain: `terms` is off-chain text, so
+    // rewording it after an ambiguous failure must not mint a second vault.
     const fingerprint =
       'create_escrow:' +
       createHash('sha256')
@@ -157,7 +159,6 @@ export async function handleCreateEscrow(
             factoryAddress.toLowerCase(),
             input.counterpartyAddress.toLowerCase(),
             paymentAmount.toString(),
-            input.terms,
             deadlineSecs,
             challengeWindowHours,
           ])

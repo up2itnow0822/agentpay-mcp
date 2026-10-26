@@ -14,6 +14,7 @@ import {
 import { join } from 'node:path'
 import { classifySpendError, isEvmTxHash } from 'agentwallet-sdk'
 import { z } from 'zod'
+import { normalizeHost } from './net-guard.js'
 
 /**
  * In-process spend-intent cache so an identical send_token, swap_tokens, or
@@ -99,6 +100,12 @@ interface SettledIntent<T> {
 interface UnresolvedIntent {
   settledAt: number
   fingerprint: string
+  /**
+   * Payment-lock keys (x402 host and payee) this intent blocks while it is
+   * unresolved. Recorded on the intent's `begin` journal record, so the lock
+   * cannot be lost to a crash or a torn record written after it.
+   */
+  scope?: readonly string[]
 }
 
 interface InflightIntent {
@@ -578,50 +585,77 @@ export function x402PayIntentIdentity(input: {
 }
 
 /**
- * x402_session_start identity: the endpoint's ORIGIN. Path, query, scope,
- * method, body and headers are all excluded, so neither a reworded request
- * nor a sibling path can step around an in-flight purchase or a
- * post-settlement lock on the same paid service (F1). The origin is also the
- * serialisation unit used by withKeyedLock.
+ * x402_session_start identity: the endpoint's canonical HOST. Path, query,
+ * port, scope, method, body and headers are all excluded, so neither a
+ * reworded request, a sibling path nor a host alias can step around an
+ * in-flight purchase or a post-settlement lock on the same paid service (F1).
+ * The same key is the serialisation unit used by withKeyedLock.
  */
 export function sessionStartIntentIdentity(input: { endpoint: string }): SpendIntentIdentity {
-  const origin = new URL(input.endpoint).origin
-  const fingerprint = `x402_session_start:${origin}`
+  const fingerprint = `x402_session_start:${x402PaymentHost(input.endpoint)}`
   return { key: fingerprint, fingerprint }
 }
 
-// ─── Origin-wide payment locks ─────────────────────────────────────────────
+// ─── x402 payment locks: host + payee ──────────────────────────────────────
 
-/** Unresolved-lock key that blocks every new x402 payment to an origin. */
-export function paymentOriginLockKey(origin: string): string {
-  return `x402-origin#${origin}`
+/**
+ * Canonical host for x402 payment locks: lower-case, without the trailing
+ * root dot (however it was spelled: `.`, `%2e`, `。` all parse to it) and
+ * without the port. Every alias of one host maps to one lock.
+ */
+export function x402PaymentHost(url: string | URL): string {
+  return normalizeHost(new URL(url).hostname)
+}
+
+export interface X402PaymentScope {
+  /** Canonical host (see x402PaymentHost). */
+  host: string
+  /** Caller-approved payee, lower-cased. */
+  payee: string
+}
+
+export function x402PaymentScope(url: string | URL, payTo: string): X402PaymentScope {
+  return { host: x402PaymentHost(url), payee: payTo.toLowerCase() }
+}
+
+const X402_HOST_LOCK_PREFIX = 'x402-host#'
+const X402_PAYEE_LOCK_PREFIX = 'x402-payee#'
+
+/** Lock keys an x402 payment intent carries (pass as withSpendIntent `lockScope`). */
+export function x402LockScope(scope: X402PaymentScope): string[] {
+  return [`${X402_HOST_LOCK_PREFIX}${scope.host}`, `${X402_PAYEE_LOCK_PREFIX}${scope.payee}`]
+}
+
+function describeLockKey(key: string): string {
+  if (key.startsWith(X402_HOST_LOCK_PREFIX)) return key.slice(X402_HOST_LOCK_PREFIX.length)
+  if (key.startsWith(X402_PAYEE_LOCK_PREFIX)) return `payee ${key.slice(X402_PAYEE_LOCK_PREFIX.length)}`
+  return key
 }
 
 /**
- * A payment to `origin` settled but the paid response could not be
- * delivered. That endpoint has demonstrated it can take money without
- * delivering, so EVERY new x402 payment (x402_pay or x402_session_start,
- * any path, any request shape) to the origin is refused until an operator
- * reconciles the lock. Never evicted; journaled like any other lock.
+ * Refuse a new intent while ANY unresolved intent shares one of its lock
+ * keys. For x402 that means: an earlier payment to the same host or the same
+ * payee settled (or may have settled) without its response being delivered —
+ * that service has shown it can take money without delivering, under any
+ * path, port, host alias or (for the payee) any other host. Only the
+ * operator CLI clears it. Enforced inside withSpendIntent admission, with no
+ * await between this check and the begin record.
  */
-export function lockPaymentOrigin(origin: string): void {
-  ensureJournalLoaded()
-  const key = paymentOriginLockKey(origin)
-  if (!unresolved.has(key)) {
-    unresolved.set(key, { settledAt: Date.now(), fingerprint: key })
-    journal({ op: 'lock', key, fp: key })
+function assertScopeUnlocked(scope: readonly string[]): void {
+  for (const entry of unresolved.values()) {
+    const hit = entry.scope?.find((key) => scope.includes(key))
+    if (hit) {
+      throw scopeLockedError(hit)
+    }
   }
 }
 
-export function assertPaymentOriginUnlocked(origin: string): void {
-  ensureJournalLoaded()
-  if (unresolved.has(paymentOriginLockKey(origin))) {
-    throw new UnresolvedSpendIntentError(
-      `New payments to ${origin} are locked: an earlier payment to this origin settled but its ` +
-        'response was never delivered. Reconcile it (agentpay-mcp spend-intents list / resolve) ' +
-        'before paying this origin again.'
-    )
-  }
+function scopeLockedError(lockKey: string): UnresolvedSpendIntentError {
+  return new UnresolvedSpendIntentError(
+    `New x402 payments to ${describeLockKey(lockKey)} are locked: an earlier x402 payment there ` +
+      'settled (or may have settled) but its response was never delivered. Reconcile it ' +
+      '(agentpay-mcp spend-intents list / resolve) before paying again.'
+  )
 }
 
 export function x402PayIntentKey(input: {
@@ -658,11 +692,17 @@ export function _spendIntentStoreSizes(): {
 }
 
 /** Unresolved intents awaiting reconciliation (keys are opaque identities). */
-export function listUnresolvedSpendIntents(): Array<{ key: string; since: number }> {
+export function listUnresolvedSpendIntents(): Array<{
+  key: string
+  since: number
+  /** Human-readable payment locks this intent holds (hosts, payees). */
+  blocks: string[]
+}> {
   ensureJournalLoaded()
   return Array.from(unresolved.entries()).map(([key, entry]) => ({
     key,
     since: entry.settledAt,
+    blocks: (entry.scope ?? []).map(describeLockKey),
   }))
 }
 
@@ -762,10 +802,10 @@ function assertFingerprint(stored: string, incoming: string): void {
 // ─── Journal (opt-in durability) ───────────────────────────────────────────
 
 type JournalRecord =
-  | { op: 'begin'; key: string; fp: string }
+  | { op: 'begin'; key: string; fp: string; scope?: readonly string[] }
   | { op: 'settle'; key: string; fp: string; durable: boolean }
   | { op: 'definite'; key: string }
-  | { op: 'lock'; key: string; fp: string }
+  | { op: 'lock'; key: string; fp: string; scope?: readonly string[] }
   | { op: 'release'; key: string }
   | { op: 'forget'; key: string }
 
@@ -857,7 +897,7 @@ export function ensureJournalLoaded(): void {
         'refusing value movement until it can be replayed.'
     )
   }
-  const open = new Map<string, { fp: string; at: number }>()
+  const open = new Map<string, { fp: string; at: number; scope?: readonly string[] }>()
   for (const line of text.split('\n')) {
     if (!line.trim()) {
       continue
@@ -873,9 +913,13 @@ export function ensureJournalLoaded(): void {
     const at = typeof rec.at === 'number' ? rec.at : Date.now()
     switch (rec.op) {
       case 'begin':
-      case 'lock':
-        open.set(rec.key, { fp: rec.fp, at })
+      case 'lock': {
+        // The begin record carries the payment locks, so a torn or missing
+        // lock record after it cannot drop them.
+        const scope = journalScope(rec.scope) ?? open.get(rec.key)?.scope
+        open.set(rec.key, { fp: rec.fp, at, ...(scope ? { scope } : {}) })
         break
+      }
       case 'settle':
         open.delete(rec.key)
         if (rec.durable) {
@@ -893,9 +937,19 @@ export function ensureJournalLoaded(): void {
     }
   }
   for (const [key, entry] of open) {
-    unresolved.set(key, { settledAt: entry.at, fingerprint: entry.fp })
+    unresolved.set(key, {
+      settledAt: entry.at,
+      fingerprint: entry.fp,
+      ...(entry.scope ? { scope: entry.scope } : {}),
+    })
   }
   journalLoaded = true
+}
+
+function journalScope(value: unknown): readonly string[] | undefined {
+  if (!Array.isArray(value)) return undefined
+  const keys = value.filter((key): key is string => typeof key === 'string')
+  return keys.length > 0 ? keys : undefined
 }
 
 // ─── Intent execution ──────────────────────────────────────────────────────
@@ -907,11 +961,17 @@ export async function withSpendIntent<T>(
     durable?: boolean
     fingerprint?: string
     shouldSettle?: (_value: T) => boolean
+    /**
+     * Payment-lock keys (see x402LockScope) this intent blocks if it ends
+     * unresolved. Journaled on the begin record, before `run()` starts.
+     */
+    lockScope?: readonly string[]
   }
 ): Promise<{ value: T; replayed: boolean }> {
   ensureJournalLoaded()
   pruneExpired()
   const fingerprint = options?.fingerprint ?? key
+  const scope = options?.lockScope && options.lockScope.length > 0 ? [...options.lockScope] : undefined
 
   const existing = touch(settledDurable, key) ?? settledEphemeral.get(key)
   if (existing) {
@@ -928,7 +988,8 @@ export async function withSpendIntent<T>(
   const locked = unresolved.get(key)
   if (locked) {
     assertFingerprint(locked.fingerprint, fingerprint)
-    throw new UnresolvedSpendIntentError(unresolvedMessage())
+    const lockKey = locked.scope?.[0]
+    throw lockKey ? scopeLockedError(lockKey) : new UnresolvedSpendIntentError(unresolvedMessage())
   }
 
   const running = inflight.get(key)
@@ -936,6 +997,10 @@ export async function withSpendIntent<T>(
     assertFingerprint(running.fingerprint, fingerprint)
     const value = (await running.promise) as T
     return { value, replayed: true }
+  }
+
+  if (scope) {
+    assertScopeUnlocked(scope)
   }
 
   // Fail closed under reconciliation backlog: never evict an unresolved lock
@@ -946,7 +1011,7 @@ export async function withSpendIntent<T>(
     throw new SpendIntentCapacityError()
   }
 
-  journal({ op: 'begin', key, fp: fingerprint })
+  journal({ op: 'begin', key, fp: fingerprint, ...(scope ? { scope } : {}) })
   const promise = run()
   inflight.set(key, { promise, fingerprint })
   try {
@@ -976,8 +1041,8 @@ export async function withSpendIntent<T>(
     }
     // Possibly broadcast: lock with no timer and no eviction. Admission
     // counted this intent while in flight, so the ceiling holds.
-    unresolved.set(key, { settledAt: Date.now(), fingerprint })
-    journal({ op: 'lock', key, fp: fingerprint })
+    unresolved.set(key, { settledAt: Date.now(), fingerprint, ...(scope ? { scope } : {}) })
+    journal({ op: 'lock', key, fp: fingerprint, ...(scope ? { scope } : {}) })
     throw error
   } finally {
     inflight.delete(key)

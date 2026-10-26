@@ -342,5 +342,15 @@ describe('create_escrow spend-intent contract', () => {
     expect(retry.content[0].text).toContain('did not return a transaction hash')
     expect(create).toHaveBeenCalledTimes(1)
   })
+
+  it('rewording the off-chain terms after an ambiguous failure is still the same vault (round-2)', async () => {
+    const create = vi.fn().mockResolvedValue({ address: '0xvault', txHash: 'pending' })
+    MockMutualStakeEscrow.mockImplementation(function () { return { create } } as any)
+    expect((await handleCreateEscrow(input)).isError).toBe(true)
+    const reworded = await handleCreateEscrow({ ...input, terms: 'deliver the report, please' })
+    expect(reworded.isError).toBe(true)
+    expect(reworded.content[0].text).toContain('did not return a transaction hash')
+    expect(create).toHaveBeenCalledTimes(1)
+  })
 })
 

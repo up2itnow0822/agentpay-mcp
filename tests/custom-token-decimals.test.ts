@@ -75,3 +75,26 @@ describe('add_custom_token on-chain decimals verification', () => {
     expect(ok.isError).toBeUndefined()
   })
 })
+
+describe('add_custom_token registration is atomic (round-2 TOCTOU)', () => {
+  const A = '0x5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a'
+  const B = '0x5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b'
+
+  it('two concurrent registrations of one symbol to different contracts: exactly one wins', async () => {
+    // Both contracts "verify" — the race is between decide and write, across
+    // the await on the on-chain check.
+    _setDecimalsVerifierOverride(async () => {
+      await new Promise((r) => setTimeout(r, 15))
+    })
+    const [first, second] = await Promise.all([
+      handleAddCustomToken({ symbol: 'RACEX', address: A, decimals: 6, chainId: 8453 }),
+      handleAddCustomToken({ symbol: 'RACEX', address: B, decimals: 18, chainId: 8453 }),
+    ])
+    expect(first.isError).toBeUndefined()
+    expect(second.isError).toBe(true)
+    // The registry still says what the winner was told.
+    const { getGlobalRegistry } = await import('agentwallet-sdk')
+    expect(getGlobalRegistry().getToken('RACEX', 8453)?.address.toLowerCase()).toBe(A)
+    expect(getGlobalRegistry().getToken('RACEX', 8453)?.decimals).toBe(6)
+  })
+})

@@ -34,12 +34,12 @@ import { assertPaymentCap, assertPayableX402Recipient } from '../utils/payment-c
 import {
   DefiniteSpendFailure,
   PostSettlementSpendError,
-  assertPaymentOriginUnlocked,
-  lockPaymentOrigin,
   runClassifiedSpend,
   sessionStartIntentIdentity,
   withKeyedLock,
   withSpendIntent,
+  x402LockScope,
+  x402PaymentScope,
 } from '../utils/spend-intent.js';
 import {
   nextX402SettlementSeq,
@@ -228,16 +228,18 @@ export async function handleX402SessionStart(
       return { content: [textContent(describeReusedSession(early, config.chainId))] };
     }
 
-    // Serialise starts per origin, then re-check: two overlapping starts (or
-    // a retry racing the original) can never both reach the wallet (F1).
-    return await withKeyedLock(`x402_session_start:${endpointUrl.origin}`, async () => {
+    // Serialise starts per canonical host (every alias of a host is one key),
+    // then re-check: two overlapping starts (or a retry racing the original)
+    // can never both reach the wallet (F1).
+    const intent = sessionStartIntentIdentity({ endpoint: endpointUrl.href });
+    const paymentScope = x402PaymentScope(endpointUrl, approvedPayTo);
+    return await withKeyedLock(intent.key, async () => {
       const active = findSessionForUrl(input.endpoint);
       if (active) {
         return { content: [textContent(describeReusedSession(active, config.chainId))] };
       }
 
-      assertPaymentOriginUnlocked(endpointUrl.origin);
-      const intent = sessionStartIntentIdentity({ endpoint: input.endpoint });
+      // Host/payee locks are enforced by withSpendIntent admission (lockScope).
       const { value } = await withSpendIntent(
         intent.key,
         () => startPaidSession(input, { cap, approvedPayTo, timeoutMs, intentKey: intent.key }),
@@ -245,8 +247,10 @@ export async function handleX402SessionStart(
           fingerprint: intent.fingerprint,
           // The session store is the record of a completed purchase; a settled
           // result is never replayed from this cache (an ended session must be
-          // purchasable again). Failures after settlement still lock.
+          // purchasable again). Failures after settlement still lock — this
+          // intent, and with it the host and payee.
           shouldSettle: () => false,
+          lockScope: x402LockScope(paymentScope),
         }
       );
       return value;
@@ -254,8 +258,8 @@ export async function handleX402SessionStart(
   } catch (error: unknown) {
     if (error instanceof PostSettlementSpendError) {
       let out =
-        '❌ x402_session_start failed after settlement. Do not resubmit — new payments to this ' +
-        'origin are locked until the payment is reconciled.\n\n';
+        '❌ x402_session_start failed after settlement. Do not resubmit — new x402 payments to ' +
+        'this host and to this payee are locked until the payment is reconciled.\n\n';
       out += `  Amount:    ${sanitizeUntrustedInline(error.amount, 64)} (base units)\n`;
       out += `  Recipient: ${sanitizeUntrustedInline(error.recipient, 64)}\n`;
       out += `  TX Hash:   ${sanitizeUntrustedInline(error.txHash, 80)}\n`;
@@ -381,8 +385,8 @@ async function startPaidSession(
     signal: AbortSignal.timeout(ctx.timeoutMs),
   };
 
+  // withSpendIntent locks the intent (and its host + payee lockScope).
   const postSettlement = (cause: unknown): never => {
-    lockPaymentOrigin(new URL(input.endpoint).origin);
     throw new PostSettlementSpendError({
       txHash: paymentTxHash,
       amount: paymentAmount,
@@ -411,6 +415,14 @@ async function startPaidSession(
     }
     paidClient.disposeUnusedReservation(error);
     throw error;
+  }
+
+  if (paymentMade && !response.ok) {
+    // Paid, but the server answered 402/3xx/4xx/5xx: no session was granted.
+    // Never create a session for it; fail closed as post-settlement.
+    return postSettlement(
+      new Error(`The paid request was answered with HTTP ${response.status}; no session was granted.`)
+    );
   }
 
   if (!paymentMade) {
