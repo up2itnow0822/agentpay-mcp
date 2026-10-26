@@ -33,15 +33,26 @@ smithery mcp add up2itnow0822/agentpay-mcp
 smithery tool list <connection>
 ```
 
-Payment rule: the CLI path may discover tools, but it must not execute `x402_pay` until a spend policy is loaded and the caller confirms approval for the exact merchant, network, asset, amount, and manifest snapshot.
+Payment rule: the CLI path may discover tools, but it must not execute `x402_pay` until the server has an operator spend policy and the caller has approved the exact payee, network, asset, amount, and manifest snapshot. Use `x402_quote` to read the offered terms without paying.
 
 ## Required buyer environment
+
+Server environment (read by AgentPay MCP; v5.0.0 refuses every spend without an operator policy):
 
 ```bash
 export AGENT_PRIVATE_KEY="<local non-custodial test key>"
 export AGENT_WALLET_ADDRESS="0xYourBuyerWallet"
 export CHAIN_ID="84532"
 export RPC_URL="https://sepolia.base.org"
+export AGENTPAY_POLICY_PER_TX_CAP_ETH="1"
+export AGENTPAY_POLICY_DAILY_LIMIT_ETH="5"
+export AGENTPAY_X402_MAX_PAYMENT="1.00"
+export AGENTPAY_STATE_DIR="$HOME/.agentpay-state"
+```
+
+Host-app settings (read by the example host code below, not by the server):
+
+```bash
 export AGENTPAY_DEFAULT_MAX_USDC="1.00"
 export AGENTPAY_APPROVAL_MODE="human_required"
 export AGENTPAY_MANIFEST_MAX_AGE_SECONDS="300"
@@ -50,7 +61,7 @@ export AGENTPAY_MANIFEST_MAX_AGE_SECONDS="300"
 Defaults for paid MCP onboarding:
 
 - Start on Base Sepolia (`CHAIN_ID=84532`) until a mainnet cutover checklist passes.
-- Set the per-call cap to `1.00` USDC or less for first-run demos.
+- Set the per-call cap to `1.00` USDC or less for first-run demos. Every `x402_pay` call must pass `max_payment_eth`; `AGENTPAY_X402_MAX_PAYMENT` caps it server-side.
 - Require human approval for every paid tool call in example apps.
 - Reject manifests older than 300 seconds for dynamic paid MCP gateways.
 - Fail closed if the x402 manifest omits network, asset, payTo, maxAmount, tool count, or trial policy.
@@ -125,10 +136,15 @@ if (Date.now() - Date.parse(manifest.generated_at) > 300_000) {
   throw new Error("Refusing paid MCP call because x402 manifest is stale");
 }
 
+// Read the live 402 terms without paying. The server returns validated
+// offers (pay_to, asset, network, amount_base_units) for the configured network.
+const quote = await agentpay.tools.x402_quote({ url: manifest.example_paid_url });
+const offer = pickApprovedOffer(quote, manifest); // must match manifest.payTo / asset / network
+
 const approval = await requestHumanApproval({
-  merchant: manifest.merchant,
-  network: manifest.network,
-  asset: manifest.asset,
+  merchant: offer.pay_to,
+  network: offer.network,
+  asset: offer.asset,
   amountUsd: "1.00",
   tool: "x402_pay",
 });
@@ -139,9 +155,11 @@ if (!approval.approved) {
 
 const result = await agentpay.tools.x402_pay({
   url: manifest.example_paid_url,
-  maxAmountUsd: "1.00",
-  approvalMode: "human_required",
-  manifestSnapshotId: manifest.snapshot_id,
+  max_payment_eth: "1.00", // whole units of the selected asset (1.00 USDC)
+  pay_to: offer.pay_to,    // a 402 naming any other payee is refused before signing
+  asset: offer.asset,
+  network: offer.network,
+  idempotencyKey: `smithery-demo-${manifest.snapshot_id}`,
 });
 ```
 
@@ -176,5 +194,6 @@ Reject the connection if any field is missing or stale. A Smithery badge proves 
 - Smithery CLI install instructions are present but do not claim live listing verification.
 - Vercel AI SDK MCP setup shows `@smithery/api/mcp` transport and a paid-call approval tool.
 - `@smithery/api` TypeScript setup shows typed SDK connection with a stale-manifest rejection.
-- Spend defaults are capped for first-run demos.
+- Spend defaults are capped for first-run demos, and the server has an operator spend policy.
+- `x402_pay` examples pass `max_payment_eth` and `pay_to` taken from an approved `x402_quote` offer.
 - The signing invariant is explicit: no approval means no x402 signing.

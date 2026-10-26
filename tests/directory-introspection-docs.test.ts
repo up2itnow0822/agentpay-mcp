@@ -67,7 +67,7 @@ describe.sequential('directory introspection readiness docs', () => {
       'x402-native AgentPay MCP vs Stripe-proxy MCP patterns',
       'policy approval can be required before signing',
       'https://glama.ai/mcp/servers/up2itnow0822/claw-pay-mcp',
-      '27 MCP tools',
+      '28 MCP tools',
       'Lightning Wallet MCP comparison',
       'Glama MCP Server',
       'docs/x402-native-vs-stripe-proxy.md',

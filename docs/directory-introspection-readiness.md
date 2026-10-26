@@ -59,7 +59,7 @@ printf '%s\n' \
 Expected proof points:
 
 - `initialize` returns server name `agentpay-mcp`.
-- `tools/list` returns payment tools such as `x402_pay`, `check_budget`, `set_spend_policy`, and `otel_evaluate_spend`.
+- `tools/list` returns 28 tools as of v5.0.0, including payment tools such as `x402_quote`, `x402_pay`, `check_budget`, `set_spend_policy`, and `otel_evaluate_spend`.
 - No default managed wallet is created during introspection.
 
 ## Glama metadata

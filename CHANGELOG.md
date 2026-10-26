@@ -7,6 +7,70 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [5.0.0] - 2026-10-25
+
+Security release. Repairs all 18 findings (4 high, 13 medium, 1 low) of the
+October 2026 whole-repository static security review. Finding numbers below
+(F1–F18) refer to
+[`docs/security-remediation-2026-10.md`](docs/security-remediation-2026-10.md),
+which maps each finding to its repair and proving test.
+
+### Breaking
+- `x402_pay` and `x402_session_start` require `max_payment_eth` and `pay_to`.
+  Optional `asset` and `network` bind those too. A 402 naming another payee,
+  asset or network, or above the cap, is refused before any wallet write (F3).
+- Spend policy is default-deny. Value movement requires an operator policy
+  (`AGENTPAY_POLICY_*`) or an explicit `AGENTPAY_ALLOW_UNPOLICED_SPEND=1` (F11).
+- `set_spend_policy` can only tighten. Requests that raise a limit, drop a
+  constraint, or widen an allowlist are refused; earlier layers keep their
+  accounting; the `operator` scope is reserved (F11).
+- Outbound requests require `https` and refuse private, loopback, link-local
+  and metadata destinations; redirects are not followed automatically
+  (F9, F15).
+- `send_payment` `token_decimals` is an assertion, not an override; a mismatch
+  is refused (F2).
+- `list_chain_tokens` is paginated; `add_custom_token` accepts only supported
+  chains and bounded input (F18).
+
+### Security
+- F1: `x402_session_start` is serialised per origin with an endpoint-scoped
+  spend intent; any failure after payment locks the endpoint.
+- F2: Token decimals come from the registry, native ETH, or on-chain
+  `decimals()`.
+- F3, F5: Mandatory cap and approved terms checked against the SDK-selected
+  requirement; the zero address is refused as payee and as `pay_to`.
+- F4: Value-pack examples use exact 6-decimal USDC caps and a single-use
+  approval record bound to the final offer; mainnet requires an explicit opt-in.
+- F6, F13, F17: Workflow actions pinned to full commit SHAs; review-gate
+  evidence bound to the exact base SHA; the daily-review analysis job is
+  read-only and a deterministic job owns the single issue write.
+- F7: Identity tools return a typed summary plus one nonce-fenced untrusted
+  block.
+- F8, F15: New safe transport (`src/utils/safe-fetch.ts`) for every
+  caller-selected destination: DNS resolved once and pinned, response bodies
+  capped at 2 MiB (decoded), 1 MiB rendered.
+- F9, F10: OTel kill callback uses the pinned transport; OTel identifiers,
+  policies, ledgers, decisions and span dedupe are bounded.
+- F12: Spend classification uses `AsyncLocalStorage` on a once-hooked wallet
+  client, so concurrent spends cannot be misattributed.
+- F14: Unresolved spend-intent locks are never evicted; new spends are refused
+  at capacity; evicted keyed settlements are tombstoned.
+- F16: `send_payment` supports `idempotencyKey`, replays identical retries, and
+  locks on an ambiguous broadcast.
+- `npm audit --omit=dev` and `npm audit` report 0 vulnerabilities.
+
+### Added
+- `x402_quote` tool: reads an endpoint's x402 terms without paying (28 MCP
+  tools in total).
+- `agentpay-mcp spend-intents list | resolve <key>` operator CLI for
+  reconciling locked spend intents. It is deliberately not an MCP tool.
+- Environment variables: `AGENTPAY_POLICY_DAILY_LIMIT_ETH`,
+  `AGENTPAY_POLICY_PER_TX_CAP_ETH`, `AGENTPAY_POLICY_ALLOWED_RECIPIENTS`,
+  `AGENTPAY_ALLOW_UNPOLICED_SPEND`, `AGENTPAY_X402_MAX_PAYMENT`,
+  `AGENTPAY_STATE_DIR` (fsync'd append-only spend-intent journal replayed at
+  startup), `AGENTPAY_ALLOWED_PRIVATE_HOSTS`, `AGENTPAY_ALLOW_PRIVATE_NETWORK`
+  (development only).
+
 ## [4.3.0] - 2026-10-23
 
 Lifts the security-maintenance pause.

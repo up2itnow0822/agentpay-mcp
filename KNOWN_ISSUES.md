@@ -60,10 +60,11 @@ and bump the pin through the pin-policy upgrade process if needed.
 
 **Severity:** Low (by design) **Status:** By design — not a bug
 
-**Description:** The `x402_pay` tool only supports payment via USDC on Base
-network (`base:8453` and `base-sepolia:84532`). x402 endpoints that require
-payment on other networks or in other tokens will not be paid and will return
-the 402 response unchanged.
+**Description:** The `x402_pay` and `x402_session_start` tools only pay on
+the configured Base network (`base:8453` or `base-sepolia:84532`). x402
+endpoints that offer only other networks are not paid: the call fails closed
+with an "Unsupported x402 Payment Requirement" error and signs nothing.
+`x402_quote` lists only offers on the configured network.
 
 **Affected behavior:** If an x402 endpoint requires ETH-native payment (not
 USDC), or payment on Ethereum Mainnet, the request will not be paid
@@ -75,4 +76,27 @@ this via config.
 
 ---
 
-Last updated: 2026-10-11
+## 4. Residual risks after the October 2026 remediation (v5.0.0)
+
+**Severity:** Accepted, documented **Status:** By design. See
+[`docs/security-remediation-2026-10.md`](docs/security-remediation-2026-10.md).
+
+- **Spend-intent state is process-local by default.** Locks on ambiguous
+  payments and keyed settlements are lost on restart unless
+  `AGENTPAY_STATE_DIR` is set. Operators running long-lived production
+  servers should set it, and reconcile locks with
+  `agentpay-mcp spend-intents list` / `resolve <key>` while the server is
+  stopped.
+- **Tombstones are capped.** Evicted keyed settlements are remembered as
+  tombstones up to 16,384 entries; beyond that, very old idempotency keys may
+  be accepted as new.
+- **Application policy is defence in depth.** On-chain AgentAccountV2 limits
+  remain the tamper-resistant control. The in-process policy can no longer be
+  weakened by the agent, but it is lost on restart and is only as trustworthy
+  as the server process and its environment.
+- **The MCP stdio channel is the caller boundary.** Any process that can speak
+  to the server can invoke its tools within the limits above.
+
+---
+
+Last updated: 2026-10-25
