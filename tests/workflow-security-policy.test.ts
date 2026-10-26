@@ -263,6 +263,47 @@ describe('daily-repair privilege separation (Codex review of PR #90)', () => {
   });
 });
 
+describe('daily-repair runner and REPAIR_TOKEN checkout (SO F3)', () => {
+  const text = readWorkflow('daily-repair.yml');
+  const jobs = jobBlocks(text);
+  const expectedJobs = ['preflight', 'plan', 'publish', 'audit'];
+
+  function checkoutWith(lines: string[], needle: string): string[] | null {
+    const at = lines.findIndex((line) => line.includes(needle));
+    if (at < 0) return null;
+    let start = at;
+    while (start > 0 && !/^\s+-\s+name:/.test(lines[start])) start--;
+    const stepIndent = indentOf(lines[start]);
+    const step: string[] = [];
+    for (const line of lines.slice(start + 1)) {
+      if (line.trim() !== '' && indentOf(line) <= stepIndent && /^\s+-\s+/.test(line)) break;
+      step.push(line);
+    }
+    return nestedBlock(step, 'with', stepIndent + 2);
+  }
+
+  it('hard-codes ubuntu-latest on all four jobs and never interpolates MAINTAINER_RUNNER', () => {
+    expect([...jobs.keys()]).toEqual(expectedJobs);
+    for (const id of expectedJobs) {
+      const runsOn = nestedBlock(jobs.get(id)!, 'runs-on', 4);
+      expect(runsOn, `${id} runs-on`).toEqual(['ubuntu-latest']);
+    }
+    expect(text).not.toMatch(/MAINTAINER_RUNNER/);
+    expect(text).not.toMatch(/vars\./);
+  });
+
+  it('sets persist-credentials: false on the checkout that uses REPAIR_TOKEN', () => {
+    const publish = jobs.get('publish')!;
+    const withBlock = checkoutWith(publish, 'secrets.REPAIR_TOKEN');
+    expect(withBlock, 'publish checkout with REPAIR_TOKEN').not.toBeNull();
+    expect(withBlock).toEqual(expect.arrayContaining([
+      'token: ${{ secrets.REPAIR_TOKEN }}',
+      'persist-credentials: false',
+    ]));
+    expect(withBlock!.some((line) => line.includes('inputs.dry_run'))).toBe(false);
+  });
+});
+
 describe('least privilege for every workflow', () => {
   it('declares an explicit permissions block (top level or on every job)', () => {
     for (const file of workflowFiles) {
