@@ -293,7 +293,7 @@ describe('review-gate fails closed without the server-side base timestamp (Codex
   })
 })
 
-describe('review-gate: Codex reviews the PR once; every Codex thread must be resolved (maintainer policy)', () => {
+describe('review-gate: only a non-dismissed Codex review of the current head SHA passes (SO F2)', () => {
   const P1 = 'd'.repeat(40) // an earlier commit of the PR
   const REVIEW = (commit: string, at: string, state = 'COMMENTED') => ({
     user: { login: 'chatgpt-codex-connector[bot]', type: 'Bot' },
@@ -303,8 +303,22 @@ describe('review-gate: Codex reviews the PR once; every Codex thread must be res
   })
   const base = { tip: Y, tipAt: T(22), prBase: Y, labelId: '0', labeledAt: T(1), activity: ACTIVITY, priorRuns: [], waived: false }
 
-  it('a review of an earlier commit passes after later pushes — no re-review', async () => {
+  it('a review on an old commit fails', async () => {
     const w = world({ ...base, prCommits: [P1, H], reviews: [REVIEW(P1, T(23))] })
+    await run(w.github, PUSH, w.core)
+    expect(published(w.runs)!.conclusion).toBe('failure')
+    expect(published(w.runs)!.output.title).toBe('Waiting for Codex review')
+  })
+
+  it('a dismissed review on the head fails', async () => {
+    const w = world({ ...base, prCommits: [P1, H], reviews: [REVIEW(H, T(23), 'DISMISSED')] })
+    await run(w.github, PUSH, w.core)
+    expect(published(w.runs)!.conclusion).toBe('failure')
+    expect(published(w.runs)!.output.title).toBe('Waiting for Codex review')
+  })
+
+  it('a non-dismissed review on the head passes', async () => {
+    const w = world({ ...base, prCommits: [P1, H], reviews: [REVIEW(H, T(23))] })
     await run(w.github, PUSH, w.core)
     expect(published(w.runs)!.conclusion).toBe('success')
     expect(published(w.runs)!.output.title).toBe('Codex reviewed PR')
@@ -356,16 +370,20 @@ describe('review-gate: Codex reviews the PR once; every Codex thread must be res
     expect(published(dismissed.runs)!.output.title).toBe('Waiting for Codex review')
   })
 
-  it('a clean-pass summary counts only for a commit of this PR', async () => {
+  it('a clean-pass summary counts only for the current head SHA', async () => {
     const summary = (sha: string) => ({
       user: { login: 'chatgpt-codex-connector[bot]', type: 'Bot' },
       body: `<!-- codex-pull-request-review-summary -->\n| Review | Status | Commit | Trigger |\n| --- | --- | --- | --- |\n| Code Review | Completed | \`${sha}\` | Manual |`,
       created_at: T(23),
       updated_at: T(23),
     })
-    const ok = world({ ...base, prCommits: [P1, H], comments: [summary(P1)] })
-    await run(ok.github, PUSH, ok.core)
-    expect(published(ok.runs)!.output.title).toBe('Codex reviewed PR')
+    const onHead = world({ ...base, prCommits: [P1, H], comments: [summary(H)] })
+    await run(onHead.github, PUSH, onHead.core)
+    expect(published(onHead.runs)!.output.title).toBe('Codex reviewed PR')
+
+    const oldCommit = world({ ...base, prCommits: [P1, H], comments: [summary(P1)] })
+    await run(oldCommit.github, PUSH, oldCommit.core)
+    expect(published(oldCommit.runs)!.output.title).toBe('Waiting for Codex review')
 
     const foreign = world({ ...base, prCommits: [P1, H], comments: [summary('e'.repeat(40))] })
     await run(foreign.github, PUSH, foreign.core)

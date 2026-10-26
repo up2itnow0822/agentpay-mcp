@@ -263,6 +263,76 @@ describe('daily-repair privilege separation (Codex review of PR #90)', () => {
   });
 });
 
+describe('daily-repair runner and REPAIR_TOKEN checkout (SO F3)', () => {
+  const text = readWorkflow('daily-repair.yml');
+  const jobs = jobBlocks(text);
+  const expectedJobs = ['preflight', 'plan', 'publish', 'audit'];
+
+  function checkoutWith(lines: string[], needle: string): string[] | null {
+    const at = lines.findIndex((line) => line.includes(needle));
+    if (at < 0) return null;
+    let start = at;
+    while (start > 0 && !/^\s+-\s+name:/.test(lines[start])) start--;
+    const stepIndent = indentOf(lines[start]);
+    const step: string[] = [];
+    for (const line of lines.slice(start + 1)) {
+      if (line.trim() !== '' && indentOf(line) <= stepIndent && /^\s+-\s+/.test(line)) break;
+      step.push(line);
+    }
+    return nestedBlock(step, 'with', stepIndent + 2);
+  }
+
+  it('hard-codes ubuntu-latest on all four jobs and never interpolates MAINTAINER_RUNNER', () => {
+    expect([...jobs.keys()]).toEqual(expectedJobs);
+    for (const id of expectedJobs) {
+      const runsOn = nestedBlock(jobs.get(id)!, 'runs-on', 4);
+      expect(runsOn, `${id} runs-on`).toEqual(['ubuntu-latest']);
+    }
+    expect(text).not.toMatch(/MAINTAINER_RUNNER/);
+    expect(text).not.toMatch(/vars\./);
+  });
+
+  it('sets persist-credentials: false on the checkout that uses REPAIR_TOKEN', () => {
+    const publish = jobs.get('publish')!;
+    const withBlock = checkoutWith(publish, 'secrets.REPAIR_TOKEN');
+    expect(withBlock, 'publish checkout with REPAIR_TOKEN').not.toBeNull();
+    expect(withBlock).toEqual(expect.arrayContaining([
+      'token: ${{ secrets.REPAIR_TOKEN }}',
+      'persist-credentials: false',
+    ]));
+    expect(withBlock!.some((line) => line.includes('inputs.dry_run'))).toBe(false);
+  });
+
+  it('runs gh auth setup-git before the publisher git push and keeps persist-credentials: false', () => {
+    const publish = jobs.get('publish')!;
+    const withBlock = checkoutWith(publish, 'secrets.REPAIR_TOKEN');
+    expect(withBlock, 'publish checkout with REPAIR_TOKEN').not.toBeNull();
+    expect(withBlock).toEqual(expect.arrayContaining(['persist-credentials: false']));
+
+    const runBodies: string[] = [];
+    publish.forEach((line, i) => {
+      if (!/^\s*run:\s*\|\s*$/.test(line)) return;
+      const keyIndent = indentOf(line);
+      const body: string[] = [];
+      for (const next of publish.slice(i + 1)) {
+        if (next.trim() !== '' && indentOf(next) <= keyIndent) break;
+        body.push(next);
+      }
+      runBodies.push(body.join('\n'));
+    });
+    const publishStep = runBodies.find((body) => /git push|git\(\['push'/.test(body));
+    expect(publishStep, 'publish step that git-pushes repair branches').toBeDefined();
+    const commands = publishStep!
+      .split('\n')
+      .filter((line) => !/^\s*#/.test(line))
+      .join('\n');
+    const setupAt = commands.indexOf('gh auth setup-git');
+    const pushAt = commands.search(/git push|git\(\['push'/);
+    expect(setupAt, 'gh auth setup-git must run in the publish step').toBeGreaterThanOrEqual(0);
+    expect(pushAt).toBeGreaterThan(setupAt);
+  });
+});
+
 describe('least privilege for every workflow', () => {
   it('declares an explicit permissions block (top level or on every job)', () => {
     for (const file of workflowFiles) {
@@ -300,14 +370,14 @@ describe('review-gate binds ordinary Codex evidence to the current base SHA (F13
     }
   });
 
-  it('accepts Codex evidence for the PR (any commit, after the last retarget) only with every Codex thread resolved', () => {
-    // Maintainer policy: no second Codex pass after pushes or base advances.
+  it('accepts Codex evidence only for the current head SHA (after the last retarget) with every Codex thread resolved', () => {
     expect(gate).toBeDefined();
     const evaluate = gate!.slice(gate!.indexOf('async function evaluate(prNumber)'));
     expect(evaluate).toMatch(/const baseBinding = await currentBaseBinding\(prNumber, headSha, baseRef, baseSha, baseChangedMs\)/);
     expect(evaluate).toContain('postDatesRetarget(review.submitted_at)');
     expect(evaluate).toContain('postDatesRetarget(comment.updated_at || comment.created_at)');
-    expect(evaluate).toContain('prCommits.has(sha) && !dismissedShas.has(sha)');
+    expect(evaluate).toContain('review.commit_id.toLowerCase() === head');
+    expect(evaluate).toContain('sha === head && !dismissedShas.has(sha)');
     expect(evaluate).toContain('const unresolved = await unresolvedCodexThreads(prNumber);');
     expect(gate).toContain('reviewThreads(first: 100, after: $after)');
     // Waivers stay bound to the exact head and the live base tip.

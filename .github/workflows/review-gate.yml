@@ -7,16 +7,17 @@
 # exist yet. This check is published as github-actions (app id 15368) so a
 # PAT cannot fake it.
 #
-# Maintainer policy: Codex reviews a PR once. Every Codex comment must be
-# resolved (repaired or disposed of in writing), but a second Codex pass after
-# later pushes or base advances is NOT required.
+# Maintainer policy: Codex must review the PR's CURRENT head SHA. Every Codex
+# comment must be resolved (repaired or disposed of in writing). A review of
+# an older commit, or a dismissed review of this head, does not count.
 #
 # Pass conditions (any one):
-#   1. Codex has reviewed this PR: a non-dismissed, non-pending
+#   1. Codex has reviewed this head: a non-dismissed, non-pending
 #      chatgpt-codex-connector[bot] (user.type == Bot) review whose full
-#      commit SHA is one of the PR's commits, or — for a clean pass (Codex submits no review when it has no
-#      findings) — the Codex bot's own review-summary comment reporting
-#      `Code Review | Completed | <full 40-char SHA>` for a commit of this PR
+#      commit SHA equals the PR's current head, or — for a clean pass (Codex
+#      submits no review when it has no findings) — the Codex bot's own
+#      review-summary comment reporting
+#      `Code Review | Completed | <full 40-char SHA>` for this head
 #      that no dismissed Codex review covers; in both cases newer than the
 #      PR's most recent base_ref_changed event (a retarget needs a new
 #      review). Short SHAs are never accepted. AND zero review threads opened
@@ -762,21 +763,11 @@ jobs:
                 pull_number: prNumber,
                 per_page: 100,
               });
-              // Maintainer policy: Codex reviews the PR once; later pushes and
-              // base advances do NOT need a second Codex pass. Evidence is any
-              // non-dismissed Codex review of any commit of this PR (or the
-              // Codex clean-pass summary for one), newer than the last
-              // retarget. Every review thread Codex opened must be resolved.
-              // The PR's commits: a review or clean-pass summary counts only for
-              // code that is actually part of this PR (a force-push that drops
-              // the reviewed commits needs a new review).
-              const prCommits = new Set((await github.paginate(github.rest.pulls.listCommits, {
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                pull_number: prNumber,
-                per_page: 100,
-              })).map(c => String(c.sha || '').toLowerCase()));
-              prCommits.add(headSha.toLowerCase());
+              // Evidence is a non-dismissed Codex review of THIS head SHA
+              // (or the Codex clean-pass summary for this head), newer than
+              // the last retarget. Reviews of older PR commits do not count.
+              // Every review thread Codex opened must be resolved.
+              const head = headSha.toLowerCase();
               const postDatesRetarget = (timestamp) => {
                 const t = parseTimeMs(timestamp || '');
                 return Number.isFinite(t) && t > baseChangedMs;
@@ -784,7 +775,7 @@ jobs:
               const codexReviews = reviews.filter(review =>
                 isCodexUser(review.user) &&
                 isFullSha(review.commit_id || '') &&
-                prCommits.has(review.commit_id.toLowerCase()) &&
+                review.commit_id.toLowerCase() === head &&
                 review.state !== 'DISMISSED' &&
                 review.state !== 'PENDING' &&
                 postDatesRetarget(review.submitted_at)
@@ -805,8 +796,8 @@ jobs:
               });
 
               // Clean pass (Codex posts no review when it finds nothing): its
-              // summary must attest a full 40-char SHA that is a commit of this
-              // PR and was not the subject of a dismissed Codex review.
+              // summary must attest this head SHA and was not the subject of
+              // a dismissed Codex review.
               const cleanPass = comments.some(comment => {
                 const body = comment.body || '';
                 if (!isCodexUser(comment.user) || !body.includes(SUMMARY_MARKER)) return false;
@@ -815,7 +806,7 @@ jobs:
                 let match;
                 while ((match = row.exec(body)) !== null) {
                   const sha = match[1].toLowerCase();
-                  if (prCommits.has(sha) && !dismissedShas.has(sha)) return true;
+                  if (sha === head && !dismissedShas.has(sha)) return true;
                 }
                 return false;
               });
@@ -838,7 +829,7 @@ jobs:
                   summary: (codexReviews.length > 0
                     ? `chatgpt-codex-connector reviewed PR #${prNumber} (${codexReviews.length} review(s))`
                     : `chatgpt-codex-connector completed a clean review of PR #${prNumber} (no findings)`) +
-                    ' and every Codex review thread is resolved. A further Codex pass after pushes is not required.',
+                    ' and every Codex review thread is resolved. A further push needs a Codex review of the new head.',
                 };
               }
 
