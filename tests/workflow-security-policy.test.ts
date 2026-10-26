@@ -46,7 +46,7 @@ function nestedBlock(lines: string[], key: string, indent: number): string[] | n
   for (const line of lines.slice(at + 1)) {
     if (line.trim() === '' || line.trim().startsWith('#')) continue;
     if (indentOf(line) <= indent) break;
-    out.push(line.trim());
+    out.push(line.replace(/\s+#.*$/, '').trim());
   }
   return out;
 }
@@ -112,7 +112,11 @@ describe('daily-review privilege separation (F17)', () => {
     const publish = jobs.get('publish');
     expect(publish).toBeDefined();
     expect(publish!.join('\n')).toMatch(/needs:\s*analyze/);
-    expect(publish!.join('\n')).not.toMatch(/claude-code-action|claude_code_oauth_token|anthropic/i);
+    // No model step and no model credential in the issue-writing job (the
+    // secret is only compared to '' to produce a boolean).
+    expect(publish!.join('\n')).not.toMatch(/uses:\s*anthropics\//);
+    expect(publish!.join('\n')).not.toMatch(/claude_code_oauth_token:/);
+    expect(publish!.join('\n')).not.toMatch(/secrets\.CLAUDE_CODE_OAUTH_TOKEN\s*\}\}/);
     const publishPerms = nestedBlock(publish!, 'permissions', 4) ?? [];
     expect(publishPerms).toContain('issues: write');
     expect(publishPerms.join('\n')).not.toMatch(/contents:\s*write|pull-requests:\s*write|write-all/);
@@ -179,7 +183,23 @@ describe('daily-review privilege separation (F17)', () => {
     expect(publish).toContain("doc.date !== today");
     expect(publish).toContain('doc.repo !== env.EXPECTED_REPO');
     expect(publish).toMatch(/expected exactly one fenced json block/);
-    expect(publish).not.toMatch(/\$\{\{\s*(steps|needs)\.[^}]*(report|body|output)/i);
+    // Every shell `run:` block in publish must be free of workflow
+    // expressions: values (including the analyze job's outputs) arrive via
+    // env and files only.
+    const lines = jobs.get('publish')!;
+    const runBodies: string[] = [];
+    lines.forEach((line, i) => {
+      if (!/^\s*run:\s*\|\s*$/.test(line)) return;
+      const keyIndent = indentOf(line);
+      const body: string[] = [];
+      for (const next of lines.slice(i + 1)) {
+        if (next.trim() !== '' && indentOf(next) <= keyIndent) break;
+        body.push(next);
+      }
+      runBodies.push(body.join('\n'));
+    });
+    expect(runBodies.length).toBeGreaterThan(0);
+    for (const body of runBodies) expect(body).not.toContain('${{');
   });
 });
 
