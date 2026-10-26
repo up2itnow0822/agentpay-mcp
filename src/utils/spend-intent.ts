@@ -1,6 +1,16 @@
 import { AsyncLocalStorage } from 'node:async_hooks'
 import { createHash } from 'node:crypto'
-import { appendFileSync, fsyncSync, mkdirSync, openSync, closeSync, readFileSync, existsSync } from 'node:fs'
+import {
+  appendFileSync,
+  closeSync,
+  existsSync,
+  fstatSync,
+  fsyncSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  readSync,
+} from 'node:fs'
 import { join } from 'node:path'
 import { classifySpendError, isEvmTxHash } from 'agentwallet-sdk'
 import { z } from 'zod'
@@ -568,26 +578,50 @@ export function x402PayIntentIdentity(input: {
 }
 
 /**
- * x402_session_start identity: the endpoint (fragment removed) and scope.
- * Deliberately excludes method/body/headers and any caller key, so a
- * reworded request cannot step around a post-settlement lock on the same
- * paid resource (F1).
+ * x402_session_start identity: the endpoint's ORIGIN. Path, query, scope,
+ * method, body and headers are all excluded, so neither a reworded request
+ * nor a sibling path can step around an in-flight purchase or a
+ * post-settlement lock on the same paid service (F1). The origin is also the
+ * serialisation unit used by withKeyedLock.
  */
-export function sessionStartIntentIdentity(input: {
-  endpoint: string
-  scope: string
-}): SpendIntentIdentity {
-  let endpoint = input.endpoint
-  try {
-    const parsed = new URL(input.endpoint)
-    parsed.hash = ''
-    endpoint = parsed.href
-  } catch {
-    // validated upstream; fall back to the raw string
-  }
-  const encoded = JSON.stringify(['x402_session_start', endpoint, input.scope])
-  const fingerprint = `x402_session_start:${createHash('sha256').update(encoded).digest('hex')}`
+export function sessionStartIntentIdentity(input: { endpoint: string }): SpendIntentIdentity {
+  const origin = new URL(input.endpoint).origin
+  const fingerprint = `x402_session_start:${origin}`
   return { key: fingerprint, fingerprint }
+}
+
+// ─── Origin-wide payment locks ─────────────────────────────────────────────
+
+/** Unresolved-lock key that blocks every new x402 payment to an origin. */
+export function paymentOriginLockKey(origin: string): string {
+  return `x402-origin#${origin}`
+}
+
+/**
+ * A payment to `origin` settled but the paid response could not be
+ * delivered. That endpoint has demonstrated it can take money without
+ * delivering, so EVERY new x402 payment (x402_pay or x402_session_start,
+ * any path, any request shape) to the origin is refused until an operator
+ * reconciles the lock. Never evicted; journaled like any other lock.
+ */
+export function lockPaymentOrigin(origin: string): void {
+  ensureJournalLoaded()
+  const key = paymentOriginLockKey(origin)
+  if (!unresolved.has(key)) {
+    unresolved.set(key, { settledAt: Date.now(), fingerprint: key })
+    journal({ op: 'lock', key, fp: key })
+  }
+}
+
+export function assertPaymentOriginUnlocked(origin: string): void {
+  ensureJournalLoaded()
+  if (unresolved.has(paymentOriginLockKey(origin))) {
+    throw new UnresolvedSpendIntentError(
+      `New payments to ${origin} are locked: an earlier payment to this origin settled but its ` +
+        'response was never delivered. Reconcile it (agentpay-mcp spend-intents list / resolve) ' +
+        'before paying this origin again.'
+    )
+  }
 }
 
 export function x402PayIntentKey(input: {
@@ -747,16 +781,47 @@ function journal(record: JournalRecord): void {
   if (!path) {
     return
   }
-  const line = JSON.stringify({ v: 1, at: Date.now(), ...record }) + '\n'
+  const dir = join(path, '..')
+  const created = !existsSync(path)
   // Synchronous + fsync: a begin record must be on disk before any wallet
   // write it guards, or a crash could lose the evidence that one happened.
-  mkdirSync(join(path, '..'), { recursive: true, mode: 0o700 })
+  mkdirSync(dir, { recursive: true, mode: 0o700 })
+  // A crash can leave a torn final line with no newline. Appending straight
+  // onto it would weld this record into the unparseable fragment and replay
+  // would silently drop it — losing a lock. Start a fresh line first.
+  const prefix = !created && !endsWithNewline(path) ? '\n' : ''
+  const line = prefix + JSON.stringify({ v: 1, at: Date.now(), ...record }) + '\n'
   appendFileSync(path, line, { mode: 0o600 })
+  fsyncPath(path)
+  if (created) {
+    // Make the new directory entry itself durable.
+    fsyncPath(dir)
+  }
+}
+
+function endsWithNewline(path: string): boolean {
   const fd = openSync(path, 'r')
   try {
-    fsyncSync(fd)
+    const { size } = fstatSync(fd)
+    if (size === 0) return true
+    const last = Buffer.alloc(1)
+    readSync(fd, last, 0, 1, size - 1)
+    return last[0] === 0x0a
   } finally {
     closeSync(fd)
+  }
+}
+
+function fsyncPath(path: string): void {
+  let fd: number | undefined
+  try {
+    fd = openSync(path, 'r')
+    fsyncSync(fd)
+  } catch {
+    // Directory fsync is unsupported on some platforms; the file fsync above
+    // is the guarantee that matters for record content.
+  } finally {
+    if (fd !== undefined) closeSync(fd)
   }
 }
 

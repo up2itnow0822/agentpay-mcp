@@ -12,6 +12,7 @@
  */
 import { beforeEach } from 'vitest'
 import { _setSafeTransportTestOverrides } from '../../src/utils/safe-fetch.js'
+import { _setDecimalsVerifierOverride } from '../../src/utils/test-seams.js'
 
 /** A public (non-reserved) address so DNS validation passes in unit tests. */
 export const TEST_PUBLIC_ADDRESS = '93.184.215.14'
@@ -23,10 +24,21 @@ export function installDefaultTransportOverrides(): void {
   })
 }
 
+/**
+ * Registry suites exercise naming/overwrite/quota rules, not the chain;
+ * they get an accept-all decimals verifier. The real on-chain check is
+ * covered in tests/custom-token-decimals.test.ts.
+ */
+function installAcceptAllDecimals(): void {
+  _setDecimalsVerifierOverride(async () => undefined)
+}
+
 process.env.AGENTPAY_ALLOW_UNPOLICED_SPEND = '1'
 installDefaultTransportOverrides()
+installAcceptAllDecimals()
 
 beforeEach(() => {
   process.env.AGENTPAY_ALLOW_UNPOLICED_SPEND = '1'
   installDefaultTransportOverrides()
+  installAcceptAllDecimals()
 })

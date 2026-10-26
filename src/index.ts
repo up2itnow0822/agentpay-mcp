@@ -152,6 +152,7 @@ import {
   checkBudgetTool,
   handleCheckBudget,
   CheckBudgetSchema,
+  operatorPolicyError,
 } from './tools/budget.js';
 
 import {
@@ -467,6 +468,15 @@ async function main(): Promise<void> {
   });
 
   await server.connect(transport);
+
+  // Surface spend-policy configuration problems at startup, loudly.
+  const policyError = operatorPolicyError();
+  if (policyError) {
+    process.stderr.write(
+      `AgentPay MCP: operator spend policy is INVALID (${policyError}). ` +
+        'All value-moving tools will refuse until AGENTPAY_POLICY_* is fixed.\n'
+    );
+  }
 
   // Log to stderr (not stdout — stdout is reserved for MCP protocol)
   process.stderr.write(

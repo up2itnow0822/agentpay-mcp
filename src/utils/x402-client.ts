@@ -23,6 +23,7 @@ import {
   assertX402TermsApproved,
   effectiveCapBaseUnits,
   resolveX402AssetDecimals,
+  x402Debit,
   type ApprovedX402Terms,
 } from './payment-cap.js'
 import type { OutboundFetch } from './safe-fetch.js'
@@ -74,13 +75,13 @@ function capExceededMessage(
 ): string {
   if (kind === 'session') {
     return (
-      `Session payment (${amount} base units) exceeds max_payment_eth cap ` +
+      `Session payment (${amount} base units incl. protocol fee) exceeds max_payment_eth cap ` +
       `(${maxRaw} base units for asset ${asset} = ${cap}). ` +
       `Set a higher max_payment_eth to proceed.`
     )
   }
   return (
-    `Payment required (${amount} base units) exceeds max_payment_eth cap ` +
+    `Payment required (${amount} base units incl. protocol fee) exceeds max_payment_eth cap ` +
     `(${maxRaw} base units for asset ${asset} = ${cap}). ` +
     `Increase max_payment_eth or the payment will not proceed.`
   )
@@ -122,7 +123,7 @@ export function createAgentPayX402Client(
         // messages (SDK allowlist rejection, viem InvalidAddressError).
         // Reject non-addresses before signing or interpolating.
         const merchant = assertPayableX402Recipient(req.payTo)
-        assertX402TermsApproved(req, { ...options.approved, payTo: approvedPayTo })
+        assertX402TermsApproved(req, { ...options.approved, payTo: approvedPayTo }, options.chainId)
         // req.amount is remote-controlled; a raw BigInt() here would put the
         // whole value verbatim into V8's "Cannot convert <amount> to a
         // BigInt" message.
@@ -130,11 +131,13 @@ export function createAgentPayX402Client(
         if (amount === 0n) {
           throw new DefiniteSpendFailure('x402 payment amount is zero; refusing to sign.')
         }
-        // The cap is mandatory: there is no code path that signs without it.
+        // The cap is mandatory and bounds the full wallet debit — principal
+        // plus the 0.77% protocol fee — not just the payee leg.
         const maxRaw = effectiveCapBaseUnits(cap, req.asset, options.chainId)
-        if (amount > maxRaw) {
+        const debit = x402Debit(amount)
+        if (debit > maxRaw) {
           throw new DefiniteSpendFailure(
-            capExceededMessage(kind, amount, maxRaw, req.asset, cap)
+            capExceededMessage(kind, debit, maxRaw, req.asset, cap)
           )
         }
 
@@ -143,7 +146,7 @@ export function createAgentPayX402Client(
         // reject (fail closed) inside reserveSpendPolicy.
         const { decision, reservation: reserved } = await reserveSpendPolicy({
           merchant,
-          amount,
+          amount: debit,
           decimals: () =>
             resolveX402AssetDecimals(
               req.asset ?? '0x0000000000000000000000000000000000000000',

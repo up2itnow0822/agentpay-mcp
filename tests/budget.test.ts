@@ -1,7 +1,7 @@
 /**
  * Tests for set_spend_policy and check_budget tools.
  */
-import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 
 // ─── Mock agentwallet-sdk ──────────────────────────────────────────────────
 
@@ -38,6 +38,7 @@ import {
   MAX_POLICY_LAYERS_PER_SCOPE,
   MAX_POLICY_SCOPES,
   OPERATOR_POLICY_ENV,
+  operatorPolicyError,
 } from '../src/tools/budget.js'
 import { SpendingPolicy, checkBudget } from 'agentwallet-sdk'
 import { policyEngine, reservedResult } from './helpers/policy-engine.js'
@@ -632,5 +633,34 @@ describe('spend policy administration (F11)', () => {
   it('rejects malformed allowlist addresses', async () => {
     const result = await handleSetSpendPolicy({ allowedRecipients: ['0xnot-an-address'] })
     expect(result.isError).toBe(true)
+  })
+})
+
+describe('malformed operator policy fails closed (F11 review follow-up)', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    _resetPolicyStore()
+    MockSpendingPolicy.mockImplementation(function () {
+      return policyEngine(vi.fn().mockResolvedValue(reservedResult()))
+    } as any)
+  })
+  afterEach(() => {
+    delete process.env[OPERATOR_POLICY_ENV.perTxCapEth]
+  })
+
+  it('denies every spend, even with ALLOW_UNPOLICED_SPEND, and never becomes "no policy"', async () => {
+    process.env[OPERATOR_POLICY_ENV.perTxCapEth] = '0.5 ETH'
+    process.env[ALLOW_UNPOLICED_SPEND_ENV] = '1'
+    _resetPolicyStore()
+    for (let i = 0; i < 3; i++) {
+      const decision = await enforceSpendPolicy({
+        merchant: '0x0000000000000000000000000000000000000001',
+        amount: 1n,
+        decimals: 18,
+      })
+      expect(decision.status).toBe('rejected')
+      expect((decision as { reason?: string }).reason).toContain('operator spend policy in the environment is invalid')
+    }
+    expect(operatorPolicyError()).toContain('Invalid ETH amount')
   })
 })

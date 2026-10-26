@@ -47,7 +47,7 @@ cannot be changed through MCP:
 | `AGENTPAY_POLICY_PER_TX_CAP_ETH` | unset | Operator per-transaction cap (ETH-equivalent) |
 | `AGENTPAY_POLICY_ALLOWED_RECIPIENTS` | unset | Comma-separated operator recipient allowlist |
 | `AGENTPAY_ALLOW_UNPOLICED_SPEND` | off | `1` permits value movement with no operator policy, relying only on on-chain limits |
-| `AGENTPAY_X402_MAX_PAYMENT` | unset | Ceiling applied on top of every per-call x402 cap |
+| `AGENTPAY_X402_MAX_PAYMENT` | unset | USDC ceiling applied on top of every per-call x402 cap; non-USDC x402 payments are refused while set |
 | `AGENTPAY_STATE_DIR` | unset | Directory for the fsync'd spend-intent journal; locks and keyed settlements survive restarts |
 | `AGENTPAY_ALLOWED_PRIVATE_HOSTS` | unset | Comma-separated hosts whose private address may be reached by outbound requests |
 | `AGENTPAY_ALLOW_PRIVATE_NETWORK` | off | Development only: permit private destinations and plain `http` |
@@ -111,19 +111,23 @@ These boundaries matter more than the feature list:
   refused, and earlier layers keep their rolling-window accounting. Loosening
   requires an operator restart. All policy state is still in-process and is
   reset by a restart.
-- `x402_pay` and `x402_session_start` require `max_payment_eth` and `pay_to`;
-  optional `asset` and `network` bind those too. A 402 that names another
-  payee, asset, or network, the zero address, or an amount above the cap (or
-  `AGENTPAY_X402_MAX_PAYMENT`) is refused before any wallet write. Use
-  `x402_quote` to read the offered terms without paying.
+- `x402_pay` and `x402_session_start` require `max_payment_eth` and `pay_to`.
+  The asset is always bound: it defaults to the chain's USDC unless `asset`
+  names another; `network` can be bound too. A 402 that names another payee,
+  asset, or network, the zero address, or a debit (principal plus the 0.77%
+  protocol fee) above the cap is refused before any wallet write.
+  `AGENTPAY_X402_MAX_PAYMENT` is a USDC ceiling; with it set, non-USDC
+  payments are refused. Use `x402_quote` to read the offered terms first.
+- If a payment settles but its response is not delivered, every new x402
+  payment to that origin is locked until an operator reconciles it.
 - Caller-selected outbound requests (x402, quote, sessions, OTel kill
   callback) use a safe transport: `https` only (the kill callback may also use
   `http`), private, loopback, link-local and metadata destinations refused,
   DNS resolved once with the
   socket pinned to the validated address, no automatic redirects, and
   response bodies capped at 2 MiB (1 MiB rendered).
-- `send_payment`, `send_token`, `swap_tokens`, `bridge_usdc`, `x402_pay`, and
-  `x402_session_start` run inside a spend intent. Identical retries replay;
+- `send_payment`, `send_token`, `swap_tokens`, `bridge_usdc`, `create_escrow`,
+  `x402_pay`, and `x402_session_start` run inside a spend intent. Identical retries replay;
   `idempotencyKey` distinguishes equal payments; an unclear post-broadcast
   outcome locks the intent with no timer. Locks are process-local unless
   `AGENTPAY_STATE_DIR` journals them. Reconcile with

@@ -184,6 +184,8 @@ export function isPrivateIpv6(host: string): boolean {
   if ((h[0] & 0xff00) === 0xff00) return true
   // IPv4-mapped ::ffff:a.b.c.d and IPv4-compatible ::a.b.c.d.
   if (zeroPrefix(5) && h[5] === 0xffff) return embeddedIpv4IsPrivate(h[6], h[7])
+  // IPv4-translated ::ffff:0:a.b.c.d (RFC 2765 / SIIT) carries IPv4 too.
+  if (zeroPrefix(4) && h[4] === 0xffff && h[5] === 0) return embeddedIpv4IsPrivate(h[6], h[7])
   if (zeroPrefix(6)) return embeddedIpv4IsPrivate(h[6], h[7])
   // NAT64 well-known prefix 64:ff9b::/96 and local-use 64:ff9b:1::/48.
   if (h[0] === 0x0064 && h[1] === 0xff9b) {

@@ -473,6 +473,7 @@ describe('x402_session_start tool', () => {
     const result = await handleX402SessionStart({
       endpoint: TEST_ENDPOINT,
       max_payment_eth: '0.0000000000000000001', // 1e-19 ETH → 0n wei
+      asset: '0x0000000000000000000000000000000000000000', // approve the ETH offer explicitly
     });
 
     expect(result.isError).toBe(true);

@@ -27,6 +27,8 @@ import {
   noControlChars,
   sanitizeUntrustedInline,
 } from '../utils/format.js'
+import { getConfig, getWallet } from '../utils/client.js'
+import { decimalsVerifierOverride_ } from '../utils/test-seams.js'
 
 type ToolResult = { content: Array<{ type: 'text'; text: string }>; isError?: boolean }
 
@@ -376,6 +378,67 @@ function assertQuotaAvailable(chainId: number): void {
   }
 }
 
+// ─── On-chain decimals verification (F2) ──────────────────────────────────
+
+/**
+ * Registry decimals are authoritative for every amount the server signs
+ * (send_payment, send_token, x402 caps). A caller-registered token must
+ * therefore never be able to claim decimals the contract does not report:
+ * registering a 6-decimal token as 18 would scale a "1" transfer by 10^12
+ * while the spend policy saw 1.
+ */
+export type DecimalsVerifier = (
+  _chainId: number,
+  _address: `0x${string}`,
+  _claimed: number
+) => Promise<void>
+
+const ERC20_DECIMALS_ABI = [
+  {
+    type: 'function',
+    name: 'decimals',
+    stateMutability: 'view',
+    inputs: [],
+    outputs: [{ name: '', type: 'uint8' }],
+  },
+] as const
+
+export const verifyDecimalsOnChain: DecimalsVerifier = async (chainId, address, claimed) => {
+  const config = getConfig()
+  if (config.chainId !== chainId) {
+    throw new Error(
+      `Custom tokens can only be registered on the configured chain ${config.chainId}, ` +
+        'where their decimals() can be verified on-chain.'
+    )
+  }
+  const publicClient = (getWallet() as unknown as {
+    publicClient?: { readContract?: (_args: unknown) => Promise<unknown> }
+  }).publicClient
+  let reported: unknown
+  try {
+    if (typeof publicClient?.readContract !== 'function') throw new Error('no public client')
+    reported = await publicClient.readContract({
+      address,
+      abi: ERC20_DECIMALS_ABI,
+      functionName: 'decimals',
+    })
+  } catch {
+    throw new Error(
+      `Could not read decimals() from ${address}; refusing to register an unverifiable token.`
+    )
+  }
+  if (Number(reported) !== claimed) {
+    throw new Error(
+      `decimals ${claimed} does not match the ${String(reported)} decimals reported by ` +
+        `${address} on-chain. Refusing to register.`
+    )
+  }
+}
+
+function decimalsVerifier(): DecimalsVerifier {
+  return decimalsVerifierOverride_() ?? verifyDecimalsOnChain
+}
+
 export async function handleAddCustomToken(input: AddCustomTokenInput): Promise<ToolResult> {
   try {
     // Re-assert the schema invariants: handlers can be called directly
@@ -406,6 +469,11 @@ export async function handleAddCustomToken(input: AddCustomTokenInput): Promise<
 
     if (decision === 'register') {
       assertQuotaAvailable(checked.chainId)
+      await decimalsVerifier()(
+        checked.chainId,
+        checked.address as `0x${string}`,
+        checked.decimals
+      )
       registry.addToken({
         symbol,
         address: checked.address as `0x${string}`,

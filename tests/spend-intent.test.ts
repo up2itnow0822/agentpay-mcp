@@ -822,6 +822,22 @@ describe('spend-intent journal (opt-in durability)', () => {
     expect(retry).not.toHaveBeenCalled()
   })
 
+  it('a record written after a torn tail is not welded into it (review follow-up)', async () => {
+    const { appendFileSync, readFileSync } = await import('node:fs')
+    const { join } = await import('node:path')
+    const file = join(dir, 'spend-intents.jsonl')
+    appendFileSync(file, '{"v":1,"op":"settle","key":"old","fp":"x","dur') // crash mid-write
+    await expect(
+      withSpendIntent('after#torn', async () => {
+        throw new Error('rpc timeout')
+      })
+    ).rejects.toThrow()
+    expect(readFileSync(file, 'utf8')).toMatch(/"dur\n\{"v":1/)
+    _resetSpendIntentStore()
+    ensureJournalLoaded()
+    expect(listUnresolvedSpendIntents().map((e) => e.key)).toContain('after#torn')
+  })
+
   it('keyed settlements survive a restart as tombstones; definite failures do not lock', async () => {
     await withSpendIntent('send_token#key-1', async () => '0xsettled', {
       durable: true,

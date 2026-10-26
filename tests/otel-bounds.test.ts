@@ -103,6 +103,21 @@ describe('bounded OTel state (F10)', () => {
     expect(_otelStateSizes().records).toBe(1)
   })
 
+  it('a replay with a larger cost counts the increase; IDs are scoped per agent (review follow-up)', () => {
+    registerPolicy({ agentId: 'A', maxSpendUsd: 100, windowMs: 0, breachAction: 'block' })
+    registerPolicy({ agentId: 'B', maxSpendUsd: 10, windowMs: 0, breachAction: 'block' })
+    evaluateSpan({ 'agentcore.agent.id': 'A', 'agentcore.cost.usd': 0.01, traceId: 't', spanId: 's' })
+    const inflated = evaluateSpan({ 'agentcore.agent.id': 'A', 'agentcore.cost.usd': 1_000_000, traceId: 't', spanId: 's' })
+    expect(inflated!.accumulatedSpendUsd).toBe(1_000_000)
+    expect(inflated!.action).toBe('block')
+    const lowered = evaluateSpan({ 'agentcore.agent.id': 'A', 'agentcore.cost.usd': 1, traceId: 't', spanId: 's' })
+    expect(lowered!.accumulatedSpendUsd).toBe(1_000_000)
+    // Same trace/span IDs on a different agent are a different span.
+    const b = evaluateSpan({ 'agentcore.agent.id': 'B', 'agentcore.cost.usd': 50, traceId: 't', spanId: 's' })
+    expect(b!.accumulatedSpendUsd).toBe(50)
+    expect(b!.action).toBe('block')
+  })
+
   it('compacts per-task history without under-counting windowed spend', () => {
     registerPolicy({ agentId: 'busy', maxSpendUsd: 1e9, windowMs: 60_000, breachAction: 'block' })
     const n = OTEL_LIMITS.maxRecordsPerTask * 3

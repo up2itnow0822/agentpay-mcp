@@ -112,6 +112,8 @@ describe('destination validation', () => {
     'fe80::1',
     'fd00::1',
     '::ffff:169.254.169.254',
+    '::ffff:0:a9fe:a9fe',
+    '::ffff:0:127.0.0.1',
     '64:ff9b::a9fe:a9fe',
     '2002:a9fe:a9fe::1',
   ])('classifies %s as private', (address) => {

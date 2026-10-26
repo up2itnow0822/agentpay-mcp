@@ -37,6 +37,7 @@ vi.mock('../src/utils/client.js', () => ({
 
 import { handleCreateEscrow } from '../src/tools/escrow.js'
 import { handleSetSpendPolicy, _resetPolicyStore } from '../src/tools/budget.js'
+import { _resetSpendIntentStore } from '../src/utils/spend-intent.js'
 import { MutualStakeEscrow, SpendingPolicy } from 'agentwallet-sdk'
 import { policyEngine, reservedResult } from './helpers/policy-engine.js'
 
@@ -47,12 +48,13 @@ describe('create_escrow', () => {
   beforeEach(() => {
     vi.clearAllMocks()
     _resetPolicyStore()
+    _resetSpendIntentStore()
   })
 
   it('creates an escrow successfully with factory from config', async () => {
     const mockCreate = vi.fn().mockResolvedValue({
       address: '0xvault000000000000000000000000000000000001',
-      txHash: '0xescrowtx123',
+      txHash: '0x1111111111111111111111111111111111111111111111111111111111111111',
     })
     MockMutualStakeEscrow.mockImplementation(function() { return { create: mockCreate } } as any)
 
@@ -66,7 +68,7 @@ describe('create_escrow', () => {
     const data = JSON.parse(result.content[0].text)
     expect(data.success).toBe(true)
     expect(data.vaultAddress).toBe('0xvault000000000000000000000000000000000001')
-    expect(data.txHash).toBe('0xescrowtx123')
+    expect(data.txHash).toBe('0x1111111111111111111111111111111111111111111111111111111111111111')
     expect(data.seller).toBe('0xseller00000000000000000000000000000000001')
     expect(data.paymentAmount).toBe('100')
     expect(data.terms).toBe('Build a website for 100 USDC')
@@ -91,7 +93,7 @@ describe('create_escrow', () => {
   it('uses factoryAddress param over config', async () => {
     const mockCreate = vi.fn().mockResolvedValue({
       address: '0xvault000000000000000000000000000000000002',
-      txHash: '0xescrowtx456',
+      txHash: '0x2222222222222222222222222222222222222222222222222222222222222222',
     })
     MockMutualStakeEscrow.mockImplementation(function() { return { create: mockCreate } } as any)
 
@@ -172,7 +174,7 @@ describe('create_escrow', () => {
   it('converts the minimum USDC unit exactly (0.000001 → 1 base unit)', async () => {
     const mockCreate = vi.fn().mockResolvedValue({
       address: '0xvault000000000000000000000000000000000003',
-      txHash: '0xescrowtx789',
+      txHash: '0x3333333333333333333333333333333333333333333333333333333333333333',
     })
     MockMutualStakeEscrow.mockImplementation(function() { return { create: mockCreate } } as any)
 
@@ -195,7 +197,7 @@ describe('create_escrow', () => {
   it('accepts whitespace-padded stakeAmount (" 5 " → 5 USDC)', async () => {
     const mockCreate = vi.fn().mockResolvedValue({
       address: '0xvault000000000000000000000000000000000004',
-      txHash: '0xescrowtxabc',
+      txHash: '0x4444444444444444444444444444444444444444444444444444444444444444',
     })
     MockMutualStakeEscrow.mockImplementation(function() { return { create: mockCreate } } as any)
 
@@ -289,7 +291,7 @@ describe('create_escrow', () => {
 
     const mockCreate = vi.fn().mockResolvedValue({
       address: '0xvault000000000000000000000000000000000003',
-      txHash: '0xescrowtx789',
+      txHash: '0x3333333333333333333333333333333333333333333333333333333333333333',
     })
     MockMutualStakeEscrow.mockImplementation(function() { return { create: mockCreate } } as any)
 
@@ -306,3 +308,39 @@ describe('create_escrow', () => {
     expect(mockCreate).toHaveBeenCalledOnce()
   })
 })
+
+describe('create_escrow spend-intent contract', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    _resetPolicyStore()
+    _resetSpendIntentStore()
+  })
+
+  const input = {
+    counterpartyAddress: '0x00000000000000000000000000000000000000c0',
+    stakeAmount: '5',
+    terms: 'deliver report',
+    deadlineDays: 7,
+    challengeWindowHours: 24,
+  }
+
+  it('replays a duplicate delivery instead of creating a second vault', async () => {
+    const create = vi.fn().mockResolvedValue({ address: '0xvault', txHash: '0x' + '55'.repeat(32) })
+    MockMutualStakeEscrow.mockImplementation(function () { return { create } } as any)
+    const a = await handleCreateEscrow({ ...input, idempotencyKey: 'deal-1' })
+    const b = await handleCreateEscrow({ ...input, idempotencyKey: 'deal-1' })
+    expect(a.isError).toBeUndefined()
+    expect(JSON.parse(b.content[0].text).idempotentRetry).toBe(true)
+    expect(create).toHaveBeenCalledTimes(1)
+  })
+
+  it('locks after a hashless result rather than creating again', async () => {
+    const create = vi.fn().mockResolvedValue({ address: '0xvault', txHash: 'pending' })
+    MockMutualStakeEscrow.mockImplementation(function () { return { create } } as any)
+    expect((await handleCreateEscrow(input)).isError).toBe(true)
+    const retry = await handleCreateEscrow(input)
+    expect(retry.content[0].text).toContain('did not return a transaction hash')
+    expect(create).toHaveBeenCalledTimes(1)
+  })
+})
+

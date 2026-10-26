@@ -334,6 +334,7 @@ const _policies: Map<string, AgentBudgetPolicy> = new Map()
 const _ledgers: Map<string, AgentLedger> = new Map()
 let _totalRecords = 0
 const _decisions: BudgetDecision[] = []
+/** Span identity → largest cost already counted for it. */
 const _seenSpans: Map<string, number> = new Map()
 
 /** Build a policy key from agentId + optional taskId */
@@ -437,12 +438,28 @@ function recordSpend(agentId: string, taskId: string | undefined, amountUsd: num
   return true
 }
 
-/** True the first time a (trace, span) pair is seen; replays are not counted. */
-function firstSighting(traceId: string | undefined, spanId: string | undefined): boolean {
-  if (!traceId || !spanId) return true
-  const key = `${traceId}\u0000${spanId}`
-  if (_seenSpans.has(key)) return false
-  _seenSpans.set(key, Date.now())
+/**
+ * Amount of this span's cost not yet counted.
+ *
+ * Spans are identified by (agent, task, trace, span) — never by trace/span
+ * alone, so one agent's IDs cannot suppress another agent's spend. A replay
+ * of a known span counts only the increase over the cost already recorded
+ * for it (a replay can never LOWER accumulated spend or hide a larger cost).
+ * Spans without both IDs are always counted in full.
+ */
+function uncountedCost(
+  agentId: string,
+  taskId: string | undefined,
+  traceId: string | undefined,
+  spanId: string | undefined,
+  costUsd: number
+): number {
+  if (!traceId || !spanId) return costUsd
+  const key = `${agentId}\u0000${taskId ?? ''}\u0000${traceId}\u0000${spanId}`
+  const seen = _seenSpans.get(key)
+  if (seen !== undefined && costUsd <= seen) return 0
+  _seenSpans.delete(key)
+  _seenSpans.set(key, Math.max(costUsd, seen ?? 0))
   while (_seenSpans.size > OTEL_LIMITS.maxSeenSpans) {
     const oldest = _seenSpans.keys().next()
     if (oldest.done) break
@@ -450,7 +467,7 @@ function firstSighting(traceId: string | undefined, spanId: string | undefined):
     // over-reporting spend, which is the fail-safe direction for a budget.
     _seenSpans.delete(oldest.value)
   }
-  return true
+  return seen === undefined ? costUsd : costUsd - seen
 }
 
 function pushDecision(decision: BudgetDecision): void {
@@ -574,9 +591,10 @@ export function evaluateSpan(attrs: OTelSpanCostAttributes): BudgetDecision | nu
   assertIdentifier(agentId, 'agentId')
   if (taskId !== undefined) assertIdentifier(taskId, 'taskId')
 
-  // A replayed (trace, span) is evaluated but not counted again.
-  if (firstSighting(attrs.traceId, attrs.spanId)) {
-    if (!recordSpend(agentId, taskId, costUsd, Date.now())) {
+  // A replayed span is evaluated but only its uncounted increase is recorded.
+  const toRecord = uncountedCost(agentId, taskId, attrs.traceId, attrs.spanId, costUsd)
+  if (toRecord > 0) {
+    if (!recordSpend(agentId, taskId, toRecord, Date.now())) {
       const refused: BudgetDecision = {
         agentId,
         taskId,

@@ -67,10 +67,13 @@ export const ALLOW_UNPOLICED_SPEND_ENV = 'AGENTPAY_ALLOW_UNPOLICED_SPEND'
 export const POLICY_SCALE_DECIMALS = 9
 const _layersByScope = new Map<string, PolicyLayer[]>()
 let _operatorLoaded = false
+/** Set when the operator policy env is present but malformed: deny everything. */
+let _operatorPolicyError: string | null = null
 
 export function _resetPolicyStore(): void {
   _layersByScope.clear()
   _operatorLoaded = false
+  _operatorPolicyError = null
 }
 
 function envFlag(name: string): boolean {
@@ -134,10 +137,22 @@ function ensureOperatorPolicy(): void {
     ? recipientsRaw.split(',').map((entry) => entry.trim()).filter(Boolean)
     : undefined
   if (!dailyLimitEth && !perTxCapEth && !allowedRecipients) return
-  // A malformed operator value must not silently mean "no policy".
-  _layersByScope.set(OPERATOR_POLICY_SCOPE, [
-    buildLayer({ dailyLimitEth, perTxCapEth, allowedRecipients }),
-  ])
+  // A malformed operator value must never mean "no policy": latch the error
+  // so every spend is refused (regardless of ALLOW_UNPOLICED_SPEND) until the
+  // environment is fixed and the server restarted.
+  try {
+    _layersByScope.set(OPERATOR_POLICY_SCOPE, [
+      buildLayer({ dailyLimitEth, perTxCapEth, allowedRecipients }),
+    ])
+  } catch (error: unknown) {
+    _operatorPolicyError = error instanceof Error ? error.message : String(error)
+  }
+}
+
+/** Startup validation: the reason the operator policy is unusable, if any. */
+export function operatorPolicyError(): string | null {
+  ensureOperatorPolicy()
+  return _operatorPolicyError
 }
 
 /** Every SpendingPolicy layer currently in force, across all scopes. */
@@ -372,7 +387,29 @@ export async function reserveSpendPolicy(input: {
   /** Decimals of the asset `amount` is denominated in (0–18), or a thunk. */
   decimals: number | (() => number)
 }): Promise<{ decision: SpendPolicyDecision; reservation: SpendReservation | null }> {
-  const policies = allLayers()
+  let policies: Array<[string, PolicyLayer]>
+  try {
+    policies = allLayers()
+  } catch (error: unknown) {
+    return {
+      decision: {
+        status: 'rejected',
+        reason: `Spend policy check failed (fail-closed): ${error instanceof Error ? error.message : String(error)}`,
+      },
+      reservation: null,
+    }
+  }
+  if (_operatorPolicyError !== null) {
+    return {
+      decision: {
+        status: 'rejected',
+        reason:
+          `The operator spend policy in the environment is invalid (fail-closed): ${_operatorPolicyError}. ` +
+          'Fix the AGENTPAY_POLICY_* values and restart the server.',
+      },
+      reservation: null,
+    }
+  }
   if (!_layersByScope.has(OPERATOR_POLICY_SCOPE) && !envFlag(ALLOW_UNPOLICED_SPEND_ENV)) {
     // Default deny: without a trusted (operator) policy there is no
     // authority for value movement beyond what the agent set for itself.

@@ -34,6 +34,8 @@ import { assertPaymentCap, assertPayableX402Recipient } from '../utils/payment-c
 import {
   DefiniteSpendFailure,
   PostSettlementSpendError,
+  assertPaymentOriginUnlocked,
+  lockPaymentOrigin,
   runClassifiedSpend,
   sessionStartIntentIdentity,
   withKeyedLock,
@@ -219,7 +221,6 @@ export async function handleX402SessionStart(
     const cap = assertPaymentCap(input.max_payment_eth);
     const approvedPayTo = assertPayableX402Recipient(input.pay_to);
     const endpointUrl = assertSafeUrl(input.endpoint);
-    const scope = input.scope ?? 'prefix';
 
     // Fast path: an active local session already paid for this URL.
     const early = findSessionForUrl(input.endpoint);
@@ -235,7 +236,8 @@ export async function handleX402SessionStart(
         return { content: [textContent(describeReusedSession(active, config.chainId))] };
       }
 
-      const intent = sessionStartIntentIdentity({ endpoint: input.endpoint, scope });
+      assertPaymentOriginUnlocked(endpointUrl.origin);
+      const intent = sessionStartIntentIdentity({ endpoint: input.endpoint });
       const { value } = await withSpendIntent(
         intent.key,
         () => startPaidSession(input, { cap, approvedPayTo, timeoutMs, intentKey: intent.key }),
@@ -252,8 +254,8 @@ export async function handleX402SessionStart(
   } catch (error: unknown) {
     if (error instanceof PostSettlementSpendError) {
       let out =
-        '❌ x402_session_start failed after settlement. Do not resubmit — this endpoint is locked ' +
-        'for new session payments until the payment is reconciled.\n\n';
+        '❌ x402_session_start failed after settlement. Do not resubmit — new payments to this ' +
+        'origin are locked until the payment is reconciled.\n\n';
       out += `  Amount:    ${sanitizeUntrustedInline(error.amount, 64)} (base units)\n`;
       out += `  Recipient: ${sanitizeUntrustedInline(error.recipient, 64)}\n`;
       out += `  TX Hash:   ${sanitizeUntrustedInline(error.txHash, 80)}\n`;
@@ -380,6 +382,7 @@ async function startPaidSession(
   };
 
   const postSettlement = (cause: unknown): never => {
+    lockPaymentOrigin(new URL(input.endpoint).origin);
     throw new PostSettlementSpendError({
       txHash: paymentTxHash,
       amount: paymentAmount,

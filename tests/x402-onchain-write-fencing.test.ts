@@ -421,5 +421,50 @@ describe('x402 on-chain write fencing (real agentwallet-sdk)', () => {
     expect(writes).toEqual([]);
     expect(vi.mocked(globalThis.fetch)).not.toHaveBeenCalled();
   });
+
+  // ─── F3 review follow-up: asset is always bound; cap covers the fee ──────
+  const WETH_BASE = '0x4200000000000000000000000000000000000006';
+
+  it('an unnamed asset binds to USDC: a WETH offer under a "1" cap produces zero writes', async () => {
+    serve402(PAYEE, { asset: WETH_BASE, amount: '1000000000000000000' });
+    const result = await handleX402Pay({ ...PAY_INPUT, max_payment_eth: '1' });
+    expect(writes).toEqual([]);
+    expect(result.isError).toBe(true);
+    expect(result.content[0]!.text).toContain('does not match the approved asset');
+  });
+
+  it('the USDC-denominated operator ceiling refuses any other asset', async () => {
+    process.env.AGENTPAY_X402_MAX_PAYMENT = '1';
+    try {
+      serve402(PAYEE, { asset: WETH_BASE, amount: '1000000000000000000' });
+      const result = await handleX402Pay({ ...PAY_INPUT, max_payment_eth: '1', asset: WETH_BASE });
+      expect(writes).toEqual([]);
+      expect(result.isError).toBe(true);
+      expect(result.content[0]!.text).toContain('denominated in USDC');
+    } finally {
+      delete process.env.AGENTPAY_X402_MAX_PAYMENT;
+    }
+  });
+
+  it('the cap bounds principal plus protocol fee', async () => {
+    serve402(PAYEE, { amount: '1000000' }); // 1 USDC + 0.0077 fee
+    const over = await handleX402Pay({ ...PAY_INPUT, max_payment_eth: '1' });
+    expect(writes).toEqual([]);
+    expect(over.isError).toBe(true);
+
+    _resetSpendIntentStore();
+    serve402(PAYEE, { amount: '990000' }); // debit 997,623 ≤ 1,000,000
+    const under = await handleX402Pay({ ...PAY_INPUT, max_payment_eth: '1' });
+    expect(under.isError).toBeUndefined();
+    expect(writes).toHaveLength(2);
+  });
+
+  it('local fee math matches the SDK', async () => {
+    const { x402DebitAmount } = await import('agentwallet-sdk');
+    const { x402Debit } = await import('../src/utils/payment-cap.js');
+    for (const amount of [0n, 1n, 129n, 990000n, 1000000n, 10n ** 24n]) {
+      expect(x402Debit(amount)).toBe(x402DebitAmount(amount));
+    }
+  });
 });
 

@@ -370,7 +370,7 @@ describe('x402_pay tool', () => {
     );
     expect(first.content[0]!.text).toContain('1000000');
     expect(retry.isError).toBe(true);
-    expect(retry.content[0]!.text).toContain('did not return a transaction hash');
+    expect(retry.content[0]!.text).toContain('New payments to https://api.example.com are locked');
     expect(fetches).toBe(1);
 
     mockGetActivityHistory.mockResolvedValueOnce([]);
@@ -1316,6 +1316,9 @@ describe('x402_pay tool', () => {
     const result = await handleX402Pay({
       url: 'https://api.example.com/data',
       max_payment_eth: '0.0000000000000000001', // 1e-19 ETH → 0n wei
+      // The offer is native ETH; approve that asset explicitly so this test
+      // exercises the cap (an unnamed asset now binds to USDC).
+      asset: '0x0000000000000000000000000000000000000000',
     });
 
     expect(result.isError).toBe(true);
@@ -1360,11 +1363,12 @@ describe('x402_pay tool', () => {
 
     expect(result.isError).toBe(true);
     expect(result.content[0]!.text).toContain('Rolling spend cap exceeded');
-    // 500 USDC (6 decimals) must reach the policy as 5e11 9-decimal
-    // units — not 500_000_000, which slips 1e3 under every cap.
+    // 500 USDC (6 decimals) must reach the policy in 9-decimal units —
+    // not 500_000_000, which slips 1e3 under every cap — and the policy is
+    // charged the full debit: principal plus the 0.77% protocol fee.
     expect(reserve).toHaveBeenCalledWith({
       merchant: '0xfeedfacefeedfacefeedfacefeedfacefeedface',
-      amount: 5e11,
+      amount: 503_850_000_000,
     });
   });
 

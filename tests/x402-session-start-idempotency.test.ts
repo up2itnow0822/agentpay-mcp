@@ -131,12 +131,34 @@ describe('x402_session_start idempotency (F1)', () => {
     expect(first.content[0]!.text).toContain('failed after settlement')
     expect(first.content[0]!.text).toContain(MOCK_TX_HASH)
 
-    // Same endpoint, reworded request: still locked.
-    const retry = await handleX402SessionStart({ ...START, method: 'POST', body: '{"x":1}' })
-    expect(retry.isError).toBe(true)
-    expect(retry.content[0]!.text).toContain('did not return a transaction hash')
+    // Every variant the review used to step around an endpoint-scoped lock,
+    // plus a one-off x402_pay to the same origin: all refused, none pays.
+    const variants = [
+      handleX402SessionStart({ ...START, method: 'POST', body: '{"x":1}' }),
+      handleX402SessionStart({ ...START, scope: 'exact' }),
+      handleX402SessionStart({ ...START, endpoint: `${ENDPOINT}/` }),
+      handleX402SessionStart({ ...START, endpoint: `${ENDPOINT}?` }),
+      handleX402SessionStart({ ...START, endpoint: `${ENDPOINT}?retry=1` }),
+      handleX402SessionStart({ ...START, endpoint: 'https://api.example.com/other' }),
+      handleX402Pay({
+        url: 'https://api.example.com/one-off',
+        method: 'GET',
+        timeout_ms: 5000,
+        skip_session_check: true,
+        max_payment_eth: '5',
+        pay_to: PAYEE,
+      }),
+    ]
+    for (const retry of await Promise.all(variants)) {
+      expect(retry.isError).toBe(true)
+      expect(retry.content[0]!.text).toContain('New payments to https://api.example.com are locked')
+    }
     expect(payments.count).toBe(1)
-    expect(_spendIntentStoreSizes().unresolved).toBe(1)
+
+    // A different origin is not blocked by this lock (it reaches payment).
+    const elsewhere = await handleX402SessionStart({ ...START, endpoint: 'https://other.example.net/v1' })
+    expect(elsewhere.content[0]!.text).not.toContain('New payments to')
+    expect(payments.count).toBe(2)
   })
 
   it('a failure before payment stays retryable', async () => {

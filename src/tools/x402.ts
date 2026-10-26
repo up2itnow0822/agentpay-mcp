@@ -45,6 +45,8 @@ import { recordSessionCall } from '../session/manager.js';
 import {
   DefiniteSpendFailure,
   IDEMPOTENCY_KEY_JSON_SCHEMA,
+  assertPaymentOriginUnlocked,
+  lockPaymentOrigin,
   IdempotencyKeyZodSchema,
   PostSettlementSpendError,
   requireSettlementHash,
@@ -426,6 +428,9 @@ export async function handleX402Pay(
     // onPaymentComplete locks the intent so a retry cannot sign twice.
     const method = input.method ?? 'GET';
     const cap = assertPaymentCap(input.max_payment_eth);
+    // An origin that has taken a payment without delivering is locked for
+    // every new payment until reconciled (F1/F14).
+    assertPaymentOriginUnlocked(new URL(input.url).origin);
     const approvedPayTo = assertPayableX402Recipient(input.pay_to);
 
     const intent = x402PayIntentIdentity({
@@ -539,6 +544,7 @@ export async function handleX402Pay(
               // Still fail closed on the post-settlement error even if the
               // callback hash cannot be recorded as a history receipt.
             }
+            lockPaymentOrigin(new URL(input.url).origin);
             throw new PostSettlementSpendError({
               txHash: paymentTxHash,
               amount: paymentAmount,
@@ -635,7 +641,8 @@ export async function handleX402Pay(
       const cause =
         error.cause instanceof Error ? error.cause.message : undefined;
       let out =
-        '❌ x402_pay failed after settlement. Do not resubmit this request.\n\n';
+        '❌ x402_pay failed after settlement. Do not resubmit — new payments to this origin are ' +
+        'locked until the payment is reconciled.\n\n';
       out += `  Amount:    ${sanitizeUntrustedInline(error.amount, 64)} (base units)\n`;
       out += `  Recipient: ${sanitizeUntrustedInline(error.recipient, 64)}\n`;
       out += `  TX Hash:   ${sanitizeUntrustedInline(error.txHash, 80)}\n`;

@@ -17,8 +17,13 @@ which maps each finding to its repair and proving test.
 
 ### Breaking
 - `x402_pay` and `x402_session_start` require `max_payment_eth` and `pay_to`.
-  Optional `asset` and `network` bind those too. A 402 naming another payee,
-  asset or network, or above the cap, is refused before any wallet write (F3).
+  The asset is always bound (default: the chain's USDC; override with
+  `asset`); `network` can be bound. The cap covers principal plus the 0.77%
+  protocol fee. `AGENTPAY_X402_MAX_PAYMENT` is USDC-denominated. A 402 naming
+  another payee, asset or network, or above the cap, is refused before any
+  wallet write (F3).
+- `add_custom_token` verifies `decimals()` on-chain and registers only on the
+  configured chain (F2).
 - Spend policy is default-deny. Value movement requires an operator policy
   (`AGENTPAY_POLICY_*`) or an explicit `AGENTPAY_ALLOW_UNPOLICED_SPEND=1` (F11).
 - `set_spend_policy` can only tighten. Requests that raise a limit, drop a
@@ -33,8 +38,9 @@ which maps each finding to its repair and proving test.
   chains and bounded input (F18).
 
 ### Security
-- F1: `x402_session_start` is serialised per origin with an endpoint-scoped
-  spend intent; any failure after payment locks the endpoint.
+- F1: `x402_session_start` is serialised per origin with an origin-scoped spend
+  intent; a payment that settles without a delivered response locks every new
+  x402 payment to that origin until an operator reconciles it.
 - F2: Token decimals come from the registry, native ETH, or on-chain
   `decimals()`.
 - F3, F5: Mandatory cap and approved terms checked against the SDK-selected
@@ -54,7 +60,12 @@ which maps each finding to its repair and proving test.
 - F12: Spend classification uses `AsyncLocalStorage` on a once-hooked wallet
   client, so concurrent spends cannot be misattributed.
 - F14: Unresolved spend-intent locks are never evicted; new spends are refused
-  at capacity; evicted keyed settlements are tombstoned.
+  at capacity; evicted keyed settlements are tombstoned; the journal survives a
+  torn final line.
+- F11: A malformed operator policy denies all spending and is reported at
+  startup.
+- `create_escrow` runs under the same spend-intent contract (idempotency key,
+  replay, lock on ambiguous broadcast).
 - F16: `send_payment` supports `idempotencyKey`, replays identical retries, and
   locks on an ambiguous broadcast.
 - `npm audit --omit=dev` and `npm audit` report 0 vulnerabilities.

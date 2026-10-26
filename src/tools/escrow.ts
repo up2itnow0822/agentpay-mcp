@@ -10,8 +10,16 @@ import type { Address } from 'viem'
 type AnyClient = any
 import { getWallet, getConfig } from '../utils/client.js'
 import { textContent, formatError } from '../utils/format.js'
-import { enforceSpendPolicy } from './budget.js'
+import { withReservedSpend } from './budget.js'
 import { parseAmountStrict } from '../utils/amount.js'
+import { createHash } from 'node:crypto'
+import {
+  IDEMPOTENCY_KEY_JSON_SCHEMA,
+  IdempotencyKeyZodSchema,
+  requireSettlementHash,
+  runClassifiedSpend,
+  withSpendIntent,
+} from '../utils/spend-intent.js'
 
 // ─── Schema ────────────────────────────────────────────────────────────────
 
@@ -46,6 +54,10 @@ export const CreateEscrowSchema = z.object({
     .optional()
     .default(24)
     .describe('Challenge window in hours after fulfillment (default: 24)'),
+  idempotencyKey: IdempotencyKeyZodSchema.optional().describe(
+    'Caller-supplied idempotency key. The same key replays the original escrow; distinct keys ' +
+      'allow two equal escrows. Retries without a key collapse on the escrow payload for five minutes.'
+  ),
 })
 
 export type CreateEscrowInput = z.infer<typeof CreateEscrowSchema>
@@ -87,6 +99,10 @@ export const createEscrowTool = {
         description: 'Challenge window in hours (default: 24)',
         default: 24,
       },
+      idempotencyKey: {
+        ...IDEMPOTENCY_KEY_JSON_SCHEMA,
+        description: 'Optional idempotency key (1-128 non-whitespace chars).',
+      },
     },
     required: ['counterpartyAddress', 'stakeAmount', 'terms'],
   },
@@ -123,66 +139,77 @@ export async function handleCreateEscrow(
     // 1 ETH-equivalent) — never compare 6-decimal base units against
     // wei-scale caps directly. The merchant is the escrow counterparty.
     const buyerCommitment = paymentAmount * 2n // paymentAmount + buyerStake
-    const policyDecision = await enforceSpendPolicy({
-      merchant: input.counterpartyAddress,
-      amount: buyerCommitment,
-      decimals: USDC_DECIMALS,
-    })
-    if (policyDecision.status === 'rejected') {
-      throw new Error(
-        policyDecision.reason ??
-          `Escrow creation blocked by spend policy for counterparty ${input.counterpartyAddress}.`
-      )
-    }
-    if (policyDecision.status === 'draft') {
-      throw new Error(
-        `Escrow commitment exceeds per-tx spend policy and was queued as draft` +
-          `${policyDecision.draftId ? ` (${policyDecision.draftId})` : ''}. ` +
-          (policyDecision.reason ?? 'Approve the draft before executing.')
-      )
-    }
 
     // Deadline: N days from now
     const deadlineSecs = input.deadlineDays ?? 7
-    const deadline = Math.floor(Date.now() / 1000) + deadlineSecs * 86400
-
-    // Challenge window in seconds
     const challengeWindowHours = input.challengeWindowHours ?? 24
     const challengeWindow = challengeWindowHours * 3600
 
-    const escrow = new MutualStakeEscrow({
-      publicClient: wallet.publicClient as AnyClient,
-      walletClient: wallet.walletClient as AnyClient,
-      factoryAddress,
-      chainId: config.chainId,
-    })
+    // Same spend-intent contract as every other value-moving tool: a
+    // duplicate delivery replays, an ambiguous broadcast locks, and a failure
+    // before any wallet write releases the policy reservation.
+    const fingerprint =
+      'create_escrow:' +
+      createHash('sha256')
+        .update(
+          JSON.stringify([
+            config.chainId,
+            factoryAddress.toLowerCase(),
+            input.counterpartyAddress.toLowerCase(),
+            paymentAmount.toString(),
+            input.terms,
+            deadlineSecs,
+            challengeWindowHours,
+          ])
+        )
+        .digest('hex')
+    const explicitKey = input.idempotencyKey?.trim()
+    const intentKey = explicitKey ? `create_escrow#${explicitKey}` : fingerprint
 
-    const result = await escrow.create({
-      seller: input.counterpartyAddress as Address,
-      paymentAmount,
-      buyerStake: paymentAmount,
-      sellerStake: paymentAmount,
-      verifier: 'optimistic' as const,
-      deadline,
-      challengeWindow,
-    })
+    const { value, replayed } = await withSpendIntent(
+      intentKey,
+      () =>
+        withReservedSpend(
+          { merchant: input.counterpartyAddress, amount: buyerCommitment, decimals: USDC_DECIMALS },
+          async () => {
+            const deadline = Math.floor(Date.now() / 1000) + deadlineSecs * 86400
+            const escrow = new MutualStakeEscrow({
+              publicClient: wallet.publicClient as AnyClient,
+              walletClient: wallet.walletClient as AnyClient,
+              factoryAddress,
+              chainId: config.chainId,
+            })
+            const result = await runClassifiedSpend(wallet.walletClient, () =>
+              escrow.create({
+                seller: input.counterpartyAddress as Address,
+                paymentAmount,
+                buyerStake: paymentAmount,
+                sellerStake: paymentAmount,
+                verifier: 'optimistic' as const,
+                deadline,
+                challengeWindow,
+              })
+            )
+            return {
+              success: true as const,
+              vaultAddress: result.address,
+              txHash: requireSettlementHash(result.txHash, 'create_escrow'),
+              buyer: wallet.walletClient.account!.address,
+              seller: input.counterpartyAddress,
+              paymentAmount: input.stakeAmount,
+              rawPaymentAmount: paymentAmount.toString(),
+              terms: input.terms,
+              deadline: new Date(deadline * 1000).toISOString(),
+              challengeWindowHours,
+            }
+          }
+        ),
+      { durable: Boolean(explicitKey), fingerprint }
+    )
 
     return {
       content: [
-        textContent(
-          JSON.stringify({
-            success: true,
-            vaultAddress: result.address,
-            txHash: result.txHash,
-            buyer: wallet.walletClient.account!.address,
-            seller: input.counterpartyAddress,
-            paymentAmount: input.stakeAmount,
-            rawPaymentAmount: paymentAmount.toString(),
-            terms: input.terms,
-            deadline: new Date(deadline * 1000).toISOString(),
-            challengeWindowHours,
-          })
-        ),
+        textContent(JSON.stringify(replayed ? { ...value, idempotentRetry: true } : value)),
       ],
     }
   } catch (error: unknown) {
