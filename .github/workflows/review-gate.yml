@@ -329,7 +329,9 @@ jobs:
                 for (const item of data) {
                   if (!item || typeof item.after !== 'string') continue;
                   if (item.after.toLowerCase() !== tipSha.toLowerCase()) continue;
-                  const t = parseTimeMs(item.timestamp);
+                  // GitHub's schema names this `timestamp`; accept `pushed_at`
+                  // too so a field rename can only add evidence, never drop it.
+                  const t = parseTimeMs(item.timestamp || item.pushed_at);
                   if (Number.isFinite(t)) ms = Math.max(ms, t);
                 }
                 return { ms, source: ms ? 'activity' : 'activity-no-match' };
@@ -398,8 +400,23 @@ jobs:
               if (!Number.isFinite(committerMs)) {
                 throw new Error(`PR #${prNumber} base tip ${baseTipSha} has no readable committer date; refusing to bind review evidence`);
               }
-              const commitDateMs = Math.max(committerMs, Number.isFinite(authorMs) ? authorMs : 0);
+              // Commit dates are author-controlled. A future-dated tip must not
+              // make every review "too early" until that date arrives, so the
+              // commit-date bound is clamped to this run's observation time.
+              const observedAtMs = Date.parse(observedAt);
+              const commitDateMs = Math.min(
+                Math.max(committerMs, Number.isFinite(authorMs) ? authorMs : 0),
+                observedAtMs,
+              );
               const activity = await baseTipActivityMs(baseRef, baseTipSha);
+              if (activity.source === 'activity-no-match' || activity.source === 'activity-unexpected') {
+                // The feed answered but does not show when this tip became
+                // current. Do not fall back to a fakeable commit date.
+                throw new Error(
+                  `PR #${prNumber} base tip ${baseTipSha} is not in the repository activity feed for ` +
+                  `${baseRef}; refusing to bind review evidence to an unprovable base`
+                );
+              }
               const observedDifferentMs = await priorDifferentBaseObservationMs(headSha, baseRef, baseTipSha);
               const reviewNotBeforeMs = Math.max(
                 Number.isFinite(timelineBaseChangedMs) ? timelineBaseChangedMs : 0,

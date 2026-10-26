@@ -611,7 +611,7 @@ describe('OTel Budget Circuit-Breaker', () => {
 
     it.each([
       'https://hooks.example.com/agent/kill',
-      'http://hooks.example.com./agent/kill',
+      'https://hooks.example.com./agent/kill',
       'https://93.184.216.7/kill',
       'https://93.184.216.34:8443/kill',
       // Neighbours of the newly-refused IPv4 ranges that are ordinary global
@@ -630,18 +630,18 @@ describe('OTel Budget Circuit-Breaker', () => {
       'https://192.31.196.1/kill',
       'https://192.52.193.1/kill',
       'https://192.175.48.1/kill',
-      'http://[2606:4700:4700::1111]/kill',
-      'http://[64:ff9b::5db8:d807]/kill',
-      'http://[2002:5db8:d807::]/kill',
+      'https://[2606:4700:4700::1111]/kill',
+      'https://[64:ff9b::5db8:d807]/kill',
+      'https://[2002:5db8:d807::]/kill',
       // Neighbours of the newly-refused ranges that are ordinary global unicast
       // and must stay reachable: 2001:4860 is not 2001:db8/2001:2/2001:20 and
       // must not be swept up by the protocol-assignment rules, 3ffe is outside
       // 3fff::/20, and 5f01 is outside 5f00::/16.
-      'http://[2001:4860:4860::8888]/kill',
-      'http://[2001:db9::1]/kill',
-      'http://[2001:30::1]/kill',
-      'http://[3ffe::1]/kill',
-      'http://[5f01::1]/kill',
+      'https://[2001:4860:4860::8888]/kill',
+      'https://[2001:db9::1]/kill',
+      'https://[2001:30::1]/kill',
+      'https://[3ffe::1]/kill',
+      'https://[5f01::1]/kill',
     ])('still accepts the public destination %s', (url) => {
       expect(validateKillCallbackUrl(url)).toBeNull()
       registerPolicy(killPolicy(url))

@@ -76,3 +76,17 @@ alongside two hardening items (IPv4-translated IPv6, `create_escrow` spend
 intents). The UAID resolver still reads its fixed broker URL with the SDK's
 own fetch; the destination is not caller-selected.
 
+## Codex review of PR #90
+
+Codex reviewed `1138030` and raised seven findings; all were repaired:
+
+| Finding | Repair | Proof |
+| --- | --- | --- |
+| P1 review-gate activity time field | Accepts `timestamp` (GitHub schema) or `pushed_at`; an activity feed that answers without the base tip now fails closed instead of falling back to a fakeable commit date | workflow policy test, `node --check` on all gate scripts |
+| P2 future-dated base commit | Commit-date bound clamped to the run's observation time | as above |
+| P1 http kill callbacks | Public kill-callback hosts require `https`; `http` only for operator-allowlisted hosts or private-network dev mode | `tests/otel-bounds.test.ts` |
+| P1 journal fsync errors swallowed | File fsync failures abort the spend before any wallet write; only directory fsync is best-effort | `tests/spend-journal-fsync.test.ts` |
+| P1 journal marked loaded before replay | Marked loaded only after a successful replay; an unreadable journal refuses all value movement | `tests/spend-intent.test.ts` |
+| P2 send_token committed policy before broadcast | Uses reserve → commit / release / lock, so a definite pre-broadcast failure frees the allowance | `tests/send-token-reservation.test.ts` (fails on `1138030`, passes now) |
+| P2 in-flight intents not counted at admission | Admission counts in-flight intents, so locks can never exceed the ceiling | `tests/spend-intent.test.ts` |
+

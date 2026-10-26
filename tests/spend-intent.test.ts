@@ -492,28 +492,26 @@ describe('withSpendIntent', () => {
     })
   })
 
-  it('locks an in-flight ambiguous spend even when it finishes above capacity', async () => {
+  it('counts in-flight intents at admission so locks never exceed the ceiling (Codex P2)', async () => {
     let release!: () => void
     const gate = new Promise<void>((resolve) => {
       release = resolve
     })
-    const inFlight = withSpendIntent('late#ambiguous', async () => {
-      await gate
-      throw new Error('rpc timeout')
-    })
-    for (let i = 0; i < SPEND_INTENT_MAX_UNRESOLVED; i++) {
-      await expect(
-        withSpendIntent(`fill#${i}`, async () => {
-          throw new Error('rpc timeout')
-        })
-      ).rejects.toThrow('rpc timeout')
-    }
-    release()
-    await expect(inFlight).rejects.toThrow('rpc timeout')
-    expect(_spendIntentStoreSizes().unresolved).toBe(SPEND_INTENT_MAX_UNRESOLVED + 1)
-    await expect(withSpendIntent('late#ambiguous', vi.fn())).rejects.toBeInstanceOf(
-      UnresolvedSpendIntentError
+    const inFlight = Array.from({ length: SPEND_INTENT_MAX_UNRESOLVED }, (_, i) =>
+      withSpendIntent(`flight#${i}`, async () => {
+        await gate
+        throw new Error('rpc timeout')
+      }).catch((e: unknown) => e)
     )
+    // Capacity is fully reserved by in-flight spends: a new one is refused.
+    const extra = vi.fn()
+    await expect(withSpendIntent('one-too-many', extra)).rejects.toBeInstanceOf(
+      SpendIntentCapacityError
+    )
+    expect(extra).not.toHaveBeenCalled()
+    release()
+    await Promise.all(inFlight)
+    expect(_spendIntentStoreSizes().unresolved).toBe(SPEND_INTENT_MAX_UNRESOLVED)
   })
 })
 
@@ -820,6 +818,17 @@ describe('spend-intent journal (opt-in durability)', () => {
       UnresolvedSpendIntentError
     )
     expect(retry).not.toHaveBeenCalled()
+  })
+
+  it('an unreadable journal refuses every spend until it can be replayed (Codex P1)', async () => {
+    const { mkdirSync } = await import('node:fs')
+    const { join } = await import('node:path')
+    // A directory where the journal file should be: reading it fails.
+    mkdirSync(join(dir, 'spend-intents.jsonl'))
+    const run = vi.fn()
+    await expect(withSpendIntent('blocked#1', run)).rejects.toThrow(/could not be read/)
+    await expect(withSpendIntent('blocked#2', run)).rejects.toThrow(/could not be read/)
+    expect(run).not.toHaveBeenCalled()
   })
 
   it('a record written after a torn tail is not welded into it (review follow-up)', async () => {

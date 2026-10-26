@@ -792,10 +792,13 @@ function journal(record: JournalRecord): void {
   const prefix = !created && !endsWithNewline(path) ? '\n' : ''
   const line = prefix + JSON.stringify({ v: 1, at: Date.now(), ...record }) + '\n'
   appendFileSync(path, line, { mode: 0o600 })
-  fsyncPath(path)
+  // File fsync failures PROPAGATE: a begin record that may not be durable
+  // must abort the spend before any wallet write.
+  fsyncFile(path)
   if (created) {
-    // Make the new directory entry itself durable.
-    fsyncPath(dir)
+    // Make the new directory entry itself durable (best effort: directory
+    // fsync is unsupported on some platforms).
+    fsyncDirBestEffort(dir)
   }
 }
 
@@ -812,14 +815,22 @@ function endsWithNewline(path: string): boolean {
   }
 }
 
-function fsyncPath(path: string): void {
+function fsyncFile(path: string): void {
+  const fd = openSync(path, 'r')
+  try {
+    fsyncSync(fd)
+  } finally {
+    closeSync(fd)
+  }
+}
+
+function fsyncDirBestEffort(dir: string): void {
   let fd: number | undefined
   try {
-    fd = openSync(path, 'r')
+    fd = openSync(dir, 'r')
     fsyncSync(fd)
   } catch {
-    // Directory fsync is unsupported on some platforms; the file fsync above
-    // is the guarantee that matters for record content.
+    // Unsupported on some platforms; the file fsync is the content guarantee.
   } finally {
     if (fd !== undefined) closeSync(fd)
   }
@@ -830,13 +841,24 @@ export function ensureJournalLoaded(): void {
   if (journalLoaded) {
     return
   }
-  journalLoaded = true
   const path = spendJournalPath()
   if (!path || !existsSync(path)) {
+    journalLoaded = true
     return
   }
+  let text: string
+  try {
+    text = readFileSync(path, 'utf8')
+  } catch (error: unknown) {
+    // Not marked loaded: every call retries the replay and refuses value
+    // movement until it succeeds — an unread journal may hold live locks.
+    throw new Error(
+      `Spend-intent journal ${path} could not be read (${error instanceof Error ? error.message : String(error)}); ` +
+        'refusing value movement until it can be replayed.'
+    )
+  }
   const open = new Map<string, { fp: string; at: number }>()
-  for (const line of readFileSync(path, 'utf8').split('\n')) {
+  for (const line of text.split('\n')) {
     if (!line.trim()) {
       continue
     }
@@ -873,6 +895,7 @@ export function ensureJournalLoaded(): void {
   for (const [key, entry] of open) {
     unresolved.set(key, { settledAt: entry.at, fingerprint: entry.fp })
   }
+  journalLoaded = true
 }
 
 // ─── Intent execution ──────────────────────────────────────────────────────
@@ -917,7 +940,9 @@ export async function withSpendIntent<T>(
 
   // Fail closed under reconciliation backlog: never evict an unresolved lock
   // to make room, and never admit new value movement past the ceiling.
-  if (unresolved.size >= SPEND_INTENT_MAX_UNRESOLVED) {
+  // In-flight intents count too: each could end ambiguous and become a lock,
+  // so admission reserves capacity for them (no unbounded overshoot).
+  if (unresolved.size + inflight.size >= SPEND_INTENT_MAX_UNRESOLVED) {
     throw new SpendIntentCapacityError()
   }
 
@@ -949,10 +974,8 @@ export async function withSpendIntent<T>(
       journal({ op: 'definite', key })
       throw error
     }
-    // Possibly broadcast: lock with no timer and no eviction. The map may
-    // exceed the admission ceiling by at most the number of spends that were
-    // already in flight when it was reached; that overshoot is bounded and
-    // is the price of never dropping a lock.
+    // Possibly broadcast: lock with no timer and no eviction. Admission
+    // counted this intent while in flight, so the ceiling holds.
     unresolved.set(key, { settledAt: Date.now(), fingerprint })
     journal({ op: 'lock', key, fp: fingerprint })
     throw error

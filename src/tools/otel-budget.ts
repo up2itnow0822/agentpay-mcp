@@ -220,7 +220,22 @@ export function validateKillCallbackUrl(raw: string): string | null {
   if (privateHost) {
     return `killCallbackUrl must not target a private, loopback or link-local host — "${parsed.hostname}" is not externally routable`
   }
+  // Public webhooks must be https: the URL routinely carries a signed
+  // capability and the POST carries the budget decision, so plaintext lets a
+  // network attacker read or suppress the kill signal. Plain http stays
+  // available only for operator-allowlisted hosts (returned above) and in
+  // private-network development mode.
+  if (parsed.protocol !== 'https:' && !privateNetworkDevMode()) {
+    return 'killCallbackUrl must use https: for a public host (http is allowed only for hosts in ' +
+      `${KILL_CALLBACK_ALLOWLIST_ENV})`
+  }
   return null
+}
+
+/** AGENTPAY_ALLOW_PRIVATE_NETWORK=1: development mode that also permits http. */
+function privateNetworkDevMode(): boolean {
+  const value = process.env.AGENTPAY_ALLOW_PRIVATE_NETWORK?.trim().toLowerCase()
+  return value === '1' || value === 'true' || value === 'yes'
 }
 
 
@@ -751,9 +766,18 @@ export async function invokeKillCallback(
   // `attempted` flips only when the connector — the socket — is reached.
   let attempted = false
   const connector = activeConnector()
+  const allowlist = killCallbackAllowlist()
+  const callbackHost = (() => {
+    try {
+      return normalizeHost(new URL(policy.killCallbackUrl).hostname)
+    } catch {
+      return ''
+    }
+  })()
   const transport = createSafeTransport({
-    requireHttps: false,
-    allowedPrivateHosts: killCallbackAllowlist(),
+    // https everywhere except an operator-allowlisted (typically in-VPC) host.
+    requireHttps: !allowlist.has(callbackHost),
+    allowedPrivateHosts: allowlist,
     maxResponseBytes: 64 * 1024,
     connector: (url, init, pinned, limits) => {
       attempted = true

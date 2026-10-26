@@ -66,6 +66,12 @@ which maps each finding to its repair and proving test.
   startup.
 - `create_escrow` runs under the same spend-intent contract (idempotency key,
   replay, lock on ambiguous broadcast).
+- Kill callbacks to public hosts require `https`; `http` is accepted only for
+  operator-allowlisted hosts.
+- The spend-intent journal fails closed: an fsync or read failure refuses value
+  movement; admission counts in-flight intents against the lock ceiling.
+- `send_token` releases its policy reservation on a definite pre-broadcast
+  failure.
 - F16: `send_payment` supports `idempotencyKey`, replays identical retries, and
   locks on an ambiguous broadcast.
 - `npm audit --omit=dev` and `npm audit` report 0 vulnerabilities.

@@ -48,7 +48,7 @@ cannot be changed through MCP:
 | `AGENTPAY_POLICY_ALLOWED_RECIPIENTS` | unset | Comma-separated operator recipient allowlist |
 | `AGENTPAY_ALLOW_UNPOLICED_SPEND` | off | `1` permits value movement with no operator policy, relying only on on-chain limits |
 | `AGENTPAY_X402_MAX_PAYMENT` | unset | USDC ceiling applied on top of every per-call x402 cap; non-USDC x402 payments are refused while set |
-| `AGENTPAY_STATE_DIR` | unset | Directory for the fsync'd spend-intent journal; locks and keyed settlements survive restarts |
+| `AGENTPAY_STATE_DIR` | unset | Directory for the fsync'd spend-intent journal; locks and keyed settlements survive restarts. If the journal cannot be read or fsync'd, value movement is refused |
 | `AGENTPAY_ALLOWED_PRIVATE_HOSTS` | unset | Comma-separated hosts whose private address may be reached by outbound requests |
 | `AGENTPAY_ALLOW_PRIVATE_NETWORK` | off | Development only: permit private destinations and plain `http` |
 
@@ -121,8 +121,8 @@ These boundaries matter more than the feature list:
 - If a payment settles but its response is not delivered, every new x402
   payment to that origin is locked until an operator reconciles it.
 - Caller-selected outbound requests (x402, quote, sessions, OTel kill
-  callback) use a safe transport: `https` only (the kill callback may also use
-  `http`), private, loopback, link-local and metadata destinations refused,
+  callback) use a safe transport: `https` only (a kill callback may use `http`
+  only for a host in `AGENTPAY_KILL_CALLBACK_ALLOWED_HOSTS`), private, loopback, link-local and metadata destinations refused,
   DNS resolved once with the
   socket pinned to the validated address, no automatic redirects, and
   response bodies capped at 2 MiB (1 MiB rendered).

@@ -75,6 +75,31 @@ describe('kill callback pinning (F9)', () => {
   })
 })
 
+describe('kill callback transport security (Codex P1)', () => {
+  it('refuses plaintext http to a public host but allows it for an allowlisted host', async () => {
+    const { validateKillCallbackUrl, KILL_CALLBACK_ALLOWLIST_ENV } = await import('../src/tools/otel-budget.js')
+    expect(validateKillCallbackUrl('http://hooks.example.com/kill')).toMatch(/must use https/)
+    expect(validateKillCallbackUrl('https://hooks.example.com/kill')).toBeNull()
+    process.env[KILL_CALLBACK_ALLOWLIST_ENV] = 'orchestrator.svc.internal'
+    try {
+      expect(validateKillCallbackUrl('http://orchestrator.svc.internal/kill')).toBeNull()
+    } finally {
+      delete process.env[KILL_CALLBACK_ALLOWLIST_ENV]
+    }
+  })
+
+  it('never connects for an http callback on a public host', async () => {
+    const connector = vi.fn()
+    _setSafeTransportTestOverrides({ resolver: async () => [{ address: '93.184.215.14', family: 4 }], connector })
+    const result = await invokeKillCallback(
+      { agentId: 'a', maxSpendUsd: 1, windowMs: 0, breachAction: 'kill', killCallbackUrl: 'http://hooks.example.com/kill' },
+      KILL
+    )
+    expect(result).toMatchObject({ attempted: false, ok: false })
+    expect(connector).not.toHaveBeenCalled()
+  })
+})
+
 describe('bounded OTel state (F10)', () => {
   it('rejects oversized identifiers and caps the number of policies', () => {
     expect(() =>

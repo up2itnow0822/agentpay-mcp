@@ -41,7 +41,7 @@ This document maps AgentPay MCP's security controls to the CoSAI (Coalition for 
 | Control | Implementation |
 |---------|---------------|
 | Safe transport | Every caller-selected destination — `x402_pay`, `x402_quote`, `x402_session_start`, `x402_session_fetch`, and the OTel kill callback — goes through `src/utils/safe-fetch.ts` |
-| Scheme and form | `https` only (the kill callback also accepts `http`); URLs with embedded credentials or empty DNS labels are refused |
+| Scheme and form | `https` only (a kill callback may use `http` only for an operator-allowlisted host in `AGENTPAY_KILL_CALLBACK_ALLOWED_HOSTS`, or in private-network development mode); URLs with embedded credentials or empty DNS labels are refused |
 | Destination | Private, loopback, link-local, CGNAT, multicast, documentation, benchmarking, and metadata ranges are refused, including IPv4 addresses carried in IPv6 transition forms. Private-only names (`localhost`, `.internal`, `.local`, …) are refused before lookup |
 | DNS rebinding | The host is resolved once; any private answer rejects it; the socket connects only to an address from that validated set |
 | Redirects | Never followed automatically. Session fetches follow at most 5 same-origin, in-scope redirects through the same transport |
