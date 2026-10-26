@@ -53,7 +53,7 @@ which maps each finding to its repair and proving test.
   offer; a paid body that fails mid-read is a payment-aware error; mainnet
   requires an explicit opt-in.
 - F6, F13, F17: Workflow actions pinned to full commit SHAs; review-gate
-  evidence bound to the exact base SHA; the daily-review analysis job is
+  evidence and `codex-waived` waivers bound to the live base tip; the daily-review analysis job is
   read-only and a deterministic job owns the single issue write, validating
   every schema field including optional metrics. Daily repair uses the same
   split: the model plans with a read-only token, a deterministic publisher

@@ -25,11 +25,13 @@
 #      was current. The labeled event publishes a "Codex waived" check whose
 #      summary attests {pr, head, base, base_ref, label_event_id, actor}.
 #      Later evaluations honor that check only when the attestation matches
-#      this PR number, this full head SHA, the current base SHA+ref, and the
-#      current LabeledEvent id, and that event still post-dates the last base
-#      change. A check waived for another PR (or an earlier visit to the same
-#      SHA) does not transfer. Any push or retarget needs a new review or a
-#      freshly applied waiver.
+#      this PR number, this full head SHA, the LIVE base tip (read from the
+#      branch, never the PR API's possibly lagging base.sha) and ref, and the
+#      current LabeledEvent id, and that event post-dates the moment the live
+#      tip became current (the same bound as ordinary evidence, below). A
+#      check waived for another PR, an earlier visit to the same SHA, or an
+#      older base does not transfer. Any push, base advance or retarget needs
+#      a new review or a freshly applied waiver.
 #
 # Base-SHA binding for ordinary Codex evidence (CWE-345 remediation):
 #   Commits landing on the SAME base branch create no base_ref_changed
@@ -630,17 +632,22 @@ jobs:
                   isFullSha(payloadHead) && payloadHead.toLowerCase() === headSha.toLowerCase() &&
                   isFullSha(payloadBase) && payloadBase.toLowerCase() === baseSha.toLowerCase() &&
                   payloadBaseRef === baseRef;
+                // Waivers bind to the LIVE base tip (baseBinding.baseTipSha),
+                // never to pr.base.sha, which can lag a push to the base
+                // branch: the label must post-date the moment the live tip
+                // became current, and the attestation records that tip.
                 if (freshWaiver && WAIVER_ACTORS.has(sender)) {
                   const labeled = await waitForLabeledEvent(prNumber);
                   if (
                     labeled &&
                     WAIVER_ACTORS.has((labeled.lastWaiverEvent.actor && labeled.lastWaiverEvent.actor.login) || '') &&
-                    Date.parse(labeled.lastWaiverEvent.created_at || 0) > labeled.baseChangedMs
+                    Date.parse(labeled.lastWaiverEvent.created_at || 0) > labeled.baseChangedMs &&
+                    postDatesCurrentBase(labeled.lastWaiverEvent.created_at || '', baseBinding)
                   ) {
                     const att = {
                       pr: prNumber,
                       head: headSha,
-                      base: baseSha,
+                      base: baseBinding.baseTipSha,
                       base_ref: baseRef,
                       label_event_id: labeled.id,
                       labeled_at: labeled.lastWaiverEvent.created_at,
@@ -650,12 +657,12 @@ jobs:
                       prNumber, headSha, baseSha, baseRef, baseChangedMs: labeled.baseChangedMs, baseBinding,
                       conclusion: 'success',
                       title: 'Codex waived',
-                      summary: `Label \`${WAIVE_LABEL}\` applied by @${sender} on head \`${headSha}\` for PR #${prNumber} (base \`${baseRef}\` \`${baseSha}\`). ` +
+                      summary: `Label \`${WAIVE_LABEL}\` applied by @${sender} on head \`${headSha}\` for PR #${prNumber} (base \`${baseRef}\` tip \`${baseBinding.baseTipSha}\`). ` +
                         'The waiver covers this PR, this SHA, and this base only; any new push or retarget needs a new review or waiver.\n\n' +
                         encodeWaiverAttestation(att),
                     };
                   }
-                  core.warning(`Label ${WAIVE_LABEL} on #${prNumber} could not be bound to a timeline LabeledEvent on the current head/base; not waiving.`);
+                  core.warning(`Label ${WAIVE_LABEL} on #${prNumber} could not be bound to a timeline LabeledEvent newer than the current base tip; not waiving.`);
                 } else if (freshWaiver) {
                   core.warning(`Label ${WAIVE_LABEL} on #${prNumber} applied by ${sender || 'unknown'}; not an allow-listed waiver actor, ignoring.`);
                 } else {
@@ -665,11 +672,12 @@ jobs:
                     lastWaiverEvent && lastWaiverEvent.event === 'labeled' &&
                     actorLogin && WAIVER_ACTORS.has(actorLogin) &&
                     Date.parse(lastWaiverEvent.created_at || 0) > baseChangedMs &&
+                    postDatesCurrentBase(lastWaiverEvent.created_at || '', baseBinding) &&
                     labelId &&
                     await findMatchingWaiverCheck({
                       prNumber,
                       headSha,
-                      baseSha,
+                      baseSha: baseBinding.baseTipSha,
                       baseRef,
                       labelEventId: labelId,
                     })
@@ -678,10 +686,10 @@ jobs:
                       prNumber, headSha, baseSha, baseRef, baseChangedMs, baseBinding,
                       conclusion: 'success',
                       title: 'Codex waived',
-                      summary: `Waiver previously recorded for PR #${prNumber} head \`${headSha}\` (base \`${baseRef}\` \`${baseSha}\`, label event ${labelId}).`,
+                      summary: `Waiver previously recorded for PR #${prNumber} head \`${headSha}\` (base \`${baseRef}\` tip \`${baseBinding.baseTipSha}\`, label event ${labelId}).`,
                     };
                   }
-                  core.warning(`Label ${WAIVE_LABEL} on #${prNumber} is not bound to this PR's current head/base label event; re-apply it to waive this head.`);
+                  core.warning(`Label ${WAIVE_LABEL} on #${prNumber} is not bound to this PR's current head and live base tip; re-apply it to waive this head against the current base.`);
                 }
               }
               if (pr.draft) {

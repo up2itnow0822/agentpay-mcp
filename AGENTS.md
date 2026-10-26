@@ -64,7 +64,8 @@
   `tests/workflow-security-policy.test.ts`,
   `tests/daily-repair-publisher.test.ts` and
   `tests/daily-review-publisher.test.ts` (run the real workflow publishers
-  against a git sandbox), `tests/server-metadata.test.ts`.
+  against a git sandbox), `tests/review-gate-waiver.test.ts` (runs the real
+  gate script against an in-memory GitHub), `tests/server-metadata.test.ts`.
 
 ## Child DOX Index
 

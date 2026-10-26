@@ -45,7 +45,7 @@ that proves it. It is the source of truth for the v5.0.0 breaking changes.
 | 10 | Medium | Unbounded OTel state | Identifier/window caps; policy, agent, task, record, decision, span-dedupe limits (dedupe keyed per agent/task, replays count only cost increases, a span is marked seen only after it is recorded); compacting rings; O(1) lifetime totals; fail-closed at capacity. | `tests/otel-bounds.test.ts` |
 | 11 | Medium | Caller can weaken its own policy | Operator policy from env (immutable, default deny; a malformed value — including an allowlist that names no address, or a policy with no constraint — denies everything and is reported at startup); caller updates layer and may only tighten; scope/layer caps. `src/tools/budget.ts` | `tests/budget.test.ts` (F11 blocks) |
 | 12 | Medium | Classification race on shared client | Wallet client hooked once; `AsyncLocalStorage` attributes each write to its own spend. No swap/restore. | `tests/spend-intent.test.ts` (F12 block, incl. exact original interleaving) |
-| 13 | Medium | review-gate ignores base advances | Ordinary review evidence bound to the exact base SHA. `.github/workflows/review-gate.yml` | `tests/workflow-security-policy.test.ts` |
+| 13 | Medium | review-gate ignores base advances | Ordinary review evidence and `codex-waived` waivers are bound to the live base tip (read from the branch, not the PR API's possibly lagging `base.sha`). `.github/workflows/review-gate.yml` | `tests/workflow-security-policy.test.ts`, `tests/review-gate-waiver.test.ts` (runs the real gate script) |
 | 14 | Medium | Capacity eviction re-enables settlement | Unresolved locks never evicted; new spends refused at capacity; operator reconciliation CLI; optional crash-safe journal (torn-tail safe, directory fsync); evicted keyed settlements tombstoned; `send_token` pre-write failures classified definite. | `tests/spend-intent.test.ts`, `tests/spend-intents-cli.test.ts`, `tests/transfers.test.ts` |
 | 15 | Medium | Unrestricted outbound requests | Safe transport on every caller-selected destination (x402, quote, sessions, kill callback); `Host` and TLS SNI come only from the validated URL. | `tests/safe-fetch.test.ts`, `tests/x402-session-start-idempotency.test.ts` |
 | 16 | Medium | `send_payment` has no idempotency | Spend-intent identity, optional `idempotencyKey`, reserved policy, classified broadcast, settlement-hash requirement. `create_escrow` brought under the same contract. | `tests/payments.test.ts` (F16 block), `tests/escrow.test.ts` |
@@ -83,7 +83,7 @@ own fetch; the destination is not caller-selected.
 
 ## Codex review of PR #90
 
-Codex reviewed `1138030` and raised seven findings; all were repaired:
+Codex reviewed `1138030` and raised eight findings (seven inline, one in the review body); all were repaired:
 
 | Finding | Repair | Proof |
 | --- | --- | --- |
@@ -94,6 +94,7 @@ Codex reviewed `1138030` and raised seven findings; all were repaired:
 | P1 journal marked loaded before replay | Marked loaded only after a successful replay; an unreadable journal refuses all value movement | `tests/spend-intent.test.ts` |
 | P2 send_token committed policy before broadcast | Uses reserve → commit / release / lock, so a definite pre-broadcast failure frees the allowance | `tests/send-token-reservation.test.ts` (fails on `1138030`, passes now) |
 | P2 in-flight intents not counted at admission | Admission counts in-flight intents, so locks can never exceed the ceiling | `tests/spend-intent.test.ts` |
+| P1 waiver attestation bound to the PR API's `base.sha` (review body) | Waivers record and match the live base tip, and the label must post-date the moment that tip became current | `tests/review-gate-waiver.test.ts` (real gate script; the stale waiver published success before the fix) |
 
 ## Independent review — round 2
 
