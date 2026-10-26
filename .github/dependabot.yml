@@ -1,0 +1,20 @@
+# Dependabot keeps the full-SHA action pins in .github/workflows/ current
+# through reviewed pull requests (each pin carries a `# vX.Y.Z` comment that
+# Dependabot updates alongside the SHA). Mutable tags are not allowed; see
+# tests/workflow-security-policy.test.ts.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 10
+    labels:
+      - dependencies
+      - github-actions
+    commit-message:
+      prefix: ci
+    groups:
+      github-actions:
+        patterns:
+          - "*"

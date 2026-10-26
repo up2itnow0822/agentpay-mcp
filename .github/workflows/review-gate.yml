@@ -10,11 +10,13 @@
 # Pass conditions (any one):
 #   1. A non-dismissed, non-pending chatgpt-codex-connector[bot]
 #      (user.type == Bot) review exists with commit_id exactly equal to the
-#      full 40-character head SHA, submitted after the PR's most recent
-#      base-branch change; or, for a clean pass (Codex submits no review when
-#      it has no findings), the Codex bot's own review-summary comment reports
+#      full 40-character head SHA, submitted after BOTH the PR's most recent
+#      base_ref_changed event AND the moment the CURRENT base-branch tip SHA
+#      became the tip (see "Base-SHA binding" below); or, for a clean pass
+#      (Codex submits no review when it has no findings), the Codex bot's own
+#      review-summary comment reports
 #      `Code Review | Completed | <full 40-char head sha>` and was updated
-#      after the last base change. Short SHAs are never accepted. A dismissed
+#      after that same bound. Short SHAs are never accepted. A dismissed
 #      Codex review on this head never counts, including via the summary
 #      shortcut. Findings arrive as review threads, which the ruleset's
 #      thread-resolution rule blocks separately.
@@ -28,6 +30,31 @@
 #      change. A check waived for another PR (or an earlier visit to the same
 #      SHA) does not transfer. Any push or retarget needs a new review or a
 #      freshly applied waiver.
+#
+# Base-SHA binding for ordinary Codex evidence (CWE-345 remediation):
+#   Commits landing on the SAME base branch create no base_ref_changed
+#   timeline event, so binding review evidence to the head SHA alone let a
+#   review stay valid after the base advanced. Ordinary review evidence is
+#   now bound to the exact (headSha, baseTipSha) pair, where baseTipSha is the
+#   LIVE tip of the PR's base branch (repos.getBranch; pr.base.sha can lag).
+#   A review/summary counts only if it post-dates reviewNotBeforeMs:
+#     reviewNotBeforeMs = max(
+#       last base_ref_changed event,
+#       committer/author date of baseTipSha        (forgeable; lower bound),
+#       latest push/merge activity whose `after` is baseTipSha
+#                                                  (server timestamp),
+#       earliest time a prior review-gate check on this head observed a
+#       DIFFERENT tip for the same base ref        (server completed_at))
+#   Every bound only ever moves reviewNotBeforeMs later (stricter). The base
+#   tip or its commit date being unreadable throws, which fails the gate
+#   closed. If the tip moves between the first evaluation and the
+#   pre-publish re-check, the gate fails closed ("Base moved"). Every
+#   completed verdict embeds a `review-gate-binding` attestation of
+#   {pr, head, base_ref, base (live tip), pr_base, observed_at} so the
+#   evidence/(head, base) pairing is auditable and feeds the
+#   prior-observation bound above. Pushes to main (the protected default
+#   branch) re-run the gate so a success recorded against an older base is
+#   replaced promptly; the 10-minute schedule covers other base branches.
 #
 # A check run belongs to a commit, not a PR, so the verdict for a SHA is
 # success only if EVERY open PR whose head is that SHA passes. Immediately
@@ -59,7 +86,8 @@
 # evaluated. The workflow never checks out or executes PR content. Codex
 # reviews (and review dismissals) are picked up by the 10-minute schedule, the
 # next PR comment, or a manual workflow_dispatch. Base retargets re-run via
-# the `edited` action.
+# the `edited` action. Base-branch advances re-run via `push` to main, which
+# executes the default-branch copy of this file.
 #
 # Residual risk (GitHub platform limit): any other workflow that runs from PR
 # code with `checks: write` can also create a check run named `review-gate`
@@ -73,6 +101,8 @@ on:
     types: [opened, synchronize, reopened, ready_for_review, labeled, unlabeled, edited]
   issue_comment:
     types: [created]
+  push:
+    branches: [main]
   check_suite:
     types: [completed]
   schedule:
@@ -102,13 +132,14 @@ jobs:
       github.event_name == 'workflow_dispatch' ||
       github.event_name == 'schedule' ||
       github.event_name == 'check_suite' ||
+      github.event_name == 'push' ||
       (github.event_name == 'issue_comment' && github.event.issue.pull_request != null)
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
       - name: Mark review-gate pending
         id: pending
-        uses: actions/github-script@v7
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7.1.0
         with:
           script: |
             const CHECK_NAME = 'review-gate';
@@ -137,7 +168,7 @@ jobs:
 
       - name: Evaluate and publish review-gate
         id: gate
-        uses: actions/github-script@v7
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7.1.0
         env:
           PENDING_SHA: ${{ steps.pending.outputs.sha }}
           PENDING_CHECK_ID: ${{ steps.pending.outputs.check_id }}
@@ -222,6 +253,180 @@ jobs:
                 att.base_ref === expected.baseRef &&
                 att.label_event_id === expected.labelEventId &&
                 WAIVER_ACTORS.has(att.actor);
+            }
+
+            // ---------------------------------------------------------------
+            // Base-SHA binding (see header comment). Ordinary Codex evidence
+            // must be provably newer than the CURRENT base-branch tip, not
+            // just newer than the last base_ref_changed event: pushes/merges
+            // to the same base branch create no timeline event.
+            // ---------------------------------------------------------------
+            const BINDING_PREFIX = '<!-- review-gate-binding:';
+            const BINDING_SUFFIX = ' -->';
+
+            function parseTimeMs(value) {
+              if (typeof value !== 'string' || value === '') return NaN;
+              return Date.parse(value);
+            }
+
+            function encodeBaseBinding(b) {
+              return BINDING_PREFIX + JSON.stringify({
+                pr: Number(b.pr),
+                head: String(b.head).toLowerCase(),
+                base_ref: String(b.baseRef),
+                base: String(b.baseTipSha).toLowerCase(),
+                pr_base: String(b.prBaseSha).toLowerCase(),
+                review_not_before: new Date(b.reviewNotBeforeMs).toISOString(),
+                observed_at: String(b.observedAt),
+              }) + BINDING_SUFFIX;
+            }
+
+            // Every binding attestation in a check summary (a summary covers
+            // all open PRs sharing the head, so there may be several).
+            function parseBaseBindings(summary) {
+              const out = [];
+              if (typeof summary !== 'string' || summary.length > 65535) return out;
+              let from = 0;
+              while (out.length < 100) {
+                const start = summary.indexOf(BINDING_PREFIX, from);
+                if (start < 0) break;
+                const jsonStart = start + BINDING_PREFIX.length;
+                const end = summary.indexOf(BINDING_SUFFIX, jsonStart);
+                if (end < 0 || end - jsonStart > 2000) break;
+                from = end + BINDING_SUFFIX.length;
+                try {
+                  const b = JSON.parse(summary.slice(jsonStart, end));
+                  if (!b || typeof b !== 'object') continue;
+                  if (!isFullSha(b.head) || !isFullSha(b.base) || !b.base_ref) continue;
+                  out.push({
+                    pr: Number(b.pr),
+                    head: String(b.head).toLowerCase(),
+                    base: String(b.base).toLowerCase(),
+                    base_ref: String(b.base_ref),
+                    observed_at: String(b.observed_at || ''),
+                  });
+                } catch {
+                  // malformed attestation: ignore it (it can only loosen nothing)
+                }
+              }
+              return out;
+            }
+
+            // Server-side timestamp of the push/merge that made tipSha the
+            // tip of baseRef (repository activity API). Best effort: an
+            // unavailable or truncated activity feed only drops this one
+            // bound; the commit-date and prior-observation bounds remain.
+            async function baseTipActivityMs(baseRef, tipSha) {
+              try {
+                const { data } = await github.request('GET /repos/{owner}/{repo}/activity', {
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  ref: `refs/heads/${baseRef}`,
+                  per_page: 100,
+                });
+                if (!Array.isArray(data)) return { ms: 0, source: 'activity-unexpected' };
+                let ms = 0;
+                for (const item of data) {
+                  if (!item || typeof item.after !== 'string') continue;
+                  if (item.after.toLowerCase() !== tipSha.toLowerCase()) continue;
+                  const t = parseTimeMs(item.timestamp);
+                  if (Number.isFinite(t)) ms = Math.max(ms, t);
+                }
+                return { ms, source: ms ? 'activity' : 'activity-no-match' };
+              } catch (err) {
+                core.warning(`repository activity for ${baseRef} unavailable: ${err && err.message ? err.message : err}`);
+                return { ms: 0, source: 'activity-unavailable' };
+              }
+            }
+
+            // Latest server time at which an earlier review-gate run on this
+            // head observed a DIFFERENT tip for baseRef. The current tip must
+            // have become the tip after that run started, so evidence older
+            // than this cannot be about the current base. Uses the check
+            // run's server-set started_at, never a client-supplied time.
+            async function priorDifferentBaseObservationMs(headSha, baseRef, tipSha) {
+              const runs = await github.paginate(github.rest.checks.listForRef, {
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                ref: headSha,
+                check_name: CHECK_NAME,
+                filter: 'all',
+                per_page: 100,
+              });
+              let ms = 0;
+              for (const run of runs) {
+                if (!(run.app && run.app.slug === 'github-actions')) continue;
+                const startedMs = parseTimeMs(run.started_at);
+                const completedMs = parseTimeMs(run.completed_at);
+                for (const b of parseBaseBindings((run.output && run.output.summary) || '')) {
+                  if (b.base_ref !== baseRef || b.head !== headSha.toLowerCase()) continue;
+                  if (b.base === tipSha.toLowerCase()) continue;
+                  // The old tip was observed at observed_at, which must lie in
+                  // the run's server-side [started_at, completed_at] window;
+                  // otherwise use completed_at (the later, stricter bound).
+                  let t = parseTimeMs(b.observed_at);
+                  if (!(Number.isFinite(t) && Number.isFinite(startedMs) && t >= startedMs &&
+                        (!Number.isFinite(completedMs) || t <= completedMs))) {
+                    t = Number.isFinite(completedMs) ? completedMs : startedMs;
+                  }
+                  if (Number.isFinite(t)) ms = Math.max(ms, t);
+                }
+              }
+              return ms;
+            }
+
+            // Resolve the exact base this evaluation binds to and the earliest
+            // instant ordinary Codex evidence may carry. Throws (=> gate fails
+            // closed) when the base tip or its commit date cannot be read.
+            async function currentBaseBinding(prNumber, headSha, baseRef, prBaseSha, timelineBaseChangedMs) {
+              // Captured BEFORE the branch read: the tip read below was the tip
+              // at some instant >= observedAt, so any later tip became current
+              // strictly after observedAt (used by priorDifferentBaseObservationMs).
+              const observedAt = new Date().toISOString();
+              const { data: branch } = await github.rest.repos.getBranch({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                branch: baseRef,
+              });
+              const baseTipSha = branch && branch.commit && branch.commit.sha;
+              if (!isFullSha(baseTipSha)) {
+                throw new Error(`PR #${prNumber} base branch ${baseRef} tip is not a full SHA: ${baseTipSha}`);
+              }
+              const tipCommit = (branch.commit && branch.commit.commit) || {};
+              const committerMs = parseTimeMs(tipCommit.committer && tipCommit.committer.date);
+              const authorMs = parseTimeMs(tipCommit.author && tipCommit.author.date);
+              if (!Number.isFinite(committerMs)) {
+                throw new Error(`PR #${prNumber} base tip ${baseTipSha} has no readable committer date; refusing to bind review evidence`);
+              }
+              const commitDateMs = Math.max(committerMs, Number.isFinite(authorMs) ? authorMs : 0);
+              const activity = await baseTipActivityMs(baseRef, baseTipSha);
+              const observedDifferentMs = await priorDifferentBaseObservationMs(headSha, baseRef, baseTipSha);
+              const reviewNotBeforeMs = Math.max(
+                Number.isFinite(timelineBaseChangedMs) ? timelineBaseChangedMs : 0,
+                commitDateMs,
+                activity.ms,
+                observedDifferentMs,
+              );
+              if (!Number.isFinite(reviewNotBeforeMs) || reviewNotBeforeMs <= 0) {
+                throw new Error(`PR #${prNumber} could not establish when base ${baseTipSha} became current`);
+              }
+              return {
+                pr: prNumber,
+                head: headSha,
+                baseRef,
+                baseTipSha: baseTipSha.toLowerCase(),
+                prBaseSha,
+                reviewNotBeforeMs,
+                activitySource: activity.source,
+                observedAt,
+              };
+            }
+
+            // Ordinary Codex evidence counts only if its server timestamp is
+            // strictly after the bound computed for the CURRENT base tip.
+            function postDatesCurrentBase(timestamp, baseBinding) {
+              const t = parseTimeMs(timestamp);
+              return Number.isFinite(t) && t > baseBinding.reviewNotBeforeMs;
             }
 
             const pendingBySha = new Map();
@@ -390,6 +595,9 @@ jobs:
               await ensurePending(headSha);
               const labels = (pr.labels || []).map(l => l.name);
               const { baseChangedMs, lastWaiverEvent } = await timelineFacts(prNumber);
+              // Bind ordinary review evidence to the exact current base tip.
+              // Throws (fail-closed) if the base tip cannot be established.
+              const baseBinding = await currentBaseBinding(prNumber, headSha, baseRef, baseSha, baseChangedMs);
 
               if (labels.includes(WAIVE_LABEL)) {
                 const payload = context.payload;
@@ -422,7 +630,7 @@ jobs:
                       actor: sender,
                     };
                     return {
-                      prNumber, headSha, baseSha, baseRef, baseChangedMs: labeled.baseChangedMs,
+                      prNumber, headSha, baseSha, baseRef, baseChangedMs: labeled.baseChangedMs, baseBinding,
                       conclusion: 'success',
                       title: 'Codex waived',
                       summary: `Label \`${WAIVE_LABEL}\` applied by @${sender} on head \`${headSha}\` for PR #${prNumber} (base \`${baseRef}\` \`${baseSha}\`). ` +
@@ -450,7 +658,7 @@ jobs:
                     })
                   ) {
                     return {
-                      prNumber, headSha, baseSha, baseRef, baseChangedMs,
+                      prNumber, headSha, baseSha, baseRef, baseChangedMs, baseBinding,
                       conclusion: 'success',
                       title: 'Codex waived',
                       summary: `Waiver previously recorded for PR #${prNumber} head \`${headSha}\` (base \`${baseRef}\` \`${baseSha}\`, label event ${labelId}).`,
@@ -461,7 +669,7 @@ jobs:
               }
               if (pr.draft) {
                 return {
-                  prNumber, headSha, baseSha, baseRef, baseChangedMs,
+                  prNumber, headSha, baseSha, baseRef, baseChangedMs, baseBinding,
                   conclusion: 'failure',
                   title: 'Draft PR',
                   summary: 'Draft PRs stay blocked; mark ready for review and wait for Codex on the head.',
@@ -483,11 +691,14 @@ jobs:
               const dismissedOnHead = reviews.filter(review =>
                 reviewOnHead(review) && review.state === 'DISMISSED'
               );
+              // Ordinary acceptance binds (headSha, baseBinding.baseTipSha):
+              // commit_id must equal the head and submitted_at must post-date
+              // the moment the current base tip became current.
               const codexOnHead = reviews.filter(review =>
                 reviewOnHead(review) &&
                 review.state !== 'DISMISSED' &&
                 review.state !== 'PENDING' &&
-                Date.parse(review.submitted_at || 0) > baseChangedMs
+                postDatesCurrentBase(review.submitted_at, baseBinding)
               );
 
               const comments = await github.paginate(github.rest.issues.listComments, {
@@ -507,7 +718,7 @@ jobs:
               const cleanPassOnHead = dismissedOnHead.length === 0 && comments.some(comment => {
                 const body = comment.body || '';
                 if (!isCodexUser(comment.user) || !body.includes(SUMMARY_MARKER)) return false;
-                if (!(Date.parse(comment.updated_at || comment.created_at || 0) > baseChangedMs)) return false;
+                if (!postDatesCurrentBase(comment.updated_at || comment.created_at || '', baseBinding)) return false;
                 const row = /^\|[^|\n]*\bCode Review\b[^|\n]*\|[^|\n]*\bCompleted\b[^|\n]*\|\s*`([0-9a-f]{40})`\s*\|/gim;
                 let match;
                 while ((match = row.exec(body)) !== null) {
@@ -518,18 +729,19 @@ jobs:
 
               if (codexOnHead.length > 0 || cleanPassOnHead) {
                 return {
-                  prNumber, headSha, baseSha, baseRef, baseChangedMs,
+                  prNumber, headSha, baseSha, baseRef, baseChangedMs, baseBinding,
                   conclusion: 'success',
                   title: 'Codex reviewed head',
-                  summary: codexOnHead.length > 0
-                    ? `chatgpt-codex-connector reviewed \`${headSha}\` (${codexOnHead.length} review(s)).`
-                    : `chatgpt-codex-connector completed a clean review of \`${headSha}\` (no findings).`,
+                  summary: (codexOnHead.length > 0
+                    ? `chatgpt-codex-connector reviewed \`${headSha}\` (${codexOnHead.length} review(s))`
+                    : `chatgpt-codex-connector completed a clean review of \`${headSha}\` (no findings)`) +
+                    ` after base \`${baseRef}\` tip \`${baseBinding.baseTipSha}\` became current.`,
                 };
               }
 
               if (usageLimited) {
                 return {
-                  prNumber, headSha, baseSha, baseRef, baseChangedMs,
+                  prNumber, headSha, baseSha, baseRef, baseChangedMs, baseBinding,
                   conclusion: 'failure',
                   title: 'Codex unavailable (usage limit)',
                   summary: `Codex hit usage limits and has not reviewed \`${headSha}\`. ` +
@@ -538,11 +750,12 @@ jobs:
               }
 
               return {
-                prNumber, headSha, baseSha, baseRef, baseChangedMs,
+                prNumber, headSha, baseSha, baseRef, baseChangedMs, baseBinding,
                 conclusion: 'failure',
                 title: 'Waiting for Codex on head',
-                summary: `No chatgpt-codex-connector review on \`${headSha}\` yet. ` +
-                  `CI alone is not enough. Gate stays red until Codex finishes or \`${WAIVE_LABEL}\` is applied.`,
+                summary: `No chatgpt-codex-connector review on \`${headSha}\` newer than base \`${baseRef}\` tip \`${baseBinding.baseTipSha}\`. ` +
+                  `CI alone is not enough, and a review from before the base advanced does not count. ` +
+                  `Gate stays red until Codex re-reviews against the current base or \`${WAIVE_LABEL}\` is applied.`,
               };
             }
 
@@ -552,6 +765,32 @@ jobs:
 
             function sortedNumbers(values) {
               return [...values].sort((a, b) => a - b);
+            }
+
+            function baseTipsByPr(results) {
+              const m = new Map();
+              for (const r of results) {
+                m.set(r.prNumber, r.baseBinding ? `${r.baseBinding.baseRef}@${r.baseBinding.baseTipSha}` : '');
+              }
+              return m;
+            }
+
+            // True when any PR's (base_ref, base tip) differs between the two
+            // evaluations, or a binding is missing. Missing => treated as moved.
+            function baseMovedBetween(before, after) {
+              const a = baseTipsByPr(before);
+              const b = baseTipsByPr(after);
+              for (const [pr, tip] of b) {
+                if (!tip || !a.has(pr) || a.get(pr) !== tip) return true;
+              }
+              return false;
+            }
+
+            function bindingAttestations(results) {
+              return results
+                .filter(r => r.baseBinding)
+                .map(r => encodeBaseBinding(r.baseBinding))
+                .join('\n');
             }
 
             async function recheckEvidenceAndSharers(headSha) {
@@ -632,6 +871,20 @@ jobs:
                     );
                     continue;
                   }
+                  // Base-SHA binding: the base tip each PR was judged against
+                  // must not move between evaluation and the pre-publish
+                  // re-check. Any movement fails closed.
+                  if (baseMovedBetween(results, pass.results)) {
+                    const rec = await ensurePending(headSha);
+                    await completeCheck(
+                      rec.id,
+                      'failure',
+                      'Base moved',
+                      `The base branch tip for a PR sharing \`${headSha}\` moved during evaluation. Fail-closed; the next run re-binds to the new base.\n\n` +
+                        bindingAttestations(results) + '\n' + bindingAttestations(pass.results),
+                    );
+                    continue;
+                  }
                   publishedResults = pass.results;
                   failing = pass.results.find(result => result.conclusion !== 'success');
                   verdict = failing || pass.results[0] || verdict;
@@ -651,7 +904,8 @@ jobs:
                   verdict.conclusion,
                   verdict.title,
                   (failing && failing.prNumber !== n
-                    ? `Blocked by PR #${failing.prNumber} (same head): ` : '') + verdict.summary + extra,
+                    ? `Blocked by PR #${failing.prNumber} (same head): ` : '') + verdict.summary + extra +
+                    '\n\n' + bindingAttestations(publishedResults),
                 );
                 core.info(`${headSha} -> ${verdict.conclusion}: ${verdict.title}`);
               }
@@ -663,7 +917,7 @@ jobs:
 
       - name: Fail-close review-gate on error
         if: failure()
-        uses: actions/github-script@v7
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7.1.0
         env:
           PENDING_SHA: ${{ steps.pending.outputs.sha }}
           PENDING_CHECK_ID: ${{ steps.pending.outputs.check_id }}
