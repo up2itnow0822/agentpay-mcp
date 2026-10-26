@@ -37,6 +37,7 @@ import {
   printWalletStatus,
   PaymentAwareError,
   settledPaymentAmount,
+  approveProbedPayment,
 } from './shared/x402-client.js';
 import { PolicyGuard, PolicyError } from './shared/spending-policy.js';
 import { FileCache } from './shared/cache.js';
@@ -61,6 +62,12 @@ import {
 
 const DAILY_CAP_USD = parseFloat(process.env['DAILY_CAP_USD'] ?? '5.00');
 const MAX_COST_USD = parseFloat(process.env['MAX_COST_USD'] ?? '2.00');
+/**
+ * Hard ceiling for the paid sentiment step, as an exact USD decimal string.
+ * It is the amount shown in the approved plan; the probed and final 402 offers
+ * must not exceed it.
+ */
+const MARKET_SENTIMENT_CAP_USD = '0.01';
 
 // ─── Task Step types ─────────────────────────────────────────────────────────
 
@@ -182,7 +189,7 @@ function buildPlan(taskDescription: string, hasPaidCapability: boolean): TaskPla
       name: 'Market Sentiment Analysis (x402)',
       description: `Premium market sentiment data from ${getDemoEndpointUrl()}`,
       isFree: false,
-      estimatedCostUsd: 0.01,
+      estimatedCostUsd: Number(MARKET_SENTIMENT_CAP_USD), // display only
     });
   }
 
@@ -375,12 +382,16 @@ const stepExecutors: Record<string, StepExecutor> = {
       };
     }
 
+    // Bind the verified USDC offer into a single-use approval capped at the
+    // amount shown in the approved plan. Unknown assets/networks throw here.
+    const approval = approveProbedPayment(probe, MARKET_SENTIMENT_CAP_USD);
+
     let result;
     try {
       result = await withRetry(
         () =>
           fetchWithPayment(ctx.wallet!, endpointUrl, {
-            maxPaymentUsd: step.estimatedCostUsd * 1.5,
+            approval,
             callbacks: {
               onPaymentComplete: (amt) => {
                 step.actualCostUsd = amt;

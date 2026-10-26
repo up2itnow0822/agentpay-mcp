@@ -182,6 +182,8 @@ export function usdcToUsd(usdcAmount: bigint): number {
 
 /**
  * Convert USD float to USDC units (6 decimals).
+ * Display/estimation only — payment caps use the exact string parser
+ * usdToUsdcBaseUnits() in usdc-approval.ts.
  */
 export function usdToUsdc(usd: number): bigint {
   return BigInt(Math.round(usd * 1_000_000));
@@ -191,6 +193,8 @@ export function usdToUsdc(usd: number): bigint {
  * Parse a payment amount from an x402 WWW-Authenticate header.
  * Header format: X402-Payment amount=<units>, token=<addr>, ...
  * Returns USD equivalent (assumes USDC-like 6-decimal token unless otherwise noted).
+ * Legacy display helper: it does not verify the asset, so never use it to
+ * authorize a payment. Payment offers go through selectUsdcOffer().
  */
 export function parsePaymentAmountUsd(wwwAuthenticate: string): number | null {
   const match = wwwAuthenticate.match(/amount=(\d+)/);

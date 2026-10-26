@@ -40,6 +40,7 @@ import {
   sleep,
   PaymentAwareError,
   settledPaymentAmount,
+  approveProbedPayment,
 } from './shared/x402-client.js';
 import { PolicyGuard, PolicyError } from './shared/spending-policy.js';
 import { FileCache } from './shared/cache.js';
@@ -65,6 +66,12 @@ import {
 
 const DAILY_CAP_USD = parseFloat(process.env['DAILY_CAP_USD'] ?? '5.00');
 const REPORTS_DIR = process.env['REPORTS_DIR'] ?? './reports';
+/**
+ * Hard ceiling for the paid sentiment source, as an exact USD decimal string.
+ * This is the amount shown in the plan the user approves; the probed and final
+ * 402 offers must not exceed it.
+ */
+const SENTIMENT_CAP_USD = '0.01';
 
 // ─── CLI Parsing ────────────────────────────────────────────────────────────
 
@@ -349,7 +356,6 @@ async function fetchPaidSentimentAnalysis(
   wallet: ReturnType<typeof createScriptWallet>
 ): Promise<ResearchSection> {
   const endpointUrl = getDemoEndpointUrl();
-  const costUsd = 0.01;
 
   if (isMockMode()) {
     const mockData = JSON.parse(getMockSentimentData(topic));
@@ -366,11 +372,16 @@ async function fetchPaidSentimentAnalysis(
     };
   }
 
+  // Probe first, then bind the verified USDC offer into a single-use approval
+  // capped at the amount the user approved in the plan.
+  const probe = await probeEndpoint(endpointUrl);
+  if (!probe) {
+    throw new Error(`${endpointUrl} did not return an x402 challenge (unreachable or not gated); not paying`);
+  }
+  const approval = approveProbedPayment(probe, SENTIMENT_CAP_USD);
+
   const result = await withRetry(
-    () =>
-      fetchWithPayment(wallet, endpointUrl, {
-        maxPaymentUsd: costUsd * 1.5,
-      }),
+    () => fetchWithPayment(wallet, endpointUrl, { approval }),
     { maxAttempts: 2, initialDelayMs: 1000, maxDelayMs: 5000 }
   );
 
@@ -422,7 +433,7 @@ function identifyGaps(sections: ResearchSection[], topic: string): ResearchGap[]
       title: 'Market Sentiment Analysis',
       reason: 'No quantitative sentiment data gathered from free sources',
       paidSourceName: 'x402 Premium Data API',
-      estimatedCostUsd: 0.01,
+      estimatedCostUsd: Number(SENTIMENT_CAP_USD), // display only; enforced cap is the string
     });
   }
 
