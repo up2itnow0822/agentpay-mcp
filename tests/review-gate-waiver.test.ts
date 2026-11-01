@@ -77,10 +77,18 @@ function world(opts: {
   prCommits?: string[]
   comments?: unknown[]
   extraTimeline?: unknown[]
+  /** GraphQL comment-edit query throws (edit provenance unprovable). */
+  commentGraphqlError?: boolean
 }) {
   const waived = opts.waived ?? true
   const runs: Run[] = [...opts.priorRuns]
   let nextId = 5000
+  const issueComments = (opts.comments ?? []).map((raw, i) => {
+    const c = { ...(raw as Record<string, unknown>) }
+    if (typeof c.id !== 'number') c.id = 8000 + i
+    if (typeof c.node_id !== 'string') c.node_id = `IC_kw_test_${c.id}`
+    return c
+  })
   const pr = {
     number: 90,
     draft: false,
@@ -144,13 +152,49 @@ function world(opts: {
       if (fn === list.pulls) return [pr]
       if (fn === list.reviews) return opts.reviews ?? []
       if (fn === list.timeline) return timeline
-      if (fn === list.comments) return opts.comments ?? []
+      if (fn === list.comments) return issueComments
       if (fn === list.commits) return (opts.prCommits ?? [H]).map((sha) => ({ sha }))
       if (fn === list.checks) return runs.filter((r) => r.head_sha === params.ref && r.name === params.check_name)
       throw new Error('unexpected paginate target')
     },
-    graphql: async () => {
+    graphql: async (query?: string) => {
       if (opts.graphqlError) throw new Error('GraphQL unavailable')
+      if (typeof query === 'string' && (query.includes('lastEditedAt') || query.includes('userContentEdits'))) {
+        if (opts.commentGraphqlError) throw new Error('comment edits unavailable')
+        return {
+          repository: {
+            pullRequest: {
+              comments: {
+                pageInfo: { hasNextPage: false, endCursor: null },
+                nodes: issueComments
+                  .filter((c) => {
+                    const edits = c.edits as { missing?: boolean } | undefined
+                    return !edits || edits.missing !== true
+                  })
+                  .map((c) => {
+                    const edits = (c.edits && typeof c.edits === 'object' ? c.edits : {}) as {
+                      lastEditedAt?: string | null
+                      editor?: { login: string; __typename: string } | null
+                      userContentEdits?: Array<{ login: string; __typename: string } | null>
+                      editsHasNextPage?: boolean
+                    }
+                    return {
+                      databaseId: c.id,
+                      lastEditedAt: edits.lastEditedAt ?? null,
+                      editor: edits.editor ?? null,
+                      userContentEdits: {
+                        pageInfo: { hasNextPage: edits.editsHasNextPage ?? false, endCursor: null },
+                        nodes: (edits.userContentEdits ?? []).map((e) => ({
+                          editor: e,
+                        })),
+                      },
+                    }
+                  }),
+              },
+            },
+          },
+        }
+      }
       return {
         repository: {
           pullRequest: {
@@ -401,11 +445,11 @@ describe('review-gate: clean pass via hidden codex-review-state:v1 block', () =>
   const base = { tip: Y, tipAt: T(22), prBase: Y, labelId: '0', labeledAt: T(1), activity: ACTIVITY, priorRuns: [], waived: false }
   const CODEX = { login: 'chatgpt-codex-connector[bot]', type: 'Bot' } as const
 
-  const stateBlock = (cr: Record<string, unknown>) =>
+  const stateBlock = (cr: Record<string, unknown>, sr?: Record<string, unknown>) =>
     '<!-- codex-review-state:v1 ' +
     JSON.stringify({
       code_review: cr,
-      security_review: { commit_sha: null, has_any_findings: null, has_unresolved_findings: null, status: null },
+      security_review: sr ?? { commit_sha: null, has_any_findings: null, has_unresolved_findings: null, status: null },
     }) +
     ' -->'
 
@@ -423,16 +467,38 @@ describe('review-gate: clean pass via hidden codex-review-state:v1 block', () =>
     tableSha?: string
     user?: { login: string; type: string }
     at?: string
+    created_at?: string
+    updated_at?: string
+    reviewedAt?: string
     body?: string
+    edits?: {
+      lastEditedAt?: string | null
+      editor?: { login: string; __typename: string } | null
+      userContentEdits?: Array<{ login: string; __typename: string } | null>
+      editsHasNextPage?: boolean
+      missing?: boolean
+    }
   } = {}) => ({
     user: opts.user ?? CODEX,
     body:
       opts.body ??
       `<!-- codex-pull-request-review-summary -->\n${opts.state ?? ''}\n` +
         '| Review | Status | Commit | Review trigger |\n| --- | --- | --- |\n' +
-        `| Code Review | Completed | \`${opts.tableSha ?? SHORT}\` | Manual |\n`,
-    created_at: opts.at ?? T(23),
-    updated_at: opts.at ?? T(23),
+        `| Code Review | Completed${
+          opts.reviewedAt
+            ? ` <relative-time datetime="${opts.reviewedAt}">${opts.reviewedAt}</relative-time>`
+            : ''
+        } | \`${opts.tableSha ?? SHORT}\` | Manual |\n`,
+    created_at: opts.created_at ?? opts.at ?? T(23),
+    updated_at: opts.updated_at ?? opts.at ?? T(23),
+    ...(opts.edits ? { edits: opts.edits } : {}),
+  })
+
+  const CODEX_BOT_EDITOR = { login: 'chatgpt-codex-connector[bot]', __typename: 'Bot' } as const
+  const CODEX_ONLY_EDITS = (at: string) => ({
+    lastEditedAt: at,
+    editor: CODEX_BOT_EDITOR,
+    userContentEdits: [CODEX_BOT_EDITOR],
   })
 
   it('(1) GREEN: state block with full head SHA, completed, no unresolved findings', async () => {
@@ -553,5 +619,143 @@ describe('review-gate: clean pass via hidden codex-review-state:v1 block', () =>
     await run(w.github, PUSH, w.core)
     expect(published(w.runs)!.conclusion).toBe('success')
     expect(published(w.runs)!.output.title).toBe('Codex reviewed PR')
+  })
+
+  it('(10) RED: an edit by a non-Codex user is not a clean pass', async () => {
+    const w = world({
+      ...base,
+      prCommits: [P1, H],
+      comments: [summaryComment({
+        state: cleanState(),
+        tableSha: SHORT,
+        edits: {
+          lastEditedAt: T(23, 2),
+          editor: { login: 'up2itnow0822', __typename: 'User' },
+          userContentEdits: [{ login: 'up2itnow0822', __typename: 'User' }],
+        },
+      })],
+    })
+    await run(w.github, PUSH, w.core)
+    expect(published(w.runs)!.conclusion).toBe('failure')
+    expect(published(w.runs)!.output.title).toBe('Waiting for Codex review')
+  })
+
+  it('(11) RED: a short SHA inside the JSON state block is never accepted', async () => {
+    const w = world({
+      ...base,
+      prCommits: [P1, H],
+      comments: [summaryComment({ state: cleanState({ commit_sha: SHORT }), tableSha: SHORT })],
+    })
+    await run(w.github, PUSH, w.core)
+    expect(published(w.runs)!.conclusion).toBe('failure')
+    expect(published(w.runs)!.output.title).toBe('Waiting for Codex review')
+  })
+
+  it('(12) RED: a state block without the summary marker is not evidence', async () => {
+    const w = world({
+      ...base,
+      prCommits: [P1, H],
+      comments: [{
+        user: CODEX,
+        body: `${cleanState()}\n| Review | Status | Commit |\n| --- | --- | --- |\n| Code Review | Completed | \`${SHORT}\` |\n`,
+        created_at: T(23),
+        updated_at: T(23),
+      }],
+    })
+    await run(w.github, PUSH, w.core)
+    expect(published(w.runs)!.conclusion).toBe('failure')
+    expect(published(w.runs)!.output.title).toBe('Waiting for Codex review')
+  })
+
+  it('(13) RED: the Codex login with a non-Bot account type does not count', async () => {
+    const w = world({
+      ...base,
+      prCommits: [P1, H],
+      comments: [summaryComment({
+        state: cleanState(),
+        tableSha: SHORT,
+        user: { login: 'chatgpt-codex-connector[bot]', type: 'User' },
+      })],
+    })
+    await run(w.github, PUSH, w.core)
+    expect(published(w.runs)!.conclusion).toBe('failure')
+    expect(published(w.runs)!.output.title).toBe('Waiting for Codex review')
+  })
+
+  it('(14) created_at and updated_at varied independently are not freshness proof', async () => {
+    // No retarget: independently dated timestamps still pass when the state
+    // block itself is a clean review of this head.
+    const ok = world({
+      ...base,
+      prCommits: [P1, H],
+      comments: [summaryComment({
+        state: cleanState(),
+        tableSha: SHORT,
+        created_at: T(20),
+        updated_at: T(25),
+      })],
+    })
+    await run(ok.github, PUSH, ok.core)
+    expect(published(ok.runs)!.conclusion).toBe('success')
+    expect(published(ok.runs)!.output.title).toBe('Codex reviewed PR')
+
+    // Retarget in between: a later updated_at without a code-review
+    // relative-time stays RED (updated_at is not proof of a fresh review).
+    const stale = world({
+      ...base,
+      prCommits: [P1, H],
+      comments: [summaryComment({
+        state: cleanState(),
+        tableSha: SHORT,
+        created_at: T(20),
+        updated_at: T(25),
+      })],
+      extraTimeline: [{ event: 'base_ref_changed', created_at: T(24) }],
+    })
+    await run(stale.github, PUSH, stale.core)
+    expect(published(stale.runs)!.conclusion).toBe('failure')
+    expect(published(stale.runs)!.output.title).toBe('Waiting for Codex review')
+  })
+
+  it('(15) RED: a retarget followed by an edit that only changes security_review', async () => {
+    const w = world({
+      ...base,
+      prCommits: [P1, H],
+      comments: [summaryComment({
+        state: stateBlock(
+          { commit_sha: H, has_any_findings: false, has_unresolved_findings: false, status: 'completed' },
+          { commit_sha: H, has_any_findings: false, has_unresolved_findings: false, status: 'completed' },
+        ),
+        tableSha: SHORT,
+        created_at: T(23),
+        updated_at: T(25),
+        reviewedAt: T(23),
+        edits: CODEX_ONLY_EDITS(T(25)),
+      })],
+      extraTimeline: [{ event: 'base_ref_changed', created_at: T(24) }],
+    })
+    await run(w.github, PUSH, w.core)
+    expect(published(w.runs)!.conclusion).toBe('failure')
+    expect(published(w.runs)!.output.title).toBe('Waiting for Codex review')
+  })
+
+  it('(16) GREEN: a retarget followed by a fresh Codex code review', async () => {
+    const w = world({
+      ...base,
+      prCommits: [P1, H],
+      comments: [summaryComment({
+        state: cleanState(),
+        tableSha: SHORT,
+        created_at: T(23),
+        updated_at: T(25),
+        reviewedAt: T(25),
+        edits: CODEX_ONLY_EDITS(T(25)),
+      })],
+      extraTimeline: [{ event: 'base_ref_changed', created_at: T(24) }],
+    })
+    await run(w.github, PUSH, w.core)
+    expect(published(w.runs)!.conclusion).toBe('success')
+    expect(published(w.runs)!.output.title).toBe('Codex reviewed PR')
+    expect(published(w.runs)!.output.summary).toMatch(/clean review/)
   })
 })

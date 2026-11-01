@@ -21,10 +21,16 @@
 #      parseable hidden `<!-- codex-review-state:v1 ... -->` block whose
 #      code_review.status is completed, code_review.commit_sha is this full
 #      40-hex head SHA, and code_review.has_unresolved_findings is false;
-#      that no dismissed Codex review covers; in both cases newer than the
-#      PR's most recent base_ref_changed event (a retarget needs a new
-#      review; the summary is edited in place, so the state-block path uses
-#      updated_at). Short SHAs are never accepted. Receipt comments
+#      that no dismissed Codex review covers. Freshness is bound to the
+#      code review, not comment.updated_at (Codex rewrites the shared
+#      summary for security_review and other reasons): a Code Review row
+#      <relative-time datetime> later than the last retarget, or — if that
+#      timestamp is absent — only when there is no base_ref_changed event
+#      after the head (none exists). Ambiguous freshness fails closed.
+#      The comment must be unedited, or every GraphQL editor (lastEditedAt,
+#      editor, userContentEdits) must be chatgpt-codex-connector with Bot
+#      type; unprovable edits fail closed. Same edit check applies to the
+#      legacy table path. Short SHAs are never accepted. Receipt comments
 #      (codex-review-receipt:v1) are not evidence. AND zero review threads
 #      opened by Codex are unresolved (GraphQL reviewThreads; unreadable
 #      threads fail closed).
@@ -233,6 +239,56 @@ jobs:
               } catch {
                 return null;
               }
+            }
+
+            // Code-review-specific time from the Completed Code Review row.
+            // comment.updated_at is not used: Codex rewrites the shared
+            // summary for security_review and other non-code-review reasons.
+            // 0 or >1 Completed rows, or 0 or >1 datetimes in the status
+            // cell, is ambiguous => NaN (caller fails closed).
+            function parseCodeReviewCompletedAt(body) {
+              if (typeof body !== 'string') return NaN;
+              const rowRe = /^\|([^|\n]*\bCode Review\b[^|\n]*)\|([^|\n]*\bCompleted\b[^|\n]*)\|/gim;
+              let found = NaN;
+              let rows = 0;
+              let match;
+              while ((match = rowRe.exec(body)) !== null) {
+                rows++;
+                const times = [];
+                const timeRe = /<relative-time\b[^>]*\bdatetime\s*=\s*["']([^"']+)["']/gi;
+                let tm;
+                while ((tm = timeRe.exec(match[2])) !== null) times.push(tm[1]);
+                if (times.length !== 1) return NaN;
+                const ms = parseTimeMs(times[0]);
+                if (!Number.isFinite(ms)) return NaN;
+                found = ms;
+              }
+              if (rows !== 1) return NaN;
+              return found;
+            }
+
+            function isCodexActor(actor) {
+              return !!actor && actor.__typename === 'Bot' && isCodexLogin(actor.login);
+            }
+
+            // Fail closed unless the comment was never edited, or every
+            // GraphQL editor is the Codex bot. Missing map/id/editor,
+            // truncated history, or a non-Bot / non-Codex editor => false.
+            function commentEditsTrusted(comment, editMap) {
+              if (!editMap || !comment || comment.id == null) return false;
+              const info = editMap.get(String(comment.id));
+              if (!info || info.truncated) return false;
+              const edits = Array.isArray(info.edits) ? info.edits : null;
+              if (!edits) return false;
+              const lastEditedAt = info.lastEditedAt;
+              const editor = info.editor;
+              if (!lastEditedAt && !editor && edits.length === 0) return true;
+              if (!lastEditedAt) return false;
+              if (!isCodexActor(editor)) return false;
+              for (const node of edits) {
+                if (!isCodexActor(node && node.editor)) return false;
+              }
+              return true;
             }
 
             function waiverEventId(event) {
@@ -680,6 +736,61 @@ jobs:
               throw new Error(`PR #${prNumber}: too many review threads to evaluate; refusing to pass`);
             }
 
+            // GraphQL IssueComment lastEditedAt / editor / userContentEdits.
+            // Returns null when the list cannot be proven (error, malformed
+            // payload, too many pages) so the caller stays RED.
+            async function loadIssueCommentEdits(prNumber) {
+              const byId = new Map();
+              let after = null;
+              try {
+                for (let page = 0; page < 20; page++) {
+                  const data = await github.graphql(
+                    `query($owner: String!, $repo: String!, $pr: Int!, $after: String) {
+                      repository(owner: $owner, name: $repo) {
+                        pullRequest(number: $pr) {
+                          comments(first: 100, after: $after) {
+                            pageInfo { hasNextPage endCursor }
+                            nodes {
+                              databaseId
+                              lastEditedAt
+                              editor { __typename login }
+                              userContentEdits(first: 100) {
+                                pageInfo { hasNextPage endCursor }
+                                nodes { editor { __typename login } }
+                              }
+                            }
+                          }
+                        }
+                      }
+                    }`,
+                    { owner: context.repo.owner, repo: context.repo.repo, pr: prNumber, after },
+                  );
+                  const comments = data && data.repository && data.repository.pullRequest &&
+                    data.repository.pullRequest.comments;
+                  if (!comments || !Array.isArray(comments.nodes)) return null;
+                  for (const node of comments.nodes) {
+                    if (!node || node.databaseId == null) return null;
+                    const editsConn = node.userContentEdits;
+                    if (!editsConn || !Array.isArray(editsConn.nodes)) return null;
+                    if (editsConn.pageInfo && editsConn.pageInfo.hasNextPage === true) {
+                      byId.set(String(node.databaseId), { truncated: true });
+                      continue;
+                    }
+                    byId.set(String(node.databaseId), {
+                      lastEditedAt: node.lastEditedAt || null,
+                      editor: node.editor || null,
+                      edits: editsConn.nodes,
+                    });
+                  }
+                  if (!comments.pageInfo || !comments.pageInfo.hasNextPage) return byId;
+                  after = comments.pageInfo.endCursor;
+                }
+                return null;
+              } catch {
+                return null;
+              }
+            }
+
             async function evaluate(prNumber) {
               const { data: pr } = await github.rest.pulls.get({
                 owner: context.repo.owner,
@@ -792,9 +903,13 @@ jobs:
                 per_page: 100,
               });
               // Evidence is a non-dismissed Codex review of THIS head SHA
-              // (or the Codex clean-pass summary for this head), newer than
-              // the last retarget. Reviews of older PR commits do not count.
-              // Every review thread Codex opened must be resolved.
+              // (or the Codex clean-pass summary for this head). A review
+              // object is fresh when submitted_at is after the last retarget.
+              // A summary comment is fresh when its Code Review relative-time
+              // is after the last retarget, or when there is no retarget.
+              // comment.updated_at is never proof the code review is fresh.
+              // Reviews of older PR commits do not count. Every review
+              // thread Codex opened must be resolved.
               const head = headSha.toLowerCase();
               const postDatesRetarget = (timestamp) => {
                 const t = parseTimeMs(timestamp || '');
@@ -829,10 +944,26 @@ jobs:
               // in the visible table; the full SHA is in a hidden
               // `codex-review-state:v1` block. Either attestation is enough.
               // Receipt comments are never evidence. Fail closed: any
-              // parse/field/SHA problem on the state-block path is not a pass.
+              // parse/field/SHA/edit-provenance/freshness problem is not a
+              // pass. Edit history (GraphQL) must prove the body was never
+              // edited by anyone except the Codex bot. Freshness uses the
+              // Code Review row's relative-time, not comment.updated_at.
+              const commentEdits = await loadIssueCommentEdits(prNumber);
+              const codeReviewFreshAgainstRetarget = (body) => {
+                const reviewMs = parseCodeReviewCompletedAt(body);
+                if (Number.isFinite(reviewMs)) return reviewMs > baseChangedMs;
+                // No code-review-specific timestamp: accept only when there
+                // is no base_ref_changed (none can post-date the head).
+                return !(Number.isFinite(baseChangedMs) && baseChangedMs > 0);
+              };
               const cleanPass = comments.some(comment => {
                 const body = comment.body || '';
                 if (!isCodexUser(comment.user) || !body.includes(SUMMARY_MARKER)) return false;
+                if (!commentEditsTrusted(comment, commentEdits)) return false;
+                if (!codeReviewFreshAgainstRetarget(body)) return false;
+                // Necessary (not sufficient) retarget bound kept so a
+                // comment whose own timestamps predate the retarget still
+                // fails; updated_at alone never proves a fresh code review.
                 if (!postDatesRetarget(comment.updated_at || comment.created_at)) return false;
                 try {
                   const cr = parseCodexReviewState(body);
@@ -842,8 +973,7 @@ jobs:
                     cr.has_unresolved_findings === false &&
                     isFullSha(cr.commit_sha) &&
                     String(cr.commit_sha).toLowerCase() === head &&
-                    !dismissedShas.has(String(cr.commit_sha).toLowerCase()) &&
-                    postDatesRetarget(comment.updated_at)
+                    !dismissedShas.has(String(cr.commit_sha).toLowerCase())
                   ) {
                     return true;
                   }
