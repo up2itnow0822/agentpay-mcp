@@ -16,13 +16,18 @@
 #      chatgpt-codex-connector[bot] (user.type == Bot) review whose full
 #      commit SHA equals the PR's current head, or — for a clean pass (Codex
 #      submits no review when it has no findings) — the Codex bot's own
-#      review-summary comment reporting
-#      `Code Review | Completed | <full 40-char SHA>` for this head
+#      review-summary comment reporting either
+#      `Code Review | Completed | <full 40-char SHA>` for this head, or a
+#      parseable hidden `<!-- codex-review-state:v1 ... -->` block whose
+#      code_review.status is completed, code_review.commit_sha is this full
+#      40-hex head SHA, and code_review.has_unresolved_findings is false;
 #      that no dismissed Codex review covers; in both cases newer than the
 #      PR's most recent base_ref_changed event (a retarget needs a new
-#      review). Short SHAs are never accepted. AND zero review threads opened
-#      by Codex are unresolved (GraphQL reviewThreads; unreadable threads
-#      fail closed).
+#      review; the summary is edited in place, so the state-block path uses
+#      updated_at). Short SHAs are never accepted. Receipt comments
+#      (codex-review-receipt:v1) are not evidence. AND zero review threads
+#      opened by Codex are unresolved (GraphQL reviewThreads; unreadable
+#      threads fail closed).
 #   2. Waiver bound to THIS PR's label event and current base: an allow-listed
 #      actor (WAIVER_ACTORS) applied `codex-waived` while this exact head SHA
 #      was current. The labeled event publishes a "Codex waived" check whose
@@ -191,6 +196,8 @@ jobs:
             const WAIVER_ACTORS = new Set(['up2itnow0822']);
             const CHECK_NAME = 'review-gate';
             const SUMMARY_MARKER = '<!-- codex-pull-request-review-summary -->';
+            const REVIEW_STATE_PREFIX = '<!-- codex-review-state:v1 ';
+            const REVIEW_STATE_SUFFIX = ' -->';
             const FULL_SHA = /^[0-9a-f]{40}$/i;
             const WAIVER_PREFIX = '<!-- review-gate-waiver:';
             const WAIVER_SUFFIX = ' -->';
@@ -205,6 +212,27 @@ jobs:
 
             function isCodexUser(user) {
               return !!user && user.type === 'Bot' && isCodexLogin(user.login);
+            }
+
+            // Hidden Codex summary attestation. Fail closed: missing marker,
+            // unparseable JSON, a non-object, a missing code_review object,
+            // or any exception => null (not a clean pass).
+            function parseCodexReviewState(body) {
+              try {
+                if (typeof body !== 'string') return null;
+                const start = body.indexOf(REVIEW_STATE_PREFIX);
+                if (start < 0) return null;
+                const jsonStart = start + REVIEW_STATE_PREFIX.length;
+                const end = body.indexOf(REVIEW_STATE_SUFFIX, jsonStart);
+                if (end < 0 || end - jsonStart > 8000) return null;
+                const parsed = JSON.parse(body.slice(jsonStart, end));
+                if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
+                const cr = parsed.code_review;
+                if (!cr || typeof cr !== 'object' || Array.isArray(cr)) return null;
+                return cr;
+              } catch {
+                return null;
+              }
             }
 
             function waiverEventId(event) {
@@ -797,11 +825,31 @@ jobs:
 
               // Clean pass (Codex posts no review when it finds nothing): its
               // summary must attest this head SHA and was not the subject of
-              // a dismissed Codex review.
+              // a dismissed Codex review. Codex now prints only a short SHA
+              // in the visible table; the full SHA is in a hidden
+              // `codex-review-state:v1` block. Either attestation is enough.
+              // Receipt comments are never evidence. Fail closed: any
+              // parse/field/SHA problem on the state-block path is not a pass.
               const cleanPass = comments.some(comment => {
                 const body = comment.body || '';
                 if (!isCodexUser(comment.user) || !body.includes(SUMMARY_MARKER)) return false;
                 if (!postDatesRetarget(comment.updated_at || comment.created_at)) return false;
+                try {
+                  const cr = parseCodexReviewState(body);
+                  if (
+                    cr &&
+                    cr.status === 'completed' &&
+                    cr.has_unresolved_findings === false &&
+                    isFullSha(cr.commit_sha) &&
+                    String(cr.commit_sha).toLowerCase() === head &&
+                    !dismissedShas.has(String(cr.commit_sha).toLowerCase()) &&
+                    postDatesRetarget(comment.updated_at)
+                  ) {
+                    return true;
+                  }
+                } catch {
+                  // malformed or unexpected state block: fall through
+                }
                 const row = /^\|[^|\n]*\bCode Review\b[^|\n]*\|[^|\n]*\bCompleted\b[^|\n]*\|\s*`([0-9a-f]{40})`\s*\|/gim;
                 let match;
                 while ((match = row.exec(body)) !== null) {

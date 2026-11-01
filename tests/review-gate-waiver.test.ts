@@ -390,3 +390,168 @@ describe('review-gate: only a non-dismissed Codex review of the current head SHA
     expect(published(foreign.runs)!.output.title).toBe('Waiting for Codex review')
   })
 })
+
+describe('review-gate: clean pass via hidden codex-review-state:v1 block', () => {
+  // Codex no longer writes a 40-char SHA in the summary table. The full
+  // head SHA lives only in `<!-- codex-review-state:v1 ... -->` inside the
+  // SUMMARY comment. Receipt comments carry a short SHA and must stay red.
+  const P1 = 'd'.repeat(40)
+  const OTHER = 'e'.repeat(40)
+  const SHORT = 'e5a915c'
+  const base = { tip: Y, tipAt: T(22), prBase: Y, labelId: '0', labeledAt: T(1), activity: ACTIVITY, priorRuns: [], waived: false }
+  const CODEX = { login: 'chatgpt-codex-connector[bot]', type: 'Bot' } as const
+
+  const stateBlock = (cr: Record<string, unknown>) =>
+    '<!-- codex-review-state:v1 ' +
+    JSON.stringify({
+      code_review: cr,
+      security_review: { commit_sha: null, has_any_findings: null, has_unresolved_findings: null, status: null },
+    }) +
+    ' -->'
+
+  const cleanState = (overrides: Record<string, unknown> = {}) =>
+    stateBlock({
+      commit_sha: H,
+      has_any_findings: false,
+      has_unresolved_findings: false,
+      status: 'completed',
+      ...overrides,
+    })
+
+  const summaryComment = (opts: {
+    state?: string
+    tableSha?: string
+    user?: { login: string; type: string }
+    at?: string
+    body?: string
+  } = {}) => ({
+    user: opts.user ?? CODEX,
+    body:
+      opts.body ??
+      `<!-- codex-pull-request-review-summary -->\n${opts.state ?? ''}\n` +
+        '| Review | Status | Commit | Review trigger |\n| --- | --- | --- |\n' +
+        `| Code Review | Completed | \`${opts.tableSha ?? SHORT}\` | Manual |\n`,
+    created_at: opts.at ?? T(23),
+    updated_at: opts.at ?? T(23),
+  })
+
+  it('(1) GREEN: state block with full head SHA, completed, no unresolved findings', async () => {
+    const w = world({
+      ...base,
+      prCommits: [P1, H],
+      comments: [summaryComment({ state: cleanState(), tableSha: SHORT })],
+    })
+    await run(w.github, PUSH, w.core)
+    expect(published(w.runs)!.conclusion).toBe('success')
+    expect(published(w.runs)!.output.title).toBe('Codex reviewed PR')
+    expect(published(w.runs)!.output.summary).toMatch(/clean review/)
+  })
+
+  it('(2) RED: receipt comment with only a short SHA and no state block', async () => {
+    const receipt = {
+      user: CODEX,
+      body:
+        '<!-- codex-review-receipt:v1 -->\n\n' +
+        "Codex Review: Didn't find any major issues. Keep it up!\n\n" +
+        '**Reviewed commit:** `e5a915c723`\n',
+      created_at: T(23),
+      updated_at: T(23),
+    }
+    const w = world({ ...base, prCommits: [P1, H], comments: [receipt] })
+    await run(w.github, PUSH, w.core)
+    expect(published(w.runs)!.conclusion).toBe('failure')
+    expect(published(w.runs)!.output.title).toBe('Waiting for Codex review')
+  })
+
+  it('(3) RED: state block SHA does not match the head', async () => {
+    const w = world({
+      ...base,
+      prCommits: [P1, H],
+      comments: [summaryComment({ state: cleanState({ commit_sha: OTHER }), tableSha: SHORT })],
+    })
+    await run(w.github, PUSH, w.core)
+    expect(published(w.runs)!.conclusion).toBe('failure')
+    expect(published(w.runs)!.output.title).toBe('Waiting for Codex review')
+  })
+
+  it('(4) RED: has_unresolved_findings is true', async () => {
+    const w = world({
+      ...base,
+      prCommits: [P1, H],
+      comments: [summaryComment({ state: cleanState({ has_unresolved_findings: true }), tableSha: SHORT })],
+    })
+    await run(w.github, PUSH, w.core)
+    expect(published(w.runs)!.conclusion).toBe('failure')
+    expect(published(w.runs)!.output.title).toBe('Waiting for Codex review')
+  })
+
+  it('(5) RED: malformed JSON in the state block', async () => {
+    const w = world({
+      ...base,
+      prCommits: [P1, H],
+      comments: [summaryComment({
+        state: '<!-- codex-review-state:v1 {"code_review":{"commit_sha":"' + H + '","status":"completed" -->',
+        tableSha: SHORT,
+      })],
+    })
+    await run(w.github, PUSH, w.core)
+    expect(published(w.runs)!.conclusion).toBe('failure')
+    expect(published(w.runs)!.output.title).toBe('Waiting for Codex review')
+  })
+
+  it('(6) RED: non-Codex author with a valid-looking state block', async () => {
+    const w = world({
+      ...base,
+      prCommits: [P1, H],
+      comments: [summaryComment({
+        state: cleanState(),
+        tableSha: SHORT,
+        user: { login: 'not-codex', type: 'User' },
+      })],
+    })
+    await run(w.github, PUSH, w.core)
+    expect(published(w.runs)!.conclusion).toBe('failure')
+    expect(published(w.runs)!.output.title).toBe('Waiting for Codex review')
+  })
+
+  it('(7) RED: dismissed SHA even with a completed state block', async () => {
+    const dismissed = {
+      user: CODEX,
+      commit_id: H,
+      state: 'DISMISSED',
+      submitted_at: T(23),
+    }
+    const w = world({
+      ...base,
+      prCommits: [P1, H],
+      reviews: [dismissed],
+      comments: [summaryComment({ state: cleanState(), tableSha: SHORT })],
+    })
+    await run(w.github, PUSH, w.core)
+    expect(published(w.runs)!.conclusion).toBe('failure')
+    expect(published(w.runs)!.output.title).toBe('Waiting for Codex review')
+  })
+
+  it('(8) RED: summary comment before the last retarget', async () => {
+    const w = world({
+      ...base,
+      prCommits: [P1, H],
+      comments: [summaryComment({ state: cleanState(), tableSha: SHORT, at: T(23) })],
+      extraTimeline: [{ event: 'base_ref_changed', created_at: T(24) }],
+    })
+    await run(w.github, PUSH, w.core)
+    expect(published(w.runs)!.conclusion).toBe('failure')
+    expect(published(w.runs)!.output.title).toBe('Waiting for Codex review')
+  })
+
+  it('(9) GREEN: existing table-regex path still accepts a full 40-char SHA', async () => {
+    const w = world({
+      ...base,
+      prCommits: [P1, H],
+      comments: [summaryComment({ tableSha: H })],
+    })
+    await run(w.github, PUSH, w.core)
+    expect(published(w.runs)!.conclusion).toBe('success')
+    expect(published(w.runs)!.output.title).toBe('Codex reviewed PR')
+  })
+})
