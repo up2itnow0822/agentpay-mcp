@@ -366,7 +366,21 @@ describe('review-gate binds ordinary Codex evidence to the current base SHA (F13
       ...args: string[]
     ) => unknown;
     for (const script of scripts) {
-      expect(() => new AsyncFunction('github', 'context', 'core', script)).not.toThrow();
+      // github-script v9 injects these as function parameters. Declaring
+      // `const getOctokit` / `const octokit` would SyntaxError at runtime.
+      expect(() => new AsyncFunction(
+        'require',
+        '__original_require__',
+        'github',
+        'octokit',
+        'getOctokit',
+        'context',
+        'core',
+        'exec',
+        'glob',
+        'io',
+        script,
+      )).not.toThrow();
     }
   });
 

@@ -30,7 +30,16 @@ function gateScript(): string {
 const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor as new (
   ..._args: string[]
 ) => (..._a: unknown[]) => Promise<unknown>
-const run = new AsyncFunction('github', 'context', 'core', gateScript())
+// Parameter list matches actions/github-script v9 (getOctokit is injected;
+// a `const getOctokit` / `const octokit` in the script would SyntaxError).
+const run = new AsyncFunction(
+  'github',
+  'context',
+  'core',
+  'octokit',
+  'getOctokit',
+  gateScript(),
+)
 
 const H = 'a'.repeat(40)
 const X = 'b'.repeat(40) // the base the waiver was given for
