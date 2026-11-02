@@ -26,5 +26,26 @@ export default [
       "eqeqeq": "warn",
       "@typescript-eslint/no-explicit-any": "warn",
     }
+  },
+  {
+    // SEC-20261102-MCPCI F1: src/ must never reach a shell or evaluate strings.
+    files: ["src/**/*.ts"],
+    rules: {
+      "no-eval": "error",
+      "no-implied-eval": "error",
+      "no-new-func": "error",
+      "no-restricted-imports": ["error", {
+        paths: [
+          { name: "child_process", message: "src/ must not use child_process (SEC-20261102-MCPCI)." },
+          { name: "node:child_process", message: "src/ must not use child_process (SEC-20261102-MCPCI)." },
+        ],
+      }],
+      "no-restricted-syntax": ["error",
+        { selector: "CallExpression[callee.name='require'][arguments.0.value=/^(node:)?child_process$/]", message: "src/ must not require child_process (SEC-20261102-MCPCI)." },
+        { selector: "ImportExpression[source.value=/^(node:)?child_process$/]", message: "src/ must not dynamically import child_process (SEC-20261102-MCPCI)." },
+        { selector: "TSImportEqualsDeclaration[moduleReference.expression.value=/^(node:)?child_process$/]", message: "src/ must not import child_process (SEC-20261102-MCPCI)." },
+        { selector: "NewExpression[callee.name='Function'], CallExpression[callee.name='Function']", message: "src/ must not use Function constructor (SEC-20261102-MCPCI)." },
+      ],
+    },
   }
 ];
