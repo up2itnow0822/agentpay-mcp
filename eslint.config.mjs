@@ -29,8 +29,15 @@ export default [
   },
   {
     // SEC-20261102-MCPCI F1: src/ must never reach a shell or evaluate strings.
-    files: ["src/**/*.ts"],
+    files: ["src/**/*.ts", "src/**/*.mts", "src/**/*.cts", "src/**/*.tsx"],
+    languageOptions: {
+      ecmaVersion: 2022,
+      sourceType: "module",
+      globals: { ...globals.node },
+      parser: tsParser,
+    },
     rules: {
+      "no-restricted-globals": ["error", { name: "Function", message: "src/ must not reference the Function constructor (SEC-20261102-MCPCI)." }],
       "no-eval": "error",
       "no-implied-eval": "error",
       "no-new-func": "error",
@@ -44,7 +51,10 @@ export default [
         { selector: "CallExpression[callee.name='require'][arguments.0.value=/^(node:)?child_process$/]", message: "src/ must not require child_process (SEC-20261102-MCPCI)." },
         { selector: "ImportExpression[source.value=/^(node:)?child_process$/]", message: "src/ must not dynamically import child_process (SEC-20261102-MCPCI)." },
         { selector: "TSImportEqualsDeclaration[moduleReference.expression.value=/^(node:)?child_process$/]", message: "src/ must not import child_process (SEC-20261102-MCPCI)." },
+        { selector: "CallExpression[callee.name='require'] > TemplateLiteral.arguments[expressions.length=0][quasis.0.value.cooked=/^(node:)?child_process$/]", message: "src/ must not require child_process (SEC-20261102-MCPCI)." },
+        { selector: "ImportExpression > TemplateLiteral.source[expressions.length=0][quasis.0.value.cooked=/^(node:)?child_process$/]", message: "src/ must not dynamically import child_process (SEC-20261102-MCPCI)." },
         { selector: "NewExpression[callee.name='Function'], CallExpression[callee.name='Function']", message: "src/ must not use Function constructor (SEC-20261102-MCPCI)." },
+        { selector: "MemberExpression[object.name=/^(globalThis|global|window|self)$/][property.name='Function']", message: "src/ must not reference the Function constructor (SEC-20261102-MCPCI)." },
       ],
     },
   }
