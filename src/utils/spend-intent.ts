@@ -388,27 +388,41 @@ export async function runClassifiedSpend<T>(
     // their own broadcasts. Nothing is swapped in or restored per call.
     return await broadcastContext.run(state, run)
   } catch (error: unknown) {
-    if (error instanceof DefiniteSpendFailure) {
-      throw error
-    }
-    const outcome = classifySpendError(error)
+    // SO ruling (pay-2b C6, addendum 4a829f99): `broadcastStarted` is a
+    // structural flag the broadcast hook sets IMMEDIATELY before the
+    // sendTransaction/writeContract call. Before it, nothing was signed, so
+    // any error (typed AgentWalletVerificationError or generic) may release.
+    // After it, the outcome is UNKNOWN: never release, never auto-retry,
+    // whatever the error says (including SDK "released"/revert classifications).
     if (!state.broadcastStarted) {
-      throw new DefiniteSpendFailure(
-        error instanceof Error ? error.message : String(error)
-      )
+      if (error instanceof DefiniteSpendFailure) throw error
+      // (A typed AgentWalletVerificationError always lands here: the SDK
+      // verifies before signing, so it can never follow the flag.)
+      throw new DefiniteSpendFailure(error instanceof Error ? error.message : String(error))
     }
-    if (options?.lockAfterBroadcast) {
-      throw error
-    }
-    if (
-      outcome.status === 'released' &&
-      isConfirmedUnchargedRevert(error)
-    ) {
-      throw new DefiniteSpendFailure(
-        error instanceof Error ? error.message : String(error)
-      )
-    }
+    void options
+    // Keep the original error (callers inspect its type), but a "definite"
+    // failure can no longer be definite once a write was submitted.
+    if (error instanceof DefiniteSpendFailure) throw new BroadcastOutcomeUnknownError(error)
     throw error
+  }
+}
+
+/**
+ * Raised for any failure after a transaction was handed to the signer/RPC.
+ * Never a DefiniteSpendFailure, so reservations and intents stay locked and
+ * the caller must not retry automatically.
+ */
+export class BroadcastOutcomeUnknownError extends Error {
+  readonly retryable = false
+  override readonly cause: unknown
+  constructor(cause: unknown) {
+    super(
+      `Outcome UNKNOWN after a transaction was submitted: ${cause instanceof Error ? cause.message : String(cause)}. ` +
+        'The reserved budget stays locked; do not retry until the spend is reconciled.'
+    )
+    this.name = 'BroadcastOutcomeUnknownError'
+    this.cause = cause
   }
 }
 

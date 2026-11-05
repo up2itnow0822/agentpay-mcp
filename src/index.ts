@@ -42,6 +42,9 @@ function printHelp(): void {
       '  AGENT_PRIVATE_KEY       Optional private key for signing payments',
       '  AGENT_WALLET_ADDRESS    Optional wallet address for display and checks',
       '  CHAIN_ID                Chain id, defaults to 8453 (Base Mainnet)',
+      '  AGENT_WALLET_FACTORY / AGENT_WALLET_TOKEN_CONTRACT / AGENT_WALLET_TOKEN_ID',
+      '                          Wallet deployment identity (required for any payment)',
+      '  AGENT_WALLET_CODE_HASH  Approved AgentAccountV2 runtime code hash (strongly recommended)',
       '  SESSION_TTL_SECONDS     Session TTL, defaults to 3600',
       '',
       'Safety (see SECURITY.md):',
@@ -187,6 +190,7 @@ import {
 } from './tools/otel-budget.js';
 
 import { formatError, sanitizeUntrustedInline, textContent } from './utils/format.js';
+import { describeWalletIdentity, getConfig } from './utils/client.js';
 
 // ─── Server configuration ──────────────────────────────────────────────────
 
@@ -488,6 +492,15 @@ async function main(): Promise<void> {
     `Chain: ${process.env['CHAIN_ID'] ?? '8453 (Base Mainnet)'} | ` +
     `Session TTL: ${process.env['SESSION_TTL_SECONDS'] ?? '3600'}s\n`
   );
+
+  // agentwallet-sdk 8: state which deployment identity every write is verified
+  // against. Non-secret values only (loadConfig errors never echo the key or RPC URL).
+  try {
+    process.stderr.write(`${describeWalletIdentity(getConfig())}\n`);
+  } catch (err) {
+    const why = err instanceof Error ? err.message : String(err);
+    process.stderr.write(`AgentPay wallet identity: NOT CONFIGURED; value-moving tools will refuse (${why})\n`);
+  }
 }
 
 main().catch((error: unknown) => {

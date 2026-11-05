@@ -5,7 +5,7 @@
 import { createWalletClient, http, type Address, type Chain } from 'viem';
 import { privateKeyToAccount } from 'viem/accounts';
 import { base, baseSepolia } from 'viem/chains';
-import { createWallet } from 'agentwallet-sdk';
+import { createWallet, readDeploymentIdentitySettings } from 'agentwallet-sdk';
 
 // ─── Supported chains ──────────────────────────────────────────────────────
 
@@ -39,6 +39,70 @@ export interface AgentPayConfig {
   factoryAddress?: Address;
   /** NFT contract address (for deploy_wallet tool only) */
   nftContractAddress?: Address;
+  /** agentwallet-sdk 8 deployment identity (trusted factory + token binding). Required. */
+  deployment: DeploymentIdentity;
+  /** Optional approved AgentAccountV2 runtime code hash (strongly recommended). */
+  expectedCodeHash?: `0x${string}`;
+}
+
+/** Signer/chain config without the deployment identity (deploy_wallet only). */
+export type SignerConfig = Omit<AgentPayConfig, 'deployment' | 'expectedCodeHash'>;
+
+export interface DeploymentIdentity {
+  factoryAddress: Address;
+  tokenContract: Address;
+  tokenId: bigint;
+}
+
+export const DEPLOYMENT_IDENTITY_ENV = [
+  'AGENT_WALLET_FACTORY',
+  'AGENT_WALLET_TOKEN_CONTRACT',
+  'AGENT_WALLET_TOKEN_ID',
+] as const;
+export const CODE_HASH_ENV = 'AGENT_WALLET_CODE_HASH';
+export const UNVERIFIED_OPT_OUT_ENV = 'AGENT_WALLET_ALLOW_UNVERIFIED';
+
+/**
+ * Read the agentwallet-sdk 8 deployment identity from the environment.
+ * Fails closed: the SDK's unverified opt-out is rejected for ANY non-empty
+ * value, and the deployment identity (factory + token) is required. Values
+ * here are public on-chain identifiers, never secrets.
+ */
+export function loadDeploymentIdentity(
+  env: Record<string, string | undefined> = process.env
+): { deployment: DeploymentIdentity; expectedCodeHash?: `0x${string}` } {
+  if ((env[UNVERIFIED_OPT_OUT_ENV] ?? '').trim() !== '') {
+    throw new Error(
+      `${UNVERIFIED_OPT_OUT_ENV} is not supported by AgentPay MCP: it would let payments go to an unverified wallet. ` +
+        `Unset it and configure ${DEPLOYMENT_IDENTITY_ENV.join(', ')} instead.`
+    );
+  }
+  let settings: ReturnType<typeof readDeploymentIdentitySettings>;
+  try {
+    settings = readDeploymentIdentitySettings((name) => env[name]);
+  } catch (err) {
+    throw new Error(`Invalid deployment identity: ${err instanceof Error ? err.message : String(err)}`);
+  }
+  if (!settings.deployment) {
+    throw new Error(
+      `Deployment identity required: set ${DEPLOYMENT_IDENTITY_ENV.join(', ')} (printed by deploy_wallet). ` +
+        `${CODE_HASH_ENV} is strongly recommended as well.`
+    );
+  }
+  return {
+    deployment: settings.deployment as DeploymentIdentity,
+    ...(settings.expectedCodeHash ? { expectedCodeHash: settings.expectedCodeHash as `0x${string}` } : {}),
+  };
+}
+
+/** One non-secret startup line describing which wallet identity is enforced. */
+export function describeWalletIdentity(config: AgentPayConfig): string {
+  const d = config.deployment;
+  return (
+    `AgentPay wallet identity: chain=${config.chainId} account=${config.walletAddress} ` +
+    `factory=${d.factoryAddress} tokenContract=${d.tokenContract} tokenId=${d.tokenId.toString()} ` +
+    `codeHash=${config.expectedCodeHash ? 'set' : `NOT SET (strongly recommended: ${CODE_HASH_ENV})`}`
+  );
 }
 
 // ─── Config loader ─────────────────────────────────────────────────────────
@@ -48,6 +112,14 @@ export interface AgentPayConfig {
  * Only AGENT_PRIVATE_KEY and AGENT_WALLET_ADDRESS are required to get started.
  */
 export function loadConfig(): AgentPayConfig {
+  return { ...loadSignerConfig(), ...loadDeploymentIdentity(process.env) };
+}
+
+/**
+ * Signer and chain settings only. Used by deploy_wallet, which creates the
+ * deployment identity and so cannot require it yet.
+ */
+export function loadSignerConfig(): SignerConfig {
   const agentPrivateKey = process.env['AGENT_PRIVATE_KEY'];
   const walletAddress = process.env['AGENT_WALLET_ADDRESS'];
 
@@ -140,6 +212,8 @@ export function createAgentWallet(config: AgentPayConfig): AgentWalletInstance {
     chain: chainName,
     rpcUrl: config.rpcUrl,
     walletClient,
+    deployment: config.deployment,
+    ...(config.expectedCodeHash ? { expectedCodeHash: config.expectedCodeHash } : {}),
   });
 }
 
