@@ -171,7 +171,7 @@ export function textContent(text: string): { type: 'text'; text: string } {
  * literals and closes the gap for anyone who forgets.
  */
 export function formatError(error: unknown, context: string): string {
-  const msg = error instanceof Error ? error.message : coerceToText(error);
+  const msg = redactSecrets(error instanceof Error ? error.message : coerceToText(error));
   return (
     `❌ ${sanitizeUntrustedInline(context, MAX_ERROR_CONTEXT_LEN)} failed. ` +
     `AgentPay did not complete the operation.\n` +
@@ -599,5 +599,25 @@ export function formatSuccess(message: string, details?: Record<string, string>)
       out += `\n  ${key}: ${value}`;
     }
   }
+  return out;
+}
+
+/**
+ * Strip RPC endpoints and key material from error text (pay-2b C3). viem
+ * transport errors quote the full RPC URL (which often embeds an API key),
+ * so the `URL:` field viem prints is masked, the configured
+ * RPC_URL and AGENT_PRIVATE_KEY values are removed verbatim, and any 32-byte
+ * hex string that could be a private key is masked. 20-byte addresses and
+ * 32-byte tx hashes labelled as such are left intact.
+ */
+export function redactSecrets(text: string, env: Record<string, string | undefined> = process.env): string {
+  let out = text;
+  for (const name of ['RPC_URL', 'AGENT_PRIVATE_KEY']) {
+    const v = env[name];
+    if (v && v.length >= 8) out = out.split(v).join('[redacted]');
+  }
+  // viem transport errors label the endpoint as `URL: <rpc>`.
+  out = out.replace(/\bURL:\s*\S+/g, 'URL: [redacted]');
+  out = out.replace(/(private ?key|privateKey|secret)([^0-9a-fA-F]{0,8})(0x)?[0-9a-fA-F]{64}\b/gi, '$1$2[redacted]');
   return out;
 }

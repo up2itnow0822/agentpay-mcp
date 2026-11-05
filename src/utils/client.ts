@@ -71,7 +71,7 @@ export const UNVERIFIED_OPT_OUT_ENV = 'AGENT_WALLET_ALLOW_UNVERIFIED';
 export function loadDeploymentIdentity(
   env: Record<string, string | undefined> = process.env
 ): { deployment: DeploymentIdentity; expectedCodeHash?: `0x${string}` } {
-  if ((env[UNVERIFIED_OPT_OUT_ENV] ?? '').trim() !== '') {
+  if ((env[UNVERIFIED_OPT_OUT_ENV] ?? '') !== '') {
     throw new Error(
       `${UNVERIFIED_OPT_OUT_ENV} is not supported by AgentPay MCP: it would let payments go to an unverified wallet. ` +
         `Unset it and configure ${DEPLOYMENT_IDENTITY_ENV.join(', ')} instead.`

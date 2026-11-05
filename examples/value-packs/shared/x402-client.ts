@@ -277,7 +277,7 @@ export function createScriptWallet(config: X402Config = {}) {
 
   // agentwallet-sdk 8 verifies the account before every write. The unsafe
   // opt-out is rejected outright; the deployment identity is required.
-  if ((process.env['AGENT_WALLET_ALLOW_UNVERIFIED'] ?? '').trim() !== '') {
+  if ((process.env['AGENT_WALLET_ALLOW_UNVERIFIED'] ?? '') !== '') {
     throw new Error('AGENT_WALLET_ALLOW_UNVERIFIED is not supported; unset it and configure the deployment identity.');
   }
   const identity = readDeploymentIdentitySettings((name) => process.env[name]);

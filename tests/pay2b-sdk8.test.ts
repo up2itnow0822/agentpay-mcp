@@ -43,13 +43,13 @@ afterEach(() => {
 })
 
 describe('C1: AGENT_WALLET_ALLOW_UNVERIFIED is rejected for any non-empty value', () => {
-  it.each(['true', 'TRUE', '1', ' true ', 'false', 'no'])('rejects %j', (value) => {
+  it.each(['true', 'TRUE', '1', ' true ', 'false', 'no', ' ', '\t'])('rejects %j', (value) => {
     expect(() => loadDeploymentIdentity({ ...IDENTITY, AGENT_WALLET_ALLOW_UNVERIFIED: value })).toThrow(
       /AGENT_WALLET_ALLOW_UNVERIFIED is not supported/
     )
   })
-  it('ignores it when empty or whitespace', () => {
-    expect(loadDeploymentIdentity({ ...IDENTITY, AGENT_WALLET_ALLOW_UNVERIFIED: '  ' }).deployment.tokenId).toBe(1n)
+  it('ignores it only when empty', () => {
+    expect(loadDeploymentIdentity({ ...IDENTITY, AGENT_WALLET_ALLOW_UNVERIFIED: '' }).deployment.tokenId).toBe(1n)
   })
   it('requires a deployment identity (fail closed), even with a code hash alone', () => {
     expect(() => loadDeploymentIdentity({})).toThrow(/Deployment identity required/)
@@ -164,5 +164,23 @@ describe('C4: queued results are never paid', () => {
   it('agentExecute: executed:false is queued, not paid', () => {
     expect(requireExecutedCall({ executed: true, txHash: '0x02' }, 'p')).toBe('0x02')
     expect(() => requireExecutedCall({ executed: false, txHash: '0x03', pendingTxId: 1n }, 'p')).toThrow(QueuedSpendError)
+  })
+})
+
+describe('C3: formatError redacts RPC endpoints and key material', async () => {
+  const { formatError, redactSecrets } = await import('../src/utils/format.js')
+  const env = { RPC_URL: 'https://base.example/v2/SECRET_RPC_TOKEN', AGENT_PRIVATE_KEY: '0x' + 'ab'.repeat(32) }
+  it('masks the viem URL field, the configured RPC_URL and the key', () => {
+    const text = redactSecrets(
+      `HTTP request failed.\nURL: ${env.RPC_URL}\nDetails: ${env.RPC_URL} ${env.AGENT_PRIVATE_KEY} private key ${'cd'.repeat(32)}`,
+      env
+    )
+    expect(text).not.toContain('SECRET_RPC_TOKEN')
+    expect(text).not.toContain('ab'.repeat(32))
+    expect(text).not.toContain('cd'.repeat(32))
+  })
+  it('applies inside formatError', () => {
+    const out = formatError(new Error('HTTP request failed.\nURL: https://rpc.example/v2/SECRET_RPC_TOKEN'), 'send_payment')
+    expect(out).not.toContain('SECRET_RPC_TOKEN')
   })
 })

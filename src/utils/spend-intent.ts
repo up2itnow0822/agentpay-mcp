@@ -403,8 +403,11 @@ export async function runClassifiedSpend<T>(
     void options
     // Keep the original error (callers inspect its type), but a "definite"
     // failure can no longer be definite once a write was submitted.
-    if (error instanceof DefiniteSpendFailure) throw new BroadcastOutcomeUnknownError(error)
-    throw error
+    // Every post-flag failure is normalized to outcome-unknown and
+    // non-retryable (the original is kept as `cause`). QueuedSpendError and
+    // BroadcastOutcomeUnknownError already carry that contract.
+    if (error instanceof BroadcastOutcomeUnknownError || error instanceof QueuedSpendError) throw error
+    throw new BroadcastOutcomeUnknownError(error)
   }
 }
 

@@ -27,6 +27,8 @@ for (const file of sources(join(root, 'src'))) {
   const text = readFileSync(file, 'utf8')
   for (const m of text.matchAll(/process\.env(?:\.|\[\s*['"])([A-Z][A-Z0-9_]*)/g)) read.add(m[1]!)
   for (const m of text.matchAll(/['"`](AGENTPAY_[A-Z0-9_]*[A-Z0-9])['"`]/g)) read.add(m[1]!)
+  // agentwallet-sdk 8 deployment identity, read via named constants (pay-2b C2).
+  for (const m of text.matchAll(/['"`](AGENT_WALLET_[A-Z0-9_]*[A-Z0-9])['"`]/g)) read.add(m[1]!)
 }
 
 describe('server.json environment variables', () => {
