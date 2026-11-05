@@ -14,6 +14,7 @@
  *   implementing x402 V2 can independently verify.
  */
 
+import { safeErrorText } from '../utils/sink.js';
 import { z } from 'zod';
 import { getWallet, getConfig } from '../utils/client.js';
 import {
@@ -265,7 +266,7 @@ export async function handleX402SessionStart(
       out += `  TX Hash:   ${sanitizeUntrustedInline(error.txHash, 80)}\n`;
       const cause = error.cause instanceof Error ? error.cause.message : undefined;
       if (cause) {
-        out += '\nFollow-up error:\n' + formatUntrustedBody(cause, 4000);
+        out += '\nFollow-up error:\n' + formatUntrustedBody(safeErrorText(cause), 4000);
       }
       return { content: [textContent(out)], isError: true };
     }

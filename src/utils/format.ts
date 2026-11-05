@@ -6,7 +6,7 @@ import { randomBytes } from 'node:crypto';
 import type { Address, Hash } from 'viem';
 import { formatEther, formatUnits } from 'viem';
 import { z } from 'zod';
-import { safeText, toolText } from './sink.js';
+import { safeErrorText, safeText, toolText } from './sink.js';
 export { redactSecrets } from './sink.js';
 
 // ─── ETH / token formatting ────────────────────────────────────────────────
@@ -173,7 +173,7 @@ export function textContent(text: string): { type: 'text'; text: string } {
  * literals and closes the gap for anyone who forgets.
  */
 export function formatError(error: unknown, context: string): string {
-  const msg = safeText(error instanceof Error ? error.message : coerceToText(error));
+  const msg = safeErrorText(error instanceof Error ? error.message : coerceToText(error));
   return (
     `❌ ${sanitizeUntrustedInline(context, MAX_ERROR_CONTEXT_LEN)} failed. ` +
     `AgentPay did not complete the operation.\n` +

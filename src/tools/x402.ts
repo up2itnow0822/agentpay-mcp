@@ -10,6 +10,7 @@
  * payment path. Identical paid retries still replay from the spend-intent
  * cache; use a new idempotencyKey for a second settlement.
  */
+import { safeErrorText } from '../utils/sink.js';
 import { z } from 'zod';
 import { getWallet, getConfig } from '../utils/client.js';
 import {
@@ -674,7 +675,7 @@ export async function handleX402Pay(
         '\nFunds may already have moved. Reconcile this transaction before any new payment.\n';
       if (cause) {
         out += '\nFollow-up error:\n';
-        out += formatUntrustedBody(cause, 8000);
+        out += formatUntrustedBody(safeErrorText(cause), 8000);
       }
       return {
         content: [textContent(out)],
