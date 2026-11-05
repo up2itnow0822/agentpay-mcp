@@ -1,3 +1,4 @@
+import { exampleLog } from '../value-packs/shared/redact';
 import { checkBudget } from './tools/check-budget';
 import { requestPayment } from './tools/request-payment';
 
@@ -11,10 +12,10 @@ You are a governance-aware agent:
 `;
 
 async function runExample(): Promise<void> {
-  console.log(instructions.trim());
+  exampleLog(instructions.trim());
 
   const budget = await checkBudget();
-  console.log('Initial budget:', budget.budget);
+  exampleLog('Initial budget:', budget.budget);
 
   const first = await requestPayment({
     toolName: 'market-data-pro',
@@ -23,7 +24,7 @@ async function runExample(): Promise<void> {
     justification: 'Need premium sentiment feed for analysis.',
   });
 
-  console.log('Payment #1:', first);
+  exampleLog('Payment #1:', first);
 
   const second = await requestPayment({
     toolName: 'model-inference-pro',
@@ -32,7 +33,7 @@ async function runExample(): Promise<void> {
     justification: 'High-cost model generation.',
   });
 
-  console.log('Payment #2:', second);
+  exampleLog('Payment #2:', second);
 }
 
 void runExample();
