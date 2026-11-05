@@ -558,6 +558,50 @@ export class DurableIdentityCapacityError extends DefiniteSpendFailure {
  * Canonical form is lowercase `0x` plus 64 hex chars. The SDK helper accepts
  * `0X`; that prefix is rejected here so cached hashes stay 0x-prefixed.
  */
+/**
+ * agentwallet-sdk 8: agentTransferToken/agentExecute may park a write for
+ * owner approval. A queued write moved no funds yet but may execute later, so
+ * it is never reported or counted as paid or settled, and it is not a definite
+ * failure either: the reservation and intent stay locked until reconciled.
+ */
+export class QueuedSpendError extends Error {
+  readonly retryable = false
+  readonly txHash: string | undefined
+  readonly pendingTxId: string | undefined
+  constructor(label: string, txHash: unknown, pendingTxId: unknown) {
+    const id = typeof pendingTxId === 'bigint' || typeof pendingTxId === 'number' ? String(pendingTxId) : undefined
+    const hash = typeof txHash === 'string' ? txHash : undefined
+    super(
+      `${label} was QUEUED for owner approval, not paid` +
+        `${id !== undefined ? ` (pendingTxId=${id})` : ''}${hash ? ` txHash=${hash}` : ''}. ` +
+        'No funds moved yet; the reserved budget stays locked until the queued transaction is approved or cancelled and reconciled. Do not resubmit.'
+    )
+    this.name = 'QueuedSpendError'
+    this.txHash = hash
+    this.pendingTxId = id
+  }
+}
+
+/** agentTransferToken (SDK 8) result -> settlement hash only when status === 'executed'. */
+export function requireExecutedTransfer(result: unknown, label: string): unknown {
+  const r = result as { status?: unknown; txHash?: unknown; pendingTxId?: unknown } | null
+  if (r && typeof r === 'object' && r.status === 'executed') return r.txHash
+  if (r && typeof r === 'object' && r.status === 'queued') {
+    throw new QueuedSpendError(label, r.txHash, r.pendingTxId)
+  }
+  throw new Error(`${label} returned an unclassified transfer result; treating the outcome as unknown.`)
+}
+
+/** agentExecute (SDK 8) result -> settlement hash only when executed === true. */
+export function requireExecutedCall(result: unknown, label: string): unknown {
+  const r = result as { executed?: unknown; txHash?: unknown; pendingTxId?: unknown } | null
+  if (r && typeof r === 'object' && r.executed === true) return r.txHash
+  if (r && typeof r === 'object' && r.executed === false) {
+    throw new QueuedSpendError(label, r.txHash, r.pendingTxId)
+  }
+  throw new Error(`${label} returned an unclassified execution result; treating the outcome as unknown.`)
+}
+
 export function requireSettlementHash(hash: unknown, label: string): string {
   if (typeof hash !== 'string' || hash.trim().length === 0) {
     throw new Error(

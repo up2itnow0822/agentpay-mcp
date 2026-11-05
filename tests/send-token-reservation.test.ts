@@ -46,7 +46,7 @@ describe('send_token policy reservation', () => {
 
     agentTransferToken
       .mockRejectedValueOnce(new Error('execution reverted (simulation)')) // no wallet write
-      .mockResolvedValueOnce('0x' + 'cd'.repeat(32))
+      .mockResolvedValueOnce({ status: 'executed', txHash: '0x' + 'cd'.repeat(32) })
 
     const failed = await handleSendToken(SEND)
     expect(failed.isError).toBe(true)

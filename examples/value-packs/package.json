@@ -12,7 +12,7 @@
   },
   "dependencies": {
     "agentpay-mcp": "^4.0.0",
-    "agentwallet-sdk": "7.0.0",
+    "agentwallet-sdk": "8.0.0",
     "viem": "2.57.4"
   },
   "devDependencies": {

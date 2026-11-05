@@ -36,6 +36,10 @@ import {
   decodeFunctionData,
   encodeAbiParameters,
   parseAbiParameters,
+  toFunctionSelector,
+  keccak256,
+  toBytes,
+  pad,
   type Address,
 } from 'viem';
 import { base } from 'viem/chains';
@@ -47,6 +51,20 @@ const PAYEE = '0x1111111111111111111111111111111111111111';
 /** agentwallet-sdk 6.3.0 X402_PROTOCOL_FEE_COLLECTOR. */
 const FEE_COLLECTOR = '0xff86829393C6C26A4EC122bE0Cc3E466Ef876AdD';
 const ACCOUNT_ADDRESS = '0x9999999999999999999999999999999999999999' as Address;
+/**
+ * agentwallet-sdk 8 verifies the account before every write. The harness
+ * serves a deployed AgentAccountV2 whose token binding and factory CREATE2
+ * prediction match HARNESS_DEPLOYMENT, so verification passes and the
+ * write-fencing assertions run against the real SDK write path.
+ */
+const HARNESS_DEPLOYMENT = {
+  factoryAddress: '0x7777777777777777777777777777777777777777' as Address,
+  tokenContract: '0x8888888888888888888888888888888888888888' as Address,
+  tokenId: 1n,
+};
+const SEL_TOKEN_CONTRACT = toFunctionSelector('tokenContract()');
+const SEL_TOKEN_ID = toFunctionSelector('tokenId()');
+const SEL_FACTORY_GET_ADDRESS = toFunctionSelector('getAddress(address,uint256)');
 const AGENT_KEY = ('0x' + '11'.repeat(32)) as `0x${string}`;
 
 // ─── Calldata-capturing transport ──────────────────────────────────────────
@@ -54,6 +72,9 @@ const AGENT_KEY = ('0x' + '11'.repeat(32)) as `0x${string}`;
 type Write = { to?: string; functionName: string; args: readonly unknown[] };
 
 const writes: Write[] = [];
+/** Receipt logs per broadcast hash (ERC-20 Transfer for each agentTransferToken). */
+const receiptLogs = new Map<string, unknown[]>();
+const TRANSFER_TOPIC = keccak256(toBytes('Transfer(address,address,uint256)'));
 
 /** remainingBudget(address) → (perTxLimit, remainingInPeriod), both huge. */
 const UNLIMITED_BUDGET = encodeAbiParameters(parseAbiParameters('uint256, uint256'), [
@@ -107,8 +128,16 @@ async function request({
       return '0x0';
     case 'eth_estimateGas':
       return '0x186a0';
-    case 'eth_call':
+    case 'eth_getCode':
+      return '0x6080604052';
+    case 'eth_call': {
+      const call = (params?.[0] ?? {}) as { data?: string; input?: string };
+      const sel = String(call.data ?? call.input ?? '').slice(0, 10).toLowerCase();
+      if (sel === SEL_TOKEN_CONTRACT) return encodeAbiParameters(parseAbiParameters('address'), [HARNESS_DEPLOYMENT.tokenContract]);
+      if (sel === SEL_TOKEN_ID) return encodeAbiParameters(parseAbiParameters('uint256'), [HARNESS_DEPLOYMENT.tokenId]);
+      if (sel === SEL_FACTORY_GET_ADDRESS) return encodeAbiParameters(parseAbiParameters('address'), [ACCOUNT_ADDRESS]);
       return UNLIMITED_BUDGET;
+    }
     case 'eth_sendRawTransaction': {
       // The only state-changing RPC. Anything recorded here is real money.
       const tx = parseTransaction(params![0] as `0x${string}`);
@@ -121,7 +150,28 @@ async function request({
         functionName: decoded.functionName,
         args: (decoded.args ?? []) as readonly unknown[],
       });
-      return '0x' + 'ab'.repeat(32);
+      // SDK 8 confirms x402 settlement from the receipt's token Transfer log,
+      // so give each write its own hash and a matching Transfer log.
+      const hash = ('0x' + writes.length.toString(16).padStart(64, '0')) as `0x${string}`;
+      const [token, to, amount] = (decoded.args ?? []) as readonly unknown[];
+      if (decoded.functionName === 'agentTransferToken') {
+        receiptLogs.set(hash.toLowerCase(), [{
+          address: token as string,
+          topics: [
+            TRANSFER_TOPIC,
+            pad(ACCOUNT_ADDRESS.toLowerCase() as `0x${string}`, { size: 32 }),
+            pad((to as string).toLowerCase() as `0x${string}`, { size: 32 }),
+          ],
+          data: encodeAbiParameters(parseAbiParameters('uint256'), [amount as bigint]),
+          blockNumber: STUB_BLOCK.number,
+          blockHash: STUB_BLOCK.hash,
+          transactionHash: hash,
+          transactionIndex: '0x0',
+          logIndex: '0x0',
+          removed: false,
+        }]);
+      }
+      return hash;
     }
     case 'eth_getTransactionReceipt':
     case 'eth_getTransactionByHash': {
@@ -139,7 +189,7 @@ async function request({
         cumulativeGasUsed: '0x5208',
         gasUsed: '0x5208',
         contractAddress: null,
-        logs: [],
+        logs: receiptLogs.get(hash.toLowerCase()) ?? [],
         logsBloom: STUB_BLOCK.logsBloom,
         status: '0x1',
         effectiveGasPrice: '0x3b9aca00',
@@ -173,6 +223,7 @@ const HARNESS_WALLET = {
   publicClient,
   walletClient,
   chain: base,
+  deployment: HARNESS_DEPLOYMENT,
 };
 
 vi.mock('../src/utils/client.js', () => ({
@@ -245,6 +296,7 @@ const SESSION_INPUT = {
 describe('x402 on-chain write fencing (real agentwallet-sdk)', () => {
   beforeEach(() => {
     writes.length = 0;
+    receiptLogs.clear();
     _clearAllSessions();
     _resetSpendIntentStore();
   });
