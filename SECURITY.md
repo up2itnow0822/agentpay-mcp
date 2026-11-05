@@ -19,6 +19,10 @@ Email security concerns to bill@ai-agent-economy.com with:
 
 We aim to respond within 48 hours and patch critical issues within 7 days.
 
+## Operator note: RPC URLs in logged sessions
+
+If you run it in logged LLM sessions, use a keyless or proxied RPC_URL; RPC errors can echo the URL into tool output and stderr.
+
 ## Architecture: Why agentpay-mcp Mitigates CVE-2026-26118
 
 ### Background
