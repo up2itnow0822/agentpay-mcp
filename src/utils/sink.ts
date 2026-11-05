@@ -105,7 +105,11 @@ function redactMnemonics(text: string): string {
  *  R7 idempotent, total (never throws), linear-time patterns
  * Public addresses, tx hashes and the deployment identity are not secrets.
  */
-export function redactSecrets(text: string, env: Env = process.env): string {
+export function redactSecrets(
+  text: string,
+  env: Env = process.env,
+  opts: { errorContext?: boolean } = {}
+): string {
   try {
     let out = String(text)
     // R1 (S2: unconditional, before the R4 tx-hash exemption)
@@ -116,6 +120,8 @@ export function redactSecrets(text: string, env: Env = process.env): string {
     // "... request failed." or right before "Request body:".
     out = out.replace(/(request failed\.?[ \t]*(?:\r?\n[ \t]*)+)URL:[ \t]*(?!\[redacted\])\S+/gi, '$1URL: [redacted]')
     out = out.replace(/\bURL:[ \t]*(?!\[redacted\])\S+(?=[ \t]*\r?\n[ \t]*Request body:)/g, 'URL: [redacted]')
+    // In error text (SDK/RPC/transport messages) every `URL:` field is masked.
+    if (opts.errorContext) out = out.replace(/\bURL:[ \t]*(?!\[redacted\])\S+/g, 'URL: [redacted]')
     // R3
     out = out.replace(URL_RE, (u) => redactUrl(u))
     // R6
@@ -137,6 +143,14 @@ export function redactSecrets(text: string, env: Env = process.env): string {
 /** The one function every output passes through. */
 export function safeText(text: string): string {
   return redactSecrets(text)
+}
+
+/**
+ * For text that came from an Error (SDK, RPC or transport messages): also masks
+ * every `URL:` field, whatever precedes it.
+ */
+export function safeErrorText(text: string): string {
+  return redactSecrets(text, process.env, { errorContext: true })
 }
 
 /** MCP text content block; `textContent` in format.ts re-exports this. */
@@ -166,7 +180,7 @@ export function isStdioProtocolMode(): boolean {
 
 /** Redacted line to stderr. */
 export function logErr(line: string): void {
-  process.stderr.write(safeText(line) + '\n')
+  process.stderr.write(safeErrorText(line) + '\n')
 }
 
 /**

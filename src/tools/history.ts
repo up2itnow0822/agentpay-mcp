@@ -2,6 +2,7 @@
  * history.ts — get_transaction_history tool.
  * Queries on-chain event logs for the wallet's transaction history.
  */
+import { safeErrorText } from '../utils/sink.js';
 import { z } from 'zod';
 import { getActivityHistory } from 'agentwallet-sdk';
 import { getWallet, getConfig } from '../utils/client.js';
@@ -143,8 +144,9 @@ export async function handleGetTransactionHistory(
           isError: true,
         };
       }
-      onChainUnavailable =
-        error instanceof Error ? error.message : String(error);
+      onChainUnavailable = safeErrorText(
+        error instanceof Error ? error.message : String(error)
+      );
     }
 
     if (recent.length === 0 && x402Receipts.length === 0) {
