@@ -37,6 +37,17 @@ Wallet tools read the following environment variables:
 | `FACTORY_ADDRESS` | For deployment | Wallet factory address |
 | `NFT_CONTRACT_ADDRESS` | For deployment | Token contract bound to a wallet |
 | `SESSION_TTL_SECONDS` | No | Local session lifetime in seconds |
+| `AGENT_WALLET_FACTORY` | Yes (payments) | Trusted factory that deployed the wallet (printed by `deploy_wallet`) |
+| `AGENT_WALLET_TOKEN_CONTRACT` | Yes (payments) | Token contract bound to the wallet (printed by `deploy_wallet`) |
+| `AGENT_WALLET_TOKEN_ID` | Yes (payments) | Token id bound to the wallet (printed by `deploy_wallet`) |
+| `AGENT_WALLET_CODE_HASH` | Strongly recommended | Approved `AgentAccountV2` runtime code hash (printed by `deploy_wallet`) |
+
+agentwallet-sdk 8 verifies the wallet against this deployment identity before
+every write. AgentPay requires the factory/token identity, strongly recommends
+the code hash as well, and refuses to start payments if
+`AGENT_WALLET_ALLOW_UNVERIFIED` is set to any value. At startup it logs one
+non-secret line with the chain, account, factory, token contract, token id and
+whether a code hash is set.
 
 Operator safety variables. They are read from the server environment only and
 cannot be changed through MCP:
