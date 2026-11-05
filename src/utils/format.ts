@@ -6,6 +6,8 @@ import { randomBytes } from 'node:crypto';
 import type { Address, Hash } from 'viem';
 import { formatEther, formatUnits } from 'viem';
 import { z } from 'zod';
+import { safeText, toolText } from './sink.js';
+export { redactSecrets } from './sink.js';
 
 // ─── ETH / token formatting ────────────────────────────────────────────────
 
@@ -136,7 +138,7 @@ export function explorerAddressUrl(address: Address, chainId: number): string {
  * Create a standard MCP text content block.
  */
 export function textContent(text: string): { type: 'text'; text: string } {
-  return { type: 'text' as const, text };
+  return toolText(text);
 }
 
 /**
@@ -171,7 +173,7 @@ export function textContent(text: string): { type: 'text'; text: string } {
  * literals and closes the gap for anyone who forgets.
  */
 export function formatError(error: unknown, context: string): string {
-  const msg = redactSecrets(error instanceof Error ? error.message : coerceToText(error));
+  const msg = safeText(error instanceof Error ? error.message : coerceToText(error));
   return (
     `❌ ${sanitizeUntrustedInline(context, MAX_ERROR_CONTEXT_LEN)} failed. ` +
     `AgentPay did not complete the operation.\n` +
@@ -566,8 +568,9 @@ export function describeFinalUrl(
  */
 export function formatUntrustedBody(body: string, maxLen: number): string {
   const nonce = markerNonce();
+  const redacted = safeText(body);
   const truncated =
-    body.length > maxLen ? body.slice(0, maxLen) + '\n\n... [response truncated]' : body;
+    redacted.length > maxLen ? redacted.slice(0, maxLen) + '\n\n... [response truncated]' : redacted;
 
   // Never grows the body: forged delimiters and over-long backtick runs are
   // both replaced by strictly shorter text.
@@ -599,25 +602,5 @@ export function formatSuccess(message: string, details?: Record<string, string>)
       out += `\n  ${key}: ${value}`;
     }
   }
-  return out;
-}
-
-/**
- * Strip RPC endpoints and key material from error text (pay-2b C3). viem
- * transport errors quote the full RPC URL (which often embeds an API key),
- * so the `URL:` field viem prints is masked, the configured
- * RPC_URL and AGENT_PRIVATE_KEY values are removed verbatim, and any 32-byte
- * hex string that could be a private key is masked. 20-byte addresses and
- * 32-byte tx hashes labelled as such are left intact.
- */
-export function redactSecrets(text: string, env: Record<string, string | undefined> = process.env): string {
-  let out = text;
-  for (const name of ['RPC_URL', 'AGENT_PRIVATE_KEY']) {
-    const v = env[name];
-    if (v && v.length >= 8) out = out.split(v).join('[redacted]');
-  }
-  // viem transport errors label the endpoint as `URL: <rpc>`.
-  out = out.replace(/\bURL:\s*\S+/g, 'URL: [redacted]');
-  out = out.replace(/(private ?key|privateKey|secret)([^0-9a-fA-F]{0,8})(0x)?[0-9a-fA-F]{64}\b/gi, '$1$2[redacted]');
   return out;
 }
