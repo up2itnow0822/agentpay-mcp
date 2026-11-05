@@ -1,3 +1,4 @@
+import { logErr } from './sink.js';
 import { AsyncLocalStorage } from 'node:async_hooks'
 import { createHash, randomUUID } from 'node:crypto'
 import {
@@ -1182,7 +1183,7 @@ function compactJournal(path: string, dir: string): void {
     journalBytes = compactedBytes = Buffer.byteLength(text)
   } catch (error: unknown) {
     compactedBytes = journalBytes // back off; the old journal is intact
-    console.error(
+    logErr(
       `[agentpay] spend journal compaction failed; keeping the existing journal: ${error instanceof Error ? error.message : String(error)}`
     )
   }

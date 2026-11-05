@@ -15,6 +15,7 @@
  * @since 4.2.0
  */
 
+import { logErr } from '../utils/sink.js';
 import { z } from 'zod'
 import { textContent, formatError } from '../utils/format.js'
 import {
@@ -158,7 +159,7 @@ function redactCallbackUrl(raw: string): string {
  * so a signed path or a query-string token written there is disclosed.
  */
 function logKillCallbackFailure(url: string, detail: string): void {
-  console.error(
+  logErr(
     `[otel-budget] kill callback not delivered for ${redactCallbackUrl(url)}: ${detail}`
   )
 }
