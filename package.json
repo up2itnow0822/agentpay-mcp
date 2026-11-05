@@ -65,7 +65,7 @@
   "dependencies": {
     "@hono/node-server": "1.19.17",
     "@modelcontextprotocol/sdk": "1.32.2",
-    "agentwallet-sdk": "7.0.0",
+    "agentwallet-sdk": "8.0.0",
     "viem": "2.57.4",
     "zod": "^4.6.7"
   },
