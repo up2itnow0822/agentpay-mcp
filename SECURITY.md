@@ -1,5 +1,7 @@
 # Security Policy — agentpay-mcp
 
+Paused for security maintenance. Do not use in production.
+
 ## Supported Versions
 
 | Version | Supported |
