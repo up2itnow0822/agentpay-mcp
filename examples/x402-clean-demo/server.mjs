@@ -62,6 +62,6 @@ const server = http.createServer((request, response) => {
 });
 
 server.listen(port, host, () => {
-  console.log(`AgentPay MCP x402 scanner demo listening on ${publicBaseUrl}`);
-  console.log(`Verify: curl -si ${demoResource}`);
+  console.log(`AgentPay MCP x402 scanner demo listening on ${publicBaseUrl}`); // output-sink-allow: operator-set public demo URL, no secrets
+  console.log(`Verify: curl -si ${demoResource}`); // output-sink-allow: public demo resource URL, no secrets
 });

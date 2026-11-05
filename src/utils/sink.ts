@@ -8,11 +8,6 @@
  */
 import * as viemAccounts from 'viem/accounts'
 
-type Env = Record<string, string | undefined>
-
-const SECRET_ENV_NAME = /(KEY|TOKEN|SECRET|PASSWORD|AUTH)$/i
-const ALWAYS_SECRET_ENV = ['RPC_URL', 'AGENT_PRIVATE_KEY']
-const MIN_SECRET_LEN = 8
 let bip39: Set<string> | null | undefined
 /** The BIP-39 English wordlist viem ships; null if unavailable (e.g. a test mock). */
 function bip39Words(): Set<string> | null {
@@ -25,6 +20,14 @@ function bip39Words(): Set<string> | null {
   }
   return bip39
 }
+
+// BEGIN redact-core (vendored verbatim into examples/value-packs/shared/redact.ts;
+// tests/output-sink.test.ts fails if the copies drift)
+type Env = Record<string, string | undefined>
+
+const SECRET_ENV_NAME = /(KEY|TOKEN|SECRET|PASSWORD|AUTH)$/i
+const ALWAYS_SECRET_ENV = ['RPC_URL', 'AGENT_PRIVATE_KEY']
+const MIN_SECRET_LEN = 8
 const SECRET_QUERY_PARAM = /^(key|apikey|api_key|api-key|token|access_token|auth|secret|password|signature|sig)$/i
 
 function escapeRegExp(s: string): string {
@@ -70,7 +73,8 @@ function redactUrl(url: string): string {
 }
 
 const URL_RE = /\b(?:https?|wss?):\/\/[^\s"'<>`)\]]+/gi
-const HEX64_RE = /\b(0x)?[0-9a-fA-F]{64}\b/g
+// Hex-bounded, not \b-bounded: ANSI codes (`\x1b[0m`) end in a word char.
+const HEX64_RE = /(?<![0-9a-fA-F])(0x)?[0-9a-fA-F]{64}(?![0-9a-fA-F])/g
 const HASH_LABEL = /(tx|hash|transaction|block)/i
 const HEADER_RE = /\b(authorization|proxy-authorization|x-payment-response|x-payment|cookie|set-cookie)(\s*[:=]\s*)("?)[^\r\n"]+\3/gi
 const BEARER_RE = /\bBearer\s+[A-Za-z0-9._~+/=-]{8,}/g
@@ -139,6 +143,7 @@ export function redactSecrets(
     return '[output withheld: redaction failed]'
   }
 }
+// END redact-core
 
 /** The one function every output passes through. */
 export function safeText(text: string): string {
