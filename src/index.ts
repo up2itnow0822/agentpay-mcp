@@ -23,11 +23,13 @@ import {
 } from '@modelcontextprotocol/sdk/types.js';
 import packageJson from '../package.json';
 import { runSpendIntentsCli } from './cli/spend-intents.js';
+// Must load before handleCliMetadataFlag() runs below (CJS evaluates in order).
+import { enterStdioProtocolMode, logErr, logOut } from './utils/sink.js';
 
 const PACKAGE_VERSION = packageJson.version;
 
 function printHelp(): void {
-  process.stdout.write(
+  logOut(
     [
       'AgentPay MCP Server',
       '',
@@ -59,7 +61,6 @@ function printHelp(): void {
       '                          (stop the server first: one process per state directory)',
       '',
       'When no metadata flag is provided, the server starts on stdio for MCP clients.',
-      '',
     ].join('\n')
   );
 }
@@ -75,7 +76,7 @@ function handleCliMetadataFlag(argv: string[]): void {
   }
 
   if (args.includes('--version') || args.includes('-v')) {
-    process.stdout.write(`${PACKAGE_VERSION}\n`);
+    logOut(PACKAGE_VERSION);
     process.exit(0);
   }
 
@@ -475,28 +476,30 @@ async function main(): Promise<void> {
     process.exit(0);
   });
 
+  // S6: from here on stdout belongs to JSON-RPC; logOut diverts to stderr.
+  enterStdioProtocolMode();
   await server.connect(transport);
 
   // Surface spend-policy configuration problems at startup, loudly.
   const policyError = operatorPolicyError();
   if (policyError) {
-    process.stderr.write(
+    logErr(
       `AgentPay MCP: operator spend policy is INVALID (${policyError}). ` +
-        'All value-moving tools will refuse until AGENTPAY_POLICY_* is fixed.\n'
+        'All value-moving tools will refuse until AGENTPAY_POLICY_* is fixed.'
     );
   }
 
   // Log to stderr (not stdout — stdout is reserved for MCP protocol)
-  process.stderr.write(
+  logErr(
     `AgentPay MCP v${PACKAGE_VERSION} started. ` +
     `Wallet: ${process.env['AGENT_WALLET_ADDRESS'] ?? '(not configured)'} | ` +
     `Chain: ${process.env['CHAIN_ID'] ?? '8453 (Base Mainnet)'} | ` +
-    `Session TTL: ${process.env['SESSION_TTL_SECONDS'] ?? '3600'}s\n`
+    `Session TTL: ${process.env['SESSION_TTL_SECONDS'] ?? '3600'}s`
   );
 }
 
 main().catch((error: unknown) => {
   const msg = error instanceof Error ? error.message : String(error);
-  process.stderr.write(`Fatal error starting AgentPay MCP: ${msg}\n`);
+  logErr(`Fatal error starting AgentPay MCP: ${msg}`);
   process.exit(1);
 });

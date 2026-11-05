@@ -180,7 +180,8 @@ export function isStdioProtocolMode(): boolean {
 
 /** Redacted line to stderr. */
 export function logErr(line: string): void {
-  process.stderr.write(safeErrorText(line) + '\n')
+  // console.error writes to stderr; kept so existing log spies keep working.
+  console.error(safeErrorText(line))
 }
 
 /**
