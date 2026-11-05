@@ -61,32 +61,41 @@ function redactUrl(url: string): string {
   }
   const hasUserinfo = parsed.username !== '' || parsed.password !== '' || /^[a-z][a-z0-9+.-]*:\/\/[^/?#]*@/i.test(url)
   // An API-key-shaped path segment (Alchemy, Infura, QuickNode): 20+ token
-  // characters mixing letters and digits. Ordinary slugs (`paid-during-outage`)
-  // carry no digits and pass through.
+  // characters mixing letters and digits, or any 32+ token-character run
+  // (digit-only or letter-only keys). Ordinary slugs (`paid-during-outage`)
+  // are shorter or contain no digits, and pass through.
   const longSegment = parsed.pathname
     .split('/')
-    .some((seg) => /^[A-Za-z0-9_-]{20,}$/.test(seg) && /[0-9]/.test(seg) && /[A-Za-z]/.test(seg))
+    .some(
+      (seg) =>
+        /^[A-Za-z0-9_-]{32,}$/.test(seg) ||
+        (/^[A-Za-z0-9_-]{20,}$/.test(seg) && /[0-9]/.test(seg) && /[A-Za-z]/.test(seg))
+    )
   const secretQuery = [...parsed.searchParams.keys()].some((k) => SECRET_QUERY_PARAM.test(k))
   if (!hasUserinfo && !longSegment && !secretQuery) return url
   const port = parsed.port ? `:${parsed.port}` : ''
   return `${parsed.protocol}//${parsed.hostname}${port}/[redacted]`
 }
 
-const URL_RE = /\b(?:https?|wss?):\/\/[^\s"'<>`)\]]+/gi
+// `[` ends a URL too, so an earlier `[redacted]` never hides a key path from R3.
+// No leading \b: `abhttps://…` must match in the first pass too (R7 idempotence).
+const URL_RE = /(?:https?|wss?):\/\/[^\s"'<>`)\[\]]+/gi
 // Hex-bounded, not \b-bounded: ANSI codes (`\x1b[0m`) end in a word char.
 const HEX64_RE = /(?<![0-9a-fA-F])(0x)?[0-9a-fA-F]{64}(?![0-9a-fA-F])/g
 const HASH_LABEL = /(tx|hash|transaction|block)/i
-const HEADER_RE = /\b(authorization|proxy-authorization|x-payment-response|x-payment|cookie|set-cookie)(\s*[:=]\s*)("?)[^\r\n"]+\3/gi
+// The optional quote after the name covers serialized JSON (`"Authorization":"Basic …"`).
+const HEADER_RE = /\b(authorization|proxy-authorization|x-payment-response|x-payment|cookie|set-cookie)("?\s*[:=]\s*)("?)[^\r\n"]+\3/gi
 const BEARER_RE = /\bBearer\s+[A-Za-z0-9._~+/=-]{8,}/g
-const WORD_RUN_RE = /\b[a-z]{3,8}(?: [a-z]{3,8}){11,23}\b/g
+// Any whitespace between words, so a mnemonic split across lines still matches.
+const WORD_RUN_RE = /\b[a-z]{3,8}(?:[ \t\r\n]+[a-z]{3,8}){11,23}\b/g
 
 /** R5: a run of 12–24 BIP-39 words (12/15/18/21/24) is masked. */
 function redactMnemonics(text: string): string {
   return text.replace(WORD_RUN_RE, (run) => {
-    const words = run.split(' ')
+    const words = run.split(/[ \t\r\n]+/)
     const BIP39 = bip39Words()
-    // Without the wordlist, fall back to the shape alone: exactly 12 or 24 words.
-    if (!BIP39) return words.length === 12 || words.length === 24 ? '[redacted-mnemonic]' : run
+    // Without the wordlist, fall back to the shape alone: a valid BIP-39 length.
+    if (!BIP39) return [12, 15, 18, 21, 24].includes(words.length) ? '[redacted-mnemonic]' : run
     // Find any window of 12+ consecutive wordlist words.
     let streak = 0
     for (const w of words) {
@@ -129,7 +138,7 @@ export function redactSecrets(
     // R3
     out = out.replace(URL_RE, (u) => redactUrl(u))
     // R6
-    out = out.replace(HEADER_RE, (_m, name: string, sep: string) => `${name}${sep}[redacted]`)
+    out = out.replace(HEADER_RE, (_m, name: string, sep: string, q: string) => `${name}${sep}${q}[redacted]${q}`)
     out = out.replace(BEARER_RE, 'Bearer [redacted]')
     // R4
     out = out.replace(HEX64_RE, (match, _p, offset: number, whole: string) => {
