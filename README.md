@@ -1,5 +1,9 @@
 # AgentPay MCP
 
+Paused for security maintenance. Do not use in production.
+
+If you run it in logged LLM sessions, use a keyless or proxied RPC_URL; RPC errors can echo the URL into tool output and stderr.
+
 [![npm](https://img.shields.io/npm/v/agentpay-mcp.svg)](https://www.npmjs.com/package/agentpay-mcp)
 [![CI](https://github.com/up2itnow0822/agentpay-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/up2itnow0822/agentpay-mcp/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
