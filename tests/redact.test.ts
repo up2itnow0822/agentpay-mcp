@@ -144,4 +144,22 @@ describe('sink entry points', () => {
       delete process.env['__FAKE_TEST_TOKEN']
     }
   })
+
+  describe('round-3 fix round (review of 416ba5d)', () => {
+    it('masks serialized JSON auth headers, including Basic', () => {
+      const out = redactSecrets('{"Authorization":"Basic RkFLRTpmYWtlcGFzcw==","x-payment": "FAKEpay123"}', {})
+      expect(out).not.toContain('RkFLRTpmYWtlcGFzcw==')
+      expect(out).not.toContain('FAKEpay123')
+      expect(out).toContain('"Authorization":"[redacted]"')
+    })
+    it('masks digit-only and letter-only 32+ char key paths', () => {
+      expect(redactSecrets('https://rpc.fake.test/v3/01234567890123456789012345678901', {})).toBe('https://rpc.fake.test/[redacted]')
+      expect(redactSecrets('https://rpc.fake.test/v2/FAKEabcdefghijklmnopqrstuvwxyzABCDEF', {})).toBe('https://rpc.fake.test/[redacted]')
+      expect(redactSecrets('https://api.example.com/paid-during-outage', {})).toBe('https://api.example.com/paid-during-outage')
+    })
+    it('masks a mnemonic split across lines', () => {
+      const words = Array(11).fill('abandon').concat('about')
+      expect(redactSecrets(words.join('\n'), {})).toBe('[redacted-mnemonic]')
+    })
+  })
 })

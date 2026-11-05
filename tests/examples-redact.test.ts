@@ -23,6 +23,12 @@ describe('examples redaction copy', () => {
     expect(region('../examples/value-packs/shared/redact.ts')).toBe(region('../src/utils/sink.ts'))
   })
 
+  it('the examples copy masks 15/18/21-word mnemonics by shape', () => {
+    for (const n of [12, 15, 18, 21, 24]) {
+      expect(exampleSafeText(Array(n).fill('zoo').join(' '))).toBe('[redacted-mnemonic]')
+    }
+  })
+
   it('exampleSafeText masks an RPC key path and a private key', () => {
     const out = exampleSafeText(`rpc ${FAKE_RPC} key ${FAKE_KEY}`)
     expect(out).not.toContain('FAKEfakeFAKE0123456789abcd')

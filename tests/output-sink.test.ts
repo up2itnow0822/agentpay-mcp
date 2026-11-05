@@ -51,6 +51,39 @@ const isProcess = (n: ts.Node): boolean =>
 export function scanSource(file: string, source: string, checkTextLiteral: boolean): Finding[] {
   const sf = ts.createSourceFile(file, source, ts.ScriptTarget.Latest, true, file.endsWith('x') ? ts.ScriptKind.TSX : undefined)
   const findings: Finding[] = []
+  // Bindings, not spellings: names bound to process / console / globalThis
+  // (const p = process) and fs write functions imported under any name.
+  const processAliases = new Set<string>()
+  const consoleAliases = new Set<string>()
+  const fdWriters = new Set<string>(['write', 'writeSync'])
+  const collect = (node: ts.Node): void => {
+    if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && node.initializer) {
+      let init: ts.Expression = node.initializer
+      while (ts.isAsExpression(init) || ts.isParenthesizedExpression(init) || ts.isNonNullExpression(init)) init = init.expression
+      if (isProcess(init)) processAliases.add(node.name.text)
+      if (ts.isIdentifier(init) && processAliases.has(init.text)) processAliases.add(node.name.text)
+      if (isGlobalObj(init)) consoleAliases.add(node.name.text)
+    }
+    if (ts.isImportDeclaration(node) && ts.isStringLiteral(node.moduleSpecifier) && /^(node:)?fs(\/promises)?$/.test(node.moduleSpecifier.text)) {
+      const nb = node.importClause?.namedBindings
+      if (nb && ts.isNamedImports(nb)) {
+        for (const el of nb.elements) {
+          if (['write', 'writeSync'].includes((el.propertyName ?? el.name).text)) fdWriters.add(el.name.text)
+        }
+      }
+    }
+    if (ts.isVariableDeclaration(node) && ts.isObjectBindingPattern(node.name) && node.initializer && ts.isCallExpression(node.initializer)) {
+      // const { writeSync: emit } = require('fs')
+      for (const el of node.name.elements) {
+        const prop = name(el.propertyName) ?? name(el.name)
+        if ((prop === 'write' || prop === 'writeSync') && ts.isIdentifier(el.name)) fdWriters.add(el.name.text)
+      }
+    }
+    ts.forEachChild(node, collect)
+  }
+  collect(sf)
+  const isProc = (n: ts.Node): boolean => isProcess(n) || (ts.isIdentifier(n) && processAliases.has(n.text))
+  const isGlob = (n: ts.Node): boolean => isGlobalObj(n) || (ts.isIdentifier(n) && consoleAliases.has(n.text))
   const add = (node: ts.Node, rule: string): void => {
     const line = sf.getLineAndCharacterOfPosition(node.getStart(sf)).line
     findings.push({ file, line: line + 1, text: source.split('\n')[line] ?? '', rule })
@@ -62,24 +95,24 @@ export function scanSource(file: string, source: string, checkTextLiteral: boole
       const isPropName = (ts.isPropertyAccessExpression(p) && p.name === node) || (ts.isPropertyAssignment(p) && p.name === node)
       if (!isPropName) add(node, 'console')
     }
-    if ((ts.isPropertyAccessExpression(node) || ts.isElementAccessExpression(node)) && memberName(node) === 'console' && isGlobalObj(node.expression)) {
+    if ((ts.isPropertyAccessExpression(node) || ts.isElementAccessExpression(node)) && memberName(node) === 'console' && isGlob(node.expression)) {
       add(node, 'globalThis.console')
     }
-    if ((ts.isPropertyAccessExpression(node) || ts.isElementAccessExpression(node)) && STD.has(memberName(node) ?? '') && isProcess(node.expression)) {
+    if ((ts.isPropertyAccessExpression(node) || ts.isElementAccessExpression(node)) && STD.has(memberName(node) ?? '') && isProc(node.expression)) {
       add(node, 'process.std')
     }
     // const { stdout } = process  /  const { console: c } = globalThis
     if (ts.isVariableDeclaration(node) && ts.isObjectBindingPattern(node.name) && node.initializer) {
       for (const el of node.name.elements) {
         const prop = name(el.propertyName) ?? name(el.name)
-        if ((STD.has(prop ?? '') && isProcess(node.initializer)) || (prop === 'console' && isGlobalObj(node.initializer))) add(el, 'destructured-std')
+        if ((STD.has(prop ?? '') && isProc(node.initializer)) || (prop === 'console' && isGlob(node.initializer))) add(el, 'destructured-std')
       }
     }
     // fs.write / fs.writeSync / writeSync(1|2, ...)
     if (ts.isCallExpression(node)) {
       const callee = ts.isIdentifier(node.expression) ? node.expression.text : memberName(node.expression)
       const fd = node.arguments[0]
-      if ((callee === 'writeSync' || callee === 'write') && fd && ts.isNumericLiteral(fd) && (fd.text === '1' || fd.text === '2')) add(node, 'fd-write')
+      if (callee !== undefined && fdWriters.has(callee) && fd && ts.isNumericLiteral(fd) && (fd.text === '1' || fd.text === '2')) add(node, 'fd-write')
     }
     // S5
     if (checkTextLiteral && ts.isObjectLiteralExpression(node)) {
@@ -129,10 +162,14 @@ describe('output sink enforcement', () => {
       'writeSync(2, "x")',
       'fs.write(1, "x", () => {})',
       "const t = { type: 'text' as const, text: 'x' }",
+      "import { writeSync as emit } from 'node:fs'; emit(2, 'FAKEsecret')",
+      "const p = process; p.stderr.write('FAKEsecret')",
+      "const g = globalThis; g.console.log('FAKEsecret')",
+      "const { writeSync: w } = require('fs'); w(1, 'FAKEsecret')",
     ].join('\n')
     const hits = scanSource('fixture.ts', fixture, true)
     const lines = new Set(hits.map((h) => h.line))
-    for (let i = 1; i <= 16; i++) expect(lines.has(i), `fixture line ${i} not flagged`).toBe(true)
+    for (let i = 1; i <= 20; i++) expect(lines.has(i), `fixture line ${i} not flagged`).toBe(true)
     // Type literals and property names are not output.
     expect(scanSource('ok.ts', "type T = { type: 'text'; text: string }\nconst o = { console: 1 }; o.console", true)).toEqual([])
   })
