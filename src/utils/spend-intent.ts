@@ -1,3 +1,4 @@
+import { logErr } from './sink.js';
 import { AsyncLocalStorage } from 'node:async_hooks'
 import { createHash, randomUUID } from 'node:crypto'
 import {
@@ -388,27 +389,44 @@ export async function runClassifiedSpend<T>(
     // their own broadcasts. Nothing is swapped in or restored per call.
     return await broadcastContext.run(state, run)
   } catch (error: unknown) {
-    if (error instanceof DefiniteSpendFailure) {
-      throw error
-    }
-    const outcome = classifySpendError(error)
+    // SO ruling (pay-2b C6, addendum 4a829f99): `broadcastStarted` is a
+    // structural flag the broadcast hook sets IMMEDIATELY before the
+    // sendTransaction/writeContract call. Before it, nothing was signed, so
+    // any error (typed AgentWalletVerificationError or generic) may release.
+    // After it, the outcome is UNKNOWN: never release, never auto-retry,
+    // whatever the error says (including SDK "released"/revert classifications).
     if (!state.broadcastStarted) {
-      throw new DefiniteSpendFailure(
-        error instanceof Error ? error.message : String(error)
-      )
+      if (error instanceof DefiniteSpendFailure) throw error
+      // (A typed AgentWalletVerificationError always lands here: the SDK
+      // verifies before signing, so it can never follow the flag.)
+      throw new DefiniteSpendFailure(error instanceof Error ? error.message : String(error))
     }
-    if (options?.lockAfterBroadcast) {
-      throw error
-    }
-    if (
-      outcome.status === 'released' &&
-      isConfirmedUnchargedRevert(error)
-    ) {
-      throw new DefiniteSpendFailure(
-        error instanceof Error ? error.message : String(error)
-      )
-    }
-    throw error
+    void options
+    // Keep the original error (callers inspect its type), but a "definite"
+    // failure can no longer be definite once a write was submitted.
+    // Every post-flag failure is normalized to outcome-unknown and
+    // non-retryable (the original is kept as `cause`). QueuedSpendError and
+    // BroadcastOutcomeUnknownError already carry that contract.
+    if (error instanceof BroadcastOutcomeUnknownError || error instanceof QueuedSpendError) throw error
+    throw new BroadcastOutcomeUnknownError(error)
+  }
+}
+
+/**
+ * Raised for any failure after a transaction was handed to the signer/RPC.
+ * Never a DefiniteSpendFailure, so reservations and intents stay locked and
+ * the caller must not retry automatically.
+ */
+export class BroadcastOutcomeUnknownError extends Error {
+  readonly retryable = false
+  override readonly cause: unknown
+  constructor(cause: unknown) {
+    super(
+      `Outcome UNKNOWN after a transaction was submitted: ${cause instanceof Error ? cause.message : String(cause)}. ` +
+        'The reserved budget stays locked; do not retry until the spend is reconciled.'
+    )
+    this.name = 'BroadcastOutcomeUnknownError'
+    this.cause = cause
   }
 }
 
@@ -544,6 +562,50 @@ export class DurableIdentityCapacityError extends DefiniteSpendFailure {
  * Canonical form is lowercase `0x` plus 64 hex chars. The SDK helper accepts
  * `0X`; that prefix is rejected here so cached hashes stay 0x-prefixed.
  */
+/**
+ * agentwallet-sdk 8: agentTransferToken/agentExecute may park a write for
+ * owner approval. A queued write moved no funds yet but may execute later, so
+ * it is never reported or counted as paid or settled, and it is not a definite
+ * failure either: the reservation and intent stay locked until reconciled.
+ */
+export class QueuedSpendError extends Error {
+  readonly retryable = false
+  readonly txHash: string | undefined
+  readonly pendingTxId: string | undefined
+  constructor(label: string, txHash: unknown, pendingTxId: unknown) {
+    const id = typeof pendingTxId === 'bigint' || typeof pendingTxId === 'number' ? String(pendingTxId) : undefined
+    const hash = typeof txHash === 'string' ? txHash : undefined
+    super(
+      `${label} was QUEUED for owner approval, not paid` +
+        `${id !== undefined ? ` (pendingTxId=${id})` : ''}${hash ? ` txHash=${hash}` : ''}. ` +
+        'No funds moved yet; the reserved budget stays locked until the queued transaction is approved or cancelled and reconciled. Do not resubmit.'
+    )
+    this.name = 'QueuedSpendError'
+    this.txHash = hash
+    this.pendingTxId = id
+  }
+}
+
+/** agentTransferToken (SDK 8) result -> settlement hash only when status === 'executed'. */
+export function requireExecutedTransfer(result: unknown, label: string): unknown {
+  const r = result as { status?: unknown; txHash?: unknown; pendingTxId?: unknown } | null
+  if (r && typeof r === 'object' && r.status === 'executed') return r.txHash
+  if (r && typeof r === 'object' && r.status === 'queued') {
+    throw new QueuedSpendError(label, r.txHash, r.pendingTxId)
+  }
+  throw new Error(`${label} returned an unclassified transfer result; treating the outcome as unknown.`)
+}
+
+/** agentExecute (SDK 8) result -> settlement hash only when executed === true. */
+export function requireExecutedCall(result: unknown, label: string): unknown {
+  const r = result as { executed?: unknown; txHash?: unknown; pendingTxId?: unknown } | null
+  if (r && typeof r === 'object' && r.executed === true) return r.txHash
+  if (r && typeof r === 'object' && r.executed === false) {
+    throw new QueuedSpendError(label, r.txHash, r.pendingTxId)
+  }
+  throw new Error(`${label} returned an unclassified execution result; treating the outcome as unknown.`)
+}
+
 export function requireSettlementHash(hash: unknown, label: string): string {
   if (typeof hash !== 'string' || hash.trim().length === 0) {
     throw new Error(
@@ -1121,7 +1183,7 @@ function compactJournal(path: string, dir: string): void {
     journalBytes = compactedBytes = Buffer.byteLength(text)
   } catch (error: unknown) {
     compactedBytes = journalBytes // back off; the old journal is intact
-    console.error(
+    logErr(
       `[agentpay] spend journal compaction failed; keeping the existing journal: ${error instanceof Error ? error.message : String(error)}`
     )
   }

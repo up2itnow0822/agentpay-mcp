@@ -4,6 +4,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import {
   DefiniteSpendFailure,
+  BroadcastOutcomeUnknownError,
   IDEMPOTENCY_KEY_JSON_SCHEMA,
   IdempotencyKeyZodSchema,
   SEND_TOKEN_INTENT_TTL_MS,
@@ -574,7 +575,9 @@ describe('runClassifiedSpend', () => {
     ).rejects.toSatisfy((error: unknown) => {
       expect(error).toBeInstanceOf(Error)
       expect(error).not.toBeInstanceOf(DefiniteSpendFailure)
-      expect((error as Error).message).toBe('rpc timeout')
+      expect(error).toBeInstanceOf(BroadcastOutcomeUnknownError)
+      expect((error as BroadcastOutcomeUnknownError).retryable).toBe(false)
+      expect((error as BroadcastOutcomeUnknownError).cause).toMatchObject({ message: 'rpc timeout' })
       return true
     })
   })
@@ -611,7 +614,8 @@ describe('runClassifiedSpend', () => {
     ).rejects.toSatisfy((error: unknown) => {
       expect(error).toBeInstanceOf(Error)
       expect(error).not.toBeInstanceOf(DefiniteSpendFailure)
-      expect((error as Error).message).toBe('execution reverted')
+      expect(error).toBeInstanceOf(BroadcastOutcomeUnknownError)
+      expect((error as BroadcastOutcomeUnknownError).cause).toMatchObject({ message: 'execution reverted' })
       return true
     })
   })

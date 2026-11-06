@@ -41,6 +41,7 @@ import {
 } from './shared/x402-client.js';
 import { PolicyGuard, PolicyError } from './shared/spending-policy.js';
 import { FileCache } from './shared/cache.js';
+import { exampleError, exampleLog } from './shared/redact.js';
 import {
   printHeader,
   printSection,
@@ -558,7 +559,7 @@ function printResults(log: ExecutionLog): void {
     const costNote =
       step.actualCostUsd > 0 ? ` ($${step.actualCostUsd.toFixed(4)})` : step.isFree ? ' (free)' : '';
 
-    console.log(`\n  ${colorize(color, icon)} ${bold(step.name)}${costNote}`);
+    exampleLog(`\n  ${colorize(color, icon)} ${bold(step.name)}${costNote}`);
 
     if (step.result && step.status !== 'skipped') {
       const data = step.result as Record<string, unknown>;
@@ -566,8 +567,8 @@ function printResults(log: ExecutionLog): void {
       // Special formatting for aggregate step
       if (step.id === 'aggregate') {
         const agg = data as { summary: string; timestamp: string };
-        console.log(`    ${agg.summary}`);
-        console.log(`    Completed at: ${agg.timestamp}`);
+        exampleLog(`    ${agg.summary}`);
+        exampleLog(`    Completed at: ${agg.timestamp}`);
         continue;
       }
 
@@ -578,29 +579,29 @@ function printResults(log: ExecutionLog): void {
         if (typeof v === 'object' && !Array.isArray(v)) {
           for (const [k2, v2] of Object.entries(v as Record<string, unknown>)) {
             if (v2 !== null && v2 !== undefined) {
-              console.log(`    ${dim(k + '.' + k2 + ':')} ${v2}`);
+              exampleLog(`    ${dim(k + '.' + k2 + ':')} ${v2}`);
             }
           }
         } else {
-          console.log(`    ${dim(k + ':')} ${v}`);
+          exampleLog(`    ${dim(k + ':')} ${v}`);
         }
       }
     }
 
     if (step.error) {
-      console.log(`    ${colorize('red', 'Error:')} ${step.error}`);
+      exampleLog(`    ${colorize('red', 'Error:')} ${step.error}`);
     }
   }
 
   // Execution log table
   printSection('Execution Log');
-  console.log(`  ${'Step'.padEnd(30)} ${'Status'.padEnd(12)} ${'Duration'.padEnd(12)} Cost`);
-  console.log(`  ${'─'.repeat(65)}`);
+  exampleLog(`  ${'Step'.padEnd(30)} ${'Status'.padEnd(12)} ${'Duration'.padEnd(12)} Cost`);
+  exampleLog(`  ${'─'.repeat(65)}`);
   for (const step of log.steps) {
     const statusStr = step.status.padEnd(12);
     const duration = step.durationMs ? `${step.durationMs}ms`.padEnd(12) : 'N/A'.padEnd(12);
     const cost = step.actualCostUsd > 0 ? `$${step.actualCostUsd.toFixed(4)}` : step.isFree ? 'free' : 'skipped';
-    console.log(`  ${step.name.slice(0, 29).padEnd(30)} ${statusStr} ${duration} ${cost}`);
+    exampleLog(`  ${step.name.slice(0, 29).padEnd(30)} ${statusStr} ${duration} ${cost}`);
   }
 
   // Cost summary
@@ -616,12 +617,12 @@ async function main(): Promise<void> {
   const task = args.find((a) => !a.startsWith('--')) ?? '';
 
   if (!task) {
-    console.error('\nUsage: npx tsx automation-agent.ts "your task description"\n');
-    console.error('Examples:');
-    console.error('  npx tsx automation-agent.ts "get BTC price and sentiment analysis"');
-    console.error('  npx tsx automation-agent.ts "research AI payment protocols"');
-    console.error('  npx tsx automation-agent.ts "monitor crypto market overview"');
-    console.error('  npx tsx automation-agent.ts "get weather and crypto update"\n');
+    exampleError('\nUsage: npx tsx automation-agent.ts "your task description"\n');
+    exampleError('Examples:');
+    exampleError('  npx tsx automation-agent.ts "get BTC price and sentiment analysis"');
+    exampleError('  npx tsx automation-agent.ts "research AI payment protocols"');
+    exampleError('  npx tsx automation-agent.ts "monitor crypto market overview"');
+    exampleError('  npx tsx automation-agent.ts "get weather and crypto update"\n');
     process.exit(1);
   }
 
@@ -643,8 +644,8 @@ async function main(): Promise<void> {
   // Build task plan
   printSection('Task Planning');
   const plan = buildPlan(task, wallet !== null);
-  console.log(`\n  Task type: ${bold(plan.name)}`);
-  console.log(`  Steps: ${plan.steps.length} planned\n`);
+  exampleLog(`\n  Task type: ${bold(plan.name)}`);
+  exampleLog(`  Steps: ${plan.steps.length} planned\n`);
 
   // Initialize steps with tracking fields
   const steps: TaskStep[] = plan.steps.map((s) => ({
@@ -703,7 +704,7 @@ async function main(): Promise<void> {
     log.aborted = true;
     log.completedAt = new Date().toISOString();
     const completedSteps = steps.filter((s) => s.status === 'success' || s.status === 'fallback');
-    console.log(`\n  ${completedSteps.length}/${steps.length} steps completed before abort.`);
+    exampleLog(`\n  ${completedSteps.length}/${steps.length} steps completed before abort.`);
     if (completedSteps.length > 0) {
       printResults(log);
     }
@@ -711,7 +712,7 @@ async function main(): Promise<void> {
 
   // Execute steps
   printSection('Executing Steps');
-  console.log('');
+  exampleLog('');
 
   for (let i = 0; i < steps.length; i++) {
     const step = steps[i]!;
@@ -741,7 +742,7 @@ async function main(): Promise<void> {
   printInfo('Total spent:', `$${log.totalCostUsd.toFixed(4)}`);
   printInfo('Duration:', `${((Date.now() - new Date(log.startedAt).getTime()) / 1000).toFixed(1)}s`);
 
-  console.log('\n');
+  exampleLog('\n');
 }
 
 main().catch((err) => {

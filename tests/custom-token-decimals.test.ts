@@ -36,7 +36,7 @@ beforeEach(() => {
   _resetCustomTokenQuota()
   _resetSpendIntentStore()
   readContract.mockReset().mockResolvedValue(6)
-  agentTransferToken.mockReset().mockResolvedValue('0x' + 'ab'.repeat(32))
+  agentTransferToken.mockReset().mockResolvedValue({ status: 'executed', txHash: '0x' + 'ab'.repeat(32) })
 })
 
 describe('add_custom_token on-chain decimals verification', () => {

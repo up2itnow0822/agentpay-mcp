@@ -23,11 +23,13 @@ import {
 } from '@modelcontextprotocol/sdk/types.js';
 import packageJson from '../package.json';
 import { runSpendIntentsCli } from './cli/spend-intents.js';
+// Must load before handleCliMetadataFlag() runs below (CJS evaluates in order).
+import { enterStdioProtocolMode, logErr, logOut } from './utils/sink.js';
 
 const PACKAGE_VERSION = packageJson.version;
 
 function printHelp(): void {
-  process.stdout.write(
+  logOut(
     [
       'AgentPay MCP Server',
       '',
@@ -42,6 +44,9 @@ function printHelp(): void {
       '  AGENT_PRIVATE_KEY       Optional private key for signing payments',
       '  AGENT_WALLET_ADDRESS    Optional wallet address for display and checks',
       '  CHAIN_ID                Chain id, defaults to 8453 (Base Mainnet)',
+      '  AGENT_WALLET_FACTORY / AGENT_WALLET_TOKEN_CONTRACT / AGENT_WALLET_TOKEN_ID',
+      '                          Wallet deployment identity (required for any payment)',
+      '  AGENT_WALLET_CODE_HASH  Approved AgentAccountV2 runtime code hash (strongly recommended)',
       '  SESSION_TTL_SECONDS     Session TTL, defaults to 3600',
       '',
       'Safety (see SECURITY.md):',
@@ -59,7 +64,6 @@ function printHelp(): void {
       '                          (stop the server first: one process per state directory)',
       '',
       'When no metadata flag is provided, the server starts on stdio for MCP clients.',
-      '',
     ].join('\n')
   );
 }
@@ -75,7 +79,7 @@ function handleCliMetadataFlag(argv: string[]): void {
   }
 
   if (args.includes('--version') || args.includes('-v')) {
-    process.stdout.write(`${PACKAGE_VERSION}\n`);
+    logOut(PACKAGE_VERSION);
     process.exit(0);
   }
 
@@ -187,6 +191,8 @@ import {
 } from './tools/otel-budget.js';
 
 import { formatError, sanitizeUntrustedInline, textContent } from './utils/format.js';
+import { guardRequest, guardToolCall } from './utils/tool-guard.js';
+import { describeWalletIdentity, getConfig } from './utils/client.js';
 
 // ─── Server configuration ──────────────────────────────────────────────────
 
@@ -251,15 +257,21 @@ const server = new Server(SERVER_INFO, {
 
 // ─── List tools handler ────────────────────────────────────────────────────
 
-server.setRequestHandler(ListToolsRequestSchema, async () => {
-  return {
+server.setRequestHandler(ListToolsRequestSchema, async () =>
+  guardRequest(() => ({
     tools: ALL_TOOLS,
-  };
-});
+  }))
+);
 
 // ─── Call tool handler ─────────────────────────────────────────────────────
 
-server.setRequestHandler(CallToolRequestSchema, async (request: CallToolRequest) => {
+server.setRequestHandler(CallToolRequestSchema, async (request: CallToolRequest) =>
+  // S1: every throw or rejection becomes a redacted tool error, never a raw
+  // JSON-RPC error message.
+  guardToolCall(request.params?.name, () => routeToolCall(request))
+);
+
+async function routeToolCall(request: CallToolRequest) {
   const { name, arguments: args } = request.params;
 
   try {
@@ -268,173 +280,171 @@ server.setRequestHandler(CallToolRequestSchema, async (request: CallToolRequest)
 
       case 'deploy_wallet': {
         const input = DeployWalletSchema.parse(args);
-        return handleDeployWallet(input);
+        return await handleDeployWallet(input);
       }
 
       case 'get_wallet_info': {
         const input = GetWalletInfoSchema.parse(args ?? {});
-        return handleGetWalletInfo(input);
+        return await handleGetWalletInfo(input);
       }
 
       case 'send_payment': {
         const input = SendPaymentSchema.parse(args);
-        return handleSendPayment(input);
+        return await handleSendPayment(input);
       }
 
       case 'check_spend_limit': {
         const input = CheckSpendLimitSchema.parse(args);
-        return handleCheckSpendLimit(input);
+        return await handleCheckSpendLimit(input);
       }
 
       case 'queue_approval': {
         const input = QueueApprovalSchema.parse(args);
-        return handleQueueApproval(input);
+        return await handleQueueApproval(input);
       }
 
       case 'x402_pay': {
         const input = X402PaySchema.parse(args);
-        return handleX402Pay(input);
+        return await handleX402Pay(input);
       }
 
       case 'x402_quote': {
         const input = X402QuoteSchema.parse(args);
-        return handleX402Quote(input);
+        return await handleX402Quote(input);
       }
 
       case 'get_transaction_history': {
         const input = GetTransactionHistorySchema.parse(args ?? {});
-        return handleGetTransactionHistory(input);
+        return await handleGetTransactionHistory(input);
       }
 
       // ── v1.1.0 — x402 V2 session tools ───────────────────────────────
 
       case 'x402_session_start': {
         const input = X402SessionStartSchema.parse(args);
-        return handleX402SessionStart(input);
+        return await handleX402SessionStart(input);
       }
 
       case 'x402_session_fetch': {
         const input = X402SessionFetchSchema.parse(args);
-        return handleX402SessionFetch(input);
+        return await handleX402SessionFetch(input);
       }
 
       case 'x402_session_status': {
         const input = X402SessionStatusSchema.parse(args ?? {});
-        return handleX402SessionStatus(input);
+        return await handleX402SessionStatus(input);
       }
 
       case 'x402_session_end': {
         const input = X402SessionEndSchema.parse(args);
-        return handleX402SessionEnd(input);
+        return await handleX402SessionEnd(input);
       }
 
       // ── v4.0.0 — tokens ───────────────────────────────────────────────
 
       case 'lookup_token': {
         const input = LookupTokenSchema.parse(args);
-        return handleLookupToken(input);
+        return await handleLookupToken(input);
       }
 
       case 'add_custom_token': {
         const input = AddCustomTokenSchema.parse(args);
-        return handleAddCustomToken(input);
+        return await handleAddCustomToken(input);
       }
 
       case 'list_chain_tokens': {
         const input = ListChainTokensSchema.parse(args);
-        return handleListChainTokens(input);
+        return await handleListChainTokens(input);
       }
 
       // ── v4.0.0 — transfers ────────────────────────────────────────────
 
       case 'send_token': {
         const input = SendTokenSchema.parse(args);
-        return handleSendToken(input);
+        return await handleSendToken(input);
       }
 
       case 'get_balances': {
         const input = GetBalancesSchema.parse(args ?? {});
-        return handleGetBalances(input);
+        return await handleGetBalances(input);
       }
 
       // ── v4.0.0 — swap ─────────────────────────────────────────────────
 
       case 'swap_tokens': {
         const input = SwapTokensSchema.parse(args);
-        return handleSwapTokens(input);
+        return await handleSwapTokens(input);
       }
 
       // ── v4.0.0 — bridge ───────────────────────────────────────────────
 
       case 'bridge_usdc': {
         const input = BridgeUsdcSchema.parse(args);
-        return handleBridgeUsdc(input);
+        return await handleBridgeUsdc(input);
       }
 
       // ── v4.0.0 — budget ───────────────────────────────────────────────
 
       case 'set_spend_policy': {
         const input = SetSpendPolicySchema.parse(args ?? {});
-        return handleSetSpendPolicy(input);
+        return await handleSetSpendPolicy(input);
       }
 
       case 'check_budget': {
         const input = CheckBudgetSchema.parse(args ?? {});
-        return handleCheckBudget(input);
+        return await handleCheckBudget(input);
       }
 
       // ── v4.0.0 — identity ─────────────────────────────────────────────
 
       case 'verify_agent_identity': {
         const input = VerifyAgentIdentitySchema.parse(args);
-        return handleVerifyAgentIdentity(input);
+        return await handleVerifyAgentIdentity(input);
       }
 
       case 'get_reputation': {
         const input = GetReputationSchema.parse(args);
-        return handleGetReputation(input);
+        return await handleGetReputation(input);
       }
 
       // ── v6.1.0 — cross-chain identity (UAID) ─────────────────────────
 
       case 'verify_agent_uaid': {
         const input = VerifyAgentUAIDSchema.parse(args);
-        return handleVerifyAgentUAID(input);
+        return await handleVerifyAgentUAID(input);
       }
 
       // ── v4.0.0 — escrow ───────────────────────────────────────────────
 
       case 'create_escrow': {
         const input = CreateEscrowSchema.parse(args);
-        return handleCreateEscrow(input);
+        return await handleCreateEscrow(input);
       }
 
       // ── v4.2.0 — OTel budget circuit-breaker ─────────────────────────
 
       case 'otel_register_budget_policy': {
         const input = OTelRegisterPolicySchema.parse(args);
-        return handleOTelRegisterPolicy(input);
+        return await handleOTelRegisterPolicy(input);
       }
 
       case 'otel_evaluate_spend': {
         const input = OTelEvaluateSpendSchema.parse(args);
-        return handleOTelEvaluateSpend(input);
+        return await handleOTelEvaluateSpend(input);
       }
 
       case 'otel_budget_status': {
         const input = OTelBudgetStatusSchema.parse(args);
-        return handleOTelBudgetStatus(input);
+        return await handleOTelBudgetStatus(input);
       }
 
       default:
         return {
           content: [
-            {
-              type: 'text' as const,
-              text:
-                `❌ Unknown tool: "${sanitizeUntrustedInline(name, 64)}". ` +
-                `Available tools: ${ALL_TOOLS.map(t => t.name).join(', ')}`,
-            },
+            textContent(
+              `❌ Unknown tool: "${sanitizeUntrustedInline(name, 64)}". ` +
+                `Available tools: ${ALL_TOOLS.map(t => t.name).join(', ')}`
+            ),
           ],
           isError: true,
         };
@@ -452,7 +462,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request: CallToolRequest)
       isError: true,
     };
   }
-});
+}
 
 // ─── Start server ──────────────────────────────────────────────────────────
 
@@ -470,28 +480,39 @@ async function main(): Promise<void> {
     process.exit(0);
   });
 
+  // S6: from here on stdout belongs to JSON-RPC; logOut diverts to stderr.
+  enterStdioProtocolMode();
   await server.connect(transport);
 
   // Surface spend-policy configuration problems at startup, loudly.
   const policyError = operatorPolicyError();
   if (policyError) {
-    process.stderr.write(
+    logErr(
       `AgentPay MCP: operator spend policy is INVALID (${policyError}). ` +
-        'All value-moving tools will refuse until AGENTPAY_POLICY_* is fixed.\n'
+        'All value-moving tools will refuse until AGENTPAY_POLICY_* is fixed.'
     );
   }
 
   // Log to stderr (not stdout — stdout is reserved for MCP protocol)
-  process.stderr.write(
+  logErr(
     `AgentPay MCP v${PACKAGE_VERSION} started. ` +
     `Wallet: ${process.env['AGENT_WALLET_ADDRESS'] ?? '(not configured)'} | ` +
     `Chain: ${process.env['CHAIN_ID'] ?? '8453 (Base Mainnet)'} | ` +
-    `Session TTL: ${process.env['SESSION_TTL_SECONDS'] ?? '3600'}s\n`
+    `Session TTL: ${process.env['SESSION_TTL_SECONDS'] ?? '3600'}s`
   );
+
+  // agentwallet-sdk 8: state which deployment identity every write is verified
+  // against. Non-secret values only (loadConfig errors never echo the key or RPC URL).
+  try {
+    logErr(describeWalletIdentity(getConfig()));
+  } catch (err) {
+    const why = err instanceof Error ? err.message : String(err);
+    logErr(`AgentPay wallet identity: NOT CONFIGURED; value-moving tools will refuse (${why})`);
+  }
 }
 
 main().catch((error: unknown) => {
   const msg = error instanceof Error ? error.message : String(error);
-  process.stderr.write(`Fatal error starting AgentPay MCP: ${msg}\n`);
+  logErr(`Fatal error starting AgentPay MCP: ${msg}`);
   process.exit(1);
 });

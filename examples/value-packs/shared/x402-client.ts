@@ -15,7 +15,7 @@ import { createX402Client } from 'agentwallet-sdk';
 import { createWalletClient, http } from 'viem';
 import { privateKeyToAccount } from 'viem/accounts';
 import { base, baseSepolia } from 'viem/chains';
-import { createWallet } from 'agentwallet-sdk';
+import { createWallet, readDeploymentIdentitySettings } from 'agentwallet-sdk';
 import { printInfo, printWarning, printError } from './ui.js';
 import { wrapPaymentFailure } from './payment-retry.js';
 // The packs use the MCP server's own outbound transport, so there is one
@@ -275,11 +275,26 @@ export function createScriptWallet(config: X402Config = {}) {
     transport: http(rpcUrl),
   });
 
+  // agentwallet-sdk 8 verifies the account before every write. The unsafe
+  // opt-out is rejected outright; the deployment identity is required.
+  if ((process.env['AGENT_WALLET_ALLOW_UNVERIFIED'] ?? '') !== '') {
+    throw new Error('AGENT_WALLET_ALLOW_UNVERIFIED is not supported; unset it and configure the deployment identity.');
+  }
+  const identity = readDeploymentIdentitySettings((name) => process.env[name]);
+  if (!identity.deployment) {
+    throw new Error(
+      'Deployment identity required: set AGENT_WALLET_FACTORY, AGENT_WALLET_TOKEN_CONTRACT and AGENT_WALLET_TOKEN_ID ' +
+        '(AGENT_WALLET_CODE_HASH strongly recommended).'
+    );
+  }
+
   return createWallet({
     accountAddress: walletAddress as `0x${string}`,
     chain: network.chainName,
     rpcUrl,
     walletClient,
+    deployment: identity.deployment,
+    ...(identity.expectedCodeHash ? { expectedCodeHash: identity.expectedCodeHash } : {}),
   });
 }
 

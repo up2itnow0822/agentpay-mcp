@@ -42,6 +42,7 @@ import {
 
 import { PolicyGuard, PolicyError } from './shared/spending-policy.js';
 import { FileCache } from './shared/cache.js';
+import { exampleError, exampleLog } from './shared/redact.js';
 import {
   printHeader,
   printSection,
@@ -406,28 +407,28 @@ function printSummary(results: DataResult[], policy: PolicyGuard): void {
 
   for (const r of results) {
     if (r.skipped) {
-      console.log(`  ⊘ ${r.endpoint.name}: skipped (${r.error})`);
+      exampleLog(`  ⊘ ${r.endpoint.name}: skipped (${r.error})`);
       continue;
     }
     if (!r.data) {
-      console.log(`  ✗ ${r.endpoint.name}: error — ${r.error}`);
+      exampleLog(`  ✗ ${r.endpoint.name}: error — ${r.error}`);
       continue;
     }
 
     const cacheLabel = r.fromCache ? ' [cached]' : '';
     const costLabel = r.costUsd > 0 ? ` [$${r.costUsd.toFixed(4)}]` : ' [free]';
-    console.log(`\n  ✓ ${r.endpoint.name}${cacheLabel}${costLabel}`);
+    exampleLog(`\n  ✓ ${r.endpoint.name}${cacheLabel}${costLabel}`);
 
     // Print data
     for (const [k, v] of Object.entries(r.data)) {
       if (k === '_note' || k === '_mock') continue;
       if (Array.isArray(v)) {
-        console.log(`      ${k}:`);
-        v.forEach((item) => console.log(`        - ${JSON.stringify(item)}`));
+        exampleLog(`      ${k}:`);
+        v.forEach((item) => exampleLog(`        - ${JSON.stringify(item)}`));
       } else if (typeof v === 'object' && v !== null) {
-        console.log(`      ${k}: ${JSON.stringify(v)}`);
+        exampleLog(`      ${k}: ${JSON.stringify(v)}`);
       } else {
-        console.log(`      ${k}: ${v}`);
+        exampleLog(`      ${k}: ${v}`);
       }
     }
 
@@ -446,7 +447,7 @@ function printSummary(results: DataResult[], policy: PolicyGuard): void {
     printSection('Payment History');
     for (const h of policy.history) {
       if (h.approved) {
-        console.log(`  💳 $${h.amountUsd.toFixed(4)} → ${h.endpoint}`);
+        exampleLog(`  💳 $${h.amountUsd.toFixed(4)} → ${h.endpoint}`);
       }
     }
   }
@@ -471,7 +472,7 @@ async function main(): Promise<void> {
 
   // Show policy
   printSection('Spending Policy');
-  console.log(
+  exampleLog(
     policy
       .summary()
       .split('\n')
@@ -501,7 +502,7 @@ async function main(): Promise<void> {
 
   // Collect data
   printSection('Fetching Data');
-  console.log(`  Endpoints: ${ENDPOINTS.length} (${ENDPOINTS.filter((e) => e.free).length} free, ${ENDPOINTS.filter((e) => !e.free).length} paid)\n`);
+  exampleLog(`  Endpoints: ${ENDPOINTS.length} (${ENDPOINTS.filter((e) => e.free).length} free, ${ENDPOINTS.filter((e) => !e.free).length} paid)\n`);
 
   results = await collectData(ENDPOINTS, policy, cache, wallet);
 
@@ -515,7 +516,7 @@ async function main(): Promise<void> {
   printInfo('Misses:', String(cacheStats.misses));
   printInfo('Saved:', String(cacheStats.saves));
 
-  console.log('\n');
+  exampleLog('\n');
 }
 
 main().catch((err) => {

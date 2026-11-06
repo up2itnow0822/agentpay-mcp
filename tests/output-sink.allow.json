@@ -1,0 +1,17 @@
+[
+  {
+    "file": "examples/x402-clean-demo/server.mjs",
+    "sha256": "54eec3d94e2aaf4f1a4ed907f8cbd3c4d605ab925033073c748402e530ac3a69",
+    "reason": "operator-set public demo URL, no secrets"
+  },
+  {
+    "file": "examples/x402-clean-demo/server.mjs",
+    "sha256": "4835a6d405d42bb152092fc9cd49025d90593aaa601b7558ada43f19cebffe25",
+    "reason": "public demo resource URL, no secrets"
+  },
+  {
+    "file": "examples/value-packs/shared/ui.ts",
+    "sha256": "395632600573b97e5acf94b6f2447351aca285d52254a4f750aac7fe356ace07",
+    "reason": "readline prompt stream; prompts are fixed strings"
+  }
+]

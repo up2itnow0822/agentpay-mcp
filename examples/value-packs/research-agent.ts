@@ -44,6 +44,7 @@ import {
 } from './shared/x402-client.js';
 import { PolicyGuard, PolicyError } from './shared/spending-policy.js';
 import { FileCache } from './shared/cache.js';
+import { exampleError, exampleLog } from './shared/redact.js';
 import {
   printHeader,
   printSection,
@@ -83,10 +84,10 @@ function parseArgs(): { topic: string; noPaid: boolean; outputDir: string } {
   const outputDir = outputIdx !== -1 ? (args[outputIdx + 1] ?? REPORTS_DIR) : REPORTS_DIR;
 
   if (!topic) {
-    console.error('\nUsage: npx tsx research-agent.ts "your research topic" [--no-paid]\n');
-    console.error('Examples:');
-    console.error('  npx tsx research-agent.ts "AI payment protocols"');
-    console.error('  npx tsx research-agent.ts "x402 protocol" --no-paid\n');
+    exampleError('\nUsage: npx tsx research-agent.ts "your research topic" [--no-paid]\n');
+    exampleError('Examples:');
+    exampleError('  npx tsx research-agent.ts "AI payment protocols"');
+    exampleError('  npx tsx research-agent.ts "x402 protocol" --no-paid\n');
     process.exit(1);
   }
 
@@ -547,15 +548,15 @@ async function main(): Promise<void> {
 
   installShutdownHandler(() => {
     if (!completed && sections.length > 0) {
-      console.log('\n\nPartial results captured before shutdown:');
-      sections.forEach((s) => console.log(`  - ${s.title}: ${s.content ? 'OK' : 'failed'}`));
+      exampleLog('\n\nPartial results captured before shutdown:');
+      sections.forEach((s) => exampleLog(`  - ${s.title}: ${s.content ? 'OK' : 'failed'}`));
     }
   });
 
   // ── Phase 1: Free sources ─────────────────────────────────────────────────
 
   printSection('Phase 1: Free Sources');
-  console.log(`  Fetching background data — no payment required\n`);
+  exampleLog(`  Fetching background data — no payment required\n`);
 
   const freeFetchers = [
     () => fetchWikipedia(topic),
@@ -584,10 +585,10 @@ async function main(): Promise<void> {
   if (gaps.length === 0) {
     printSuccess('No gaps detected — free sources provide comprehensive coverage');
   } else {
-    console.log(`  Found ${gaps.length} gap(s) that paid sources can fill:\n`);
+    exampleLog(`  Found ${gaps.length} gap(s) that paid sources can fill:\n`);
     gaps.forEach((gap, i) => {
       printPaid(`${gap.title} via ${gap.paidSourceName}`, gap.estimatedCostUsd);
-      console.log(`    Reason: ${gap.reason}`);
+      exampleLog(`    Reason: ${gap.reason}`);
     });
   }
 
@@ -686,16 +687,16 @@ async function main(): Promise<void> {
   // Console preview
   printSection('Report Preview');
   const previewLines = markdown.split('\n').slice(0, 20);
-  console.log(previewLines.map((l) => `  ${l}`).join('\n'));
+  exampleLog(previewLines.map((l) => `  ${l}`).join('\n'));
   if (markdown.split('\n').length > 20) {
-    console.log(`  ${dim('... (see full report in file)')}`);
+    exampleLog(`  ${dim('... (see full report in file)')}`);
   }
 
   // Cost summary
   printCostBreakdown({ freeSources, paidSources, totalCostUsd });
   completed = true;
 
-  console.log('\n');
+  exampleLog('\n');
 }
 
 main().catch((err) => {
