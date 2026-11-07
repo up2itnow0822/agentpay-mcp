@@ -67,6 +67,18 @@ export const SendPaymentSchema = z.object({
         'reusing it with a different payload is refused; distinct keys allow two equal ' +
         'payments. Retries without a key collapse on the payment payload for five minutes.'
     ),
+dacsMandate: z
+    .string()
+    .optional()
+    .describe('DACS-Standard (§9.5.7) cryptographic mandate hash or reference.'),
+  dacsSessionId: z
+    .string()
+    .optional()
+    .describe('DACS session identifier for autonomous bounded execution.'),
+  dacsMaxAmount: z
+    .union([z.string(), z.bigint()])
+    .optional()
+    .describe('DACS authorized mandate spend ceiling in token base units (wei).'),
 });
 
 export type SendPaymentInput = z.infer<typeof SendPaymentSchema>;
@@ -113,11 +125,47 @@ export const sendPaymentTool = {
         description:
           'Optional idempotency key (1-128 non-whitespace chars). Distinct keys allow two equal payments.',
       },
+
+      dacsMandate: {
+        type: 'string',
+        description: 'DACS-Standard (§9.5.7) cryptographic mandate hash or identifier.',
+      },
+      dacsSessionId: {
+        type: 'string',
+        description: 'DACS session identifier for autonomous bounded execution.',
+      },
+ dacsMaxAmount: {
+        type: 'string',
+        description: 'DACS authorized mandate spend ceiling in token base units (wei).',
+      },
     },
     required: ['to', 'amount_eth'],
   },
 };
 
+// ─── DACS-Standard Guardrail (§9.5.7 & §14.4) ─────────────────────────────
+
+export interface DacsMandateMeta {
+  dacsMandate?: string;
+  dacsSessionId?: string;
+  dacsMaxAmount?: string | bigint;
+}
+
+export function assertDacsSpendMandate(
+  requestedAmount: bigint | string,
+  meta?: DacsMandateMeta
+): void {
+  if (!meta?.dacsMandate && !meta?.dacsSessionId) return;
+
+  const reqAmt = BigInt(requestedAmount);
+  const maxAllowed = BigInt(meta.dacsMaxAmount ?? '0');
+
+  if (meta.dacsMaxAmount !== undefined && reqAmt > maxAllowed) {
+    throw new Error(
+      `[DACS-Standard §9.5.7] Agent action aborted: requested amount (${reqAmt}) exceeds authorized mandate ceiling (${maxAllowed}).`
+    );
+  }
+}
 // ─── Handler ───────────────────────────────────────────────────────────────
 
 export async function handleSendPayment(
@@ -151,7 +199,12 @@ export async function handleSendPayment(
       config.chainId
     );
     const amountWei = parseExactTokenAmount(input.amount_eth, decimals);
-
+// DACS-Standard (§9.5.7) Pre-Flight Mandate Enforcement
+    assertDacsSpendMandate(amountWei, {
+      dacsMandate: input.dacsMandate,
+      dacsSessionId: input.dacsSessionId,
+      dacsMaxAmount: input.dacsMaxAmount,
+    });
     const intent = sendPaymentIntentIdentity({
       chainId: config.chainId,
       tokenAddress,
