@@ -63,7 +63,7 @@
     "node": ">=18.14.1"
   },
   "dependencies": {
-    "@hono/node-server": "1.19.17",
+    "@hono/node-server": "1.19.18",
     "@modelcontextprotocol/sdk": "1.32.2",
     "agentwallet-sdk": "7.0.0",
     "viem": "2.57.4",
