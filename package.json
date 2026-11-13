@@ -63,7 +63,7 @@
     "node": ">=18.14.1"
   },
   "dependencies": {
-    "@hono/node-server": "1.19.17",
+    "@hono/node-server": "1.19.18",
     "@modelcontextprotocol/sdk": "1.32.2",
     "agentwallet-sdk": "7.0.0",
     "viem": "2.57.4",
@@ -74,7 +74,7 @@
     "fast-uri": "3.1.9",
     "brace-expansion": "5.0.12",
     "ip-address": "10.7.4",
-    "hono": "4.13.13",
+    "hono": "4.13.16",
     "proxy-addr": "2.0.8",
     "source-map-js": "1.2.2",
     "@modelcontextprotocol/sdk": "1.32.2",
