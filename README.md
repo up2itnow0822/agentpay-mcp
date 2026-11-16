@@ -1,7 +1,5 @@
 # AgentPay MCP
 
-Paused for security maintenance. Do not use in production.
-
 [![npm](https://img.shields.io/npm/v/agentpay-mcp.svg)](https://www.npmjs.com/package/agentpay-mcp)
 [![CI](https://github.com/up2itnow0822/agentpay-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/up2itnow0822/agentpay-mcp/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
@@ -10,7 +8,12 @@ AgentPay MCP is a stdio Model Context Protocol server for x402 payments and
 wallet operations. It exposes Agent Wallet SDK functions as MCP tools and loads
 a caller-controlled signing key from the local process environment.
 
-The current npm package is `agentpay-mcp` v5.0.0.
+## Upgrade recommended: spend-cap fix
+
+If you use `agentpay-mcp` 4.3.0, update to v5.0.0. This release includes a
+bug fix for spend-cap enforcement, so spend limits apply as configured. v5.0.0
+is a breaking release: read [Upgrading from 4.x](#upgrading-from-4x) before
+you update.
 
 ## Start without funds
 

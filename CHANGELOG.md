@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [5.0.0] - 2026-10-25
 
+### Upgrade recommended: spend-cap fix
+- If you use 4.3.0, update to 5.0.0. This release includes a bug fix for
+  spend-cap enforcement, so spend limits apply as configured. Read the
+  Breaking section below before you update.
+- Tokens that are not in the token registry now fail closed under a spend cap.
+
 Security release. Repairs all 18 findings (4 high, 13 medium, 1 low) of the
 October 2026 whole-repository static security review. Finding numbers below
 (F1–F18) refer to

@@ -340,6 +340,77 @@ describe('send_payment tool', () => {
   });
 });
 
+describe('send_payment spend-cap decimals (SEC-20261116-04)', () => {
+  const VALID_TO = '0xabcdefabcdefabcdefabcdefabcdefabcdefabcd';
+  const UNREGISTERED = '0x1111111111111111111111111111111111111111';
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    _resetPolicyStore();
+    _resetSpendIntentStore();
+    mockAgentTransferToken.mockResolvedValue(MOCK_TX_HASH);
+    mockAgentExecute.mockResolvedValue({ executed: true, txHash: MOCK_TX_HASH });
+  });
+
+  it('throws for a registry token with mismatched caller decimals under a spend cap', async () => {
+    expect(() => resolveTokenDecimals(USDC_BASE as `0x${string}`, 18, 8453)).toThrow(
+      'does not match'
+    );
+
+    const reserve = vi.fn().mockResolvedValue(reservedResult());
+    vi.mocked(SpendingPolicy).mockImplementation(function () {
+      return policyEngine(reserve);
+    } as any);
+    await handleSetSpendPolicy({ perTxCapEth: '5' });
+
+    const result = await handleSendPayment({
+      to: VALID_TO,
+      amount_eth: '1000',
+      token: USDC_BASE,
+      token_decimals: 18,
+    });
+
+    expect(result.isError).toBe(true);
+    expect(result.content[0]!.text).toContain('does not match');
+    expect(reserve).not.toHaveBeenCalled();
+    expect(mockAgentTransferToken).not.toHaveBeenCalled();
+  });
+
+  it('rejects an unregistered token with caller decimals under a spend cap (fail closed)', async () => {
+    expect(() => resolveTokenDecimals(UNREGISTERED, 6, 8453)).toThrow(
+      'Spend cap requires a registered token'
+    );
+
+    const reserve = vi.fn().mockResolvedValue(reservedResult());
+    vi.mocked(SpendingPolicy).mockImplementation(function () {
+      return policyEngine(reserve);
+    } as any);
+    await handleSetSpendPolicy({ perTxCapEth: '5' });
+
+    // Even a value that matches the contract is refused: caller decimals never
+    // size the cap for a token outside the registry.
+    const readContract = vi.fn().mockResolvedValue(6);
+    (MOCK_WALLET.publicClient as any).readContract = readContract;
+    try {
+      for (const token_decimals of [0, 6, 18]) {
+        const result = await handleSendPayment({
+          to: VALID_TO,
+          amount_eth: '1',
+          token: UNREGISTERED,
+          token_decimals,
+        });
+        expect(result.isError).toBe(true);
+        expect(result.content[0]!.text).toContain('Spend cap requires a registered token');
+      }
+      expect(readContract).not.toHaveBeenCalled();
+      expect(reserve).not.toHaveBeenCalled();
+      expect(mockAgentTransferToken).not.toHaveBeenCalled();
+    } finally {
+      delete (MOCK_WALLET.publicClient as any).readContract;
+    }
+  });
+});
+
 describe('send_payment decimals integrity (F2)', () => {
   const VALID_TO = '0xabcdefabcdefabcdefabcdefabcdefabcdefabcd';
 

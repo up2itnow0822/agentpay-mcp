@@ -54,7 +54,7 @@ export const SendPaymentSchema = z.object({
     .describe(
       'Optional assertion of the token decimal places. The authoritative value is the ' +
       'token registry entry or the token contract decimals(); a mismatch is rejected ' +
-      'before policy evaluation or signing.'
+      'before policy evaluation or signing. Refused for tokens not in the registry.'
     ),
   memo: z
     .string()
@@ -101,7 +101,8 @@ export const sendPaymentTool = {
         type: 'number',
         description:
           'Optional assertion of the token decimals. The authoritative value comes from the ' +
-          'token registry or the token contract; a mismatching value is rejected.',
+          'token registry or the token contract; a mismatching value is rejected. ' +
+          'Refused for tokens not in the registry.',
       },
       memo: {
         type: 'string',
@@ -221,7 +222,9 @@ export async function handleSendPayment(
 // ─── Token amount parser ───────────────────────────────────────────────────
 
 /**
- * Resolve ERC-20 decimals from an explicit override or the TokenRegistry.
+ * Resolve ERC-20 decimals from the TokenRegistry (or native ETH). A caller
+ * value is only an assertion checked against the registry; for a token that
+ * is not in the registry it is refused rather than trusted (fail closed).
  * Never assume 18 decimals for an arbitrary token address — that silently
  * overpays by 10^12 for USDC (6 decimals) when callers omit token_decimals.
  */
@@ -235,7 +238,7 @@ export function resolveTokenDecimals(
     assertDecimalsMatch(token, explicitDecimals, authoritative);
     return authoritative;
   }
-  if (explicitDecimals !== undefined) return explicitDecimals;
+  rejectUnregisteredExplicitDecimals(token, explicitDecimals, chainId);
 
   throw new Error(
     `Unknown decimals for token ${token} on chain ${chainId}. ` +
@@ -247,6 +250,26 @@ export function resolveTokenDecimals(
 function knownTokenDecimals(token: Address, chainId: number): number | undefined {
   if (token.toLowerCase() === NATIVE_TOKEN) return 18;
   return getGlobalRegistry().getTokenByAddress(token, chainId)?.decimals;
+}
+
+/**
+ * SEC-20261116-04: caller-supplied decimals are never used to size a spend
+ * cap. For a token that is not in the registry there is no authoritative
+ * value to check them against at this point, so fail closed instead of
+ * trusting or cross-checking them.
+ */
+function rejectUnregisteredExplicitDecimals(
+  token: Address,
+  explicitDecimals: number | undefined,
+  chainId: number
+): void {
+  if (explicitDecimals !== undefined) {
+    throw new DefiniteSpendFailure(
+      `Spend cap requires a registered token; token ${token} is not in the registry ` +
+        `on chain ${chainId}. Register it with add_custom_token, or omit token_decimals. ` +
+        'Refusing to sign.'
+    );
+  }
 }
 
 /**
@@ -281,7 +304,8 @@ const ERC20_DECIMALS_ABI = [
 /**
  * Resolve the decimals a transfer will actually be denominated in.
  * Registry / native first; otherwise read decimals() from the token contract
- * on the configured chain. A caller value is only ever cross-checked.
+ * on the configured chain. A caller value is only ever cross-checked against
+ * the registry; for an unregistered token it is refused (fail closed).
  */
 export async function resolveTransferDecimals(
   wallet: AgentWalletInstance,
@@ -294,6 +318,7 @@ export async function resolveTransferDecimals(
     assertDecimalsMatch(token, explicitDecimals, known);
     return known;
   }
+  rejectUnregisteredExplicitDecimals(token, explicitDecimals, chainId);
   const publicClient = (wallet as unknown as {
     publicClient?: { readContract?: (_args: unknown) => Promise<unknown> };
   }).publicClient;
