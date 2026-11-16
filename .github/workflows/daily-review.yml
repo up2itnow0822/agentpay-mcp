@@ -215,6 +215,7 @@ jobs:
               with suggested_tier RED. Secrets are escalated for rotation,
               never "fixed".
           claude_args: |
+            --permission-mode default
             --allowedTools "Read,Grep,Glob,LS,Write,Bash(date:*),Bash(git status:*),Bash(git log:*),Bash(git diff:*),Bash(git show:*),Bash(git shortlog:*),Bash(git ls-files:*),Bash(git rev-parse:*),Bash(gh issue list:*),Bash(gh issue view:*),Bash(gh label list:*),Bash(gh pr list:*),Bash(gh pr view:*),Bash(gh pr diff:*),Bash(gh pr checks:*),Bash(gh run list:*),Bash(gh run view:*)"
 
       - name: Upload report artifact
