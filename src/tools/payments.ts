@@ -18,6 +18,8 @@ import {
   IDEMPOTENCY_KEY_JSON_SCHEMA,
   IdempotencyKeyZodSchema,
   requireSettlementHash,
+  requireExecutedCall,
+  requireExecutedTransfer,
   runClassifiedSpend,
   sendPaymentIntentIdentity,
   withSpendIntent,
@@ -171,13 +173,16 @@ export async function handleSendPayment(
             await runClassifiedSpend(wallet.walletClient, async () => {
               if (isNativeEth) {
                 const result = await agentExecute(wallet, { to: toAddress, value: amountWei });
-                return result.txHash;
+                return requireExecutedCall(result, 'send_payment');
               }
-              return agentTransferToken(wallet, {
-                token: tokenAddress,
-                to: toAddress,
-                amount: amountWei,
-              });
+              return requireExecutedTransfer(
+                await agentTransferToken(wallet, {
+                  token: tokenAddress,
+                  to: toAddress,
+                  amount: amountWei,
+                }),
+                'send_payment'
+              );
             }),
             'send_payment'
           )

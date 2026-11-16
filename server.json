@@ -127,6 +127,41 @@
           "format": "string",
           "isSecret": false,
           "name": "NFT_CONTRACT_ADDRESS"
+        },
+        {
+          "description": "Factory that deployed the wallet (printed by deploy_wallet); required for payments",
+          "isRequired": true,
+          "format": "string",
+          "isSecret": false,
+          "name": "AGENT_WALLET_FACTORY"
+        },
+        {
+          "description": "Token contract bound to the wallet (printed by deploy_wallet); required for payments",
+          "isRequired": true,
+          "format": "string",
+          "isSecret": false,
+          "name": "AGENT_WALLET_TOKEN_CONTRACT"
+        },
+        {
+          "description": "Token id bound to the wallet (printed by deploy_wallet); required for payments",
+          "isRequired": true,
+          "format": "string",
+          "isSecret": false,
+          "name": "AGENT_WALLET_TOKEN_ID"
+        },
+        {
+          "description": "Approved AgentAccountV2 runtime code hash (printed by deploy_wallet); strongly recommended",
+          "isRequired": false,
+          "format": "string",
+          "isSecret": false,
+          "name": "AGENT_WALLET_CODE_HASH"
+        },
+        {
+          "description": "Not supported: AgentPay refuses to start payments if this is set to any value",
+          "isRequired": false,
+          "format": "string",
+          "isSecret": false,
+          "name": "AGENT_WALLET_ALLOW_UNVERIFIED"
         }
       ]
     }

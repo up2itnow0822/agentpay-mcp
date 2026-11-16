@@ -168,7 +168,7 @@ describe('send_payment tool', () => {
       executed: true,
       txHash: MOCK_TX_HASH,
     });
-    mockAgentTransferToken.mockResolvedValue(MOCK_TX_HASH);
+    mockAgentTransferToken.mockResolvedValue({ status: 'executed', txHash: MOCK_TX_HASH } as any);
   });
 
   // ─── Happy path: ETH ────────────────────────────────────────────────────
@@ -347,7 +347,7 @@ describe('send_payment decimals integrity (F2)', () => {
     vi.clearAllMocks();
     _resetPolicyStore();
     _resetSpendIntentStore();
-    mockAgentTransferToken.mockResolvedValue(MOCK_TX_HASH);
+    mockAgentTransferToken.mockResolvedValue({ status: 'executed', txHash: MOCK_TX_HASH } as any);
     mockAgentExecute.mockResolvedValue({ executed: true, txHash: MOCK_TX_HASH });
   });
 

@@ -15,6 +15,7 @@ import {
   IDEMPOTENCY_KEY_JSON_SCHEMA,
   IdempotencyKeyZodSchema,
   requireSettlementHash,
+  requireExecutedTransfer,
   runClassifiedSpend,
   sendTokenIntentIdentity,
   withSpendIntent,
@@ -103,12 +104,15 @@ export async function handleSendToken(
           // insufficient balance) moved nothing: it is classified definite and
           // stays retryable instead of occupying an unresolved-lock slot.
           const txHash = requireSettlementHash(
-            await runClassifiedSpend(wallet.walletClient, () =>
-              agentTransferToken(wallet, {
-                token: token.address as Address,
-                to: input.recipientAddress as Address,
-                amount: rawAmount,
-              })
+            await runClassifiedSpend(wallet.walletClient, async () =>
+              requireExecutedTransfer(
+                await agentTransferToken(wallet, {
+                  token: token.address as Address,
+                  to: input.recipientAddress as Address,
+                  amount: rawAmount,
+                }),
+                'send_token'
+              )
             ),
             'send_token'
           )

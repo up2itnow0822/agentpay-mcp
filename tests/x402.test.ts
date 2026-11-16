@@ -2018,4 +2018,25 @@ describe('get_transaction_history tool', () => {
     expect(text).toContain(hostile);
     expect(text).not.toContain('Reason:');
   });
+
+  it('S1/R2: an RPC failure quoting the node URL is redacted while one x402 receipt still shows', async () => {
+    const fakeRpcSecret = 'FAKErpcPATHsecret';
+    recordX402Settlement({
+      intentKey: 'x402_pay#redact-rpc',
+      url: 'https://api.example.com/a',
+      method: 'GET',
+      amount: '1',
+      token: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913',
+      recipient: '0xfeedfacefeedfacefeedfacefeedfacefeedface',
+      txHash: '0xc480941a588f513a6f4ecbcee0826ea66147b0f68488131572522830b4ac60fb',
+    });
+    mockGetActivityHistory.mockRejectedValueOnce(
+      new Error(`HTTP request failed.\n\nURL: https://rpc.example.test/v2/${fakeRpcSecret}\nDetails: boom`)
+    );
+    const result = await handleGetTransactionHistory({});
+    const text = result.content[0]!.text;
+    expect(text).toContain('**x402 Payment**');
+    expect(text).not.toContain(fakeRpcSecret);
+    expect(text).toContain('URL: [redacted]');
+  });
 });

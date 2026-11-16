@@ -19,6 +19,7 @@ vi.mock('viem', async (importOriginal) => {
     ...actual,
     createWalletClient: vi.fn(() => ({ account: { address: '0xagent' } })),
     http: vi.fn(() => 'mock-transport'),
+    createPublicClient: vi.fn(() => ({ getCode: vi.fn(async () => '0x6080604052') })),
   };
 });
 
@@ -34,7 +35,7 @@ vi.mock('viem/chains', () => ({
 // ─── Mock client utils ─────────────────────────────────────────────────────
 
 vi.mock('../src/utils/client.js', () => ({
-  getConfig: vi.fn(() => ({
+  loadSignerConfig: vi.fn(() => ({
     agentPrivateKey: '0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
     walletAddress: '0x1234567890123456789012345678901234567890',
     chainId: 8453,
@@ -119,6 +120,21 @@ describe('deploy_wallet tool', () => {
     });
 
     expect(result.content[0]!.text).toContain('AGENT_WALLET_ADDRESS');
+  });
+
+  it('prints all four deployment-identity values so the user can pin them (SO C2)', async () => {
+    const result = await handleDeployWallet({
+      token_id: '7',
+      factory_address: MOCK_FACTORY,
+      nft_contract_address: MOCK_NFT,
+    });
+    const text = result.content[0]!.text;
+    expect(text).toContain(`AGENT_WALLET_FACTORY=${MOCK_FACTORY}`);
+    expect(text).toContain(`AGENT_WALLET_TOKEN_CONTRACT=${MOCK_NFT}`);
+    expect(text).toContain('AGENT_WALLET_TOKEN_ID=7');
+    expect(text).toMatch(/AGENT_WALLET_CODE_HASH=0x[0-9a-f]{64}/);
+    expect(text).not.toContain('0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa');
+    expect(text).not.toContain('mainnet.base.org');
   });
 
   // ─── Error paths ───────────────────────────────────────────────────────

@@ -3,11 +3,11 @@
  * Requires FACTORY_ADDRESS and NFT_CONTRACT_ADDRESS env vars.
  */
 import { z } from 'zod';
-import { type Address, createWalletClient, http } from 'viem';
+import { type Address, createPublicClient, createWalletClient, http, keccak256 } from 'viem';
 import { privateKeyToAccount } from 'viem/accounts';
 import { base, baseSepolia } from 'viem/chains';
 import { deployWallet } from 'agentwallet-sdk';
-import { getConfig } from '../utils/client.js';
+import { loadSignerConfig } from '../utils/client.js';
 import { textContent, explorerAddressUrl, explorerTxUrl, chainName, formatError } from '../utils/format.js';
 
 // ─── Schema ────────────────────────────────────────────────────────────────
@@ -69,7 +69,8 @@ export async function handleDeployWallet(
   input: DeployWalletInput
 ): Promise<{ content: Array<{ type: 'text'; text: string }>; isError?: boolean }> {
   try {
-    const config = getConfig();
+    // deploy_wallet creates the identity, so it must not require one yet.
+    const config = loadSignerConfig();
 
     const factoryAddress = (input.factory_address ?? config.factoryAddress) as Address | undefined;
     if (!factoryAddress) {
@@ -117,6 +118,16 @@ export async function handleDeployWallet(
       walletClient,
     });
 
+    // Runtime code hash for AGENT_WALLET_CODE_HASH (best effort, read-only).
+    let codeHashLine = '(could not read yet; set it to keccak256 of the wallet runtime code)';
+    try {
+      const code = await createPublicClient({ chain, transport: http(config.rpcUrl, { timeout: 30_000 }) })
+        .getCode({ address: result.walletAddress });
+      if (code && code !== '0x') codeHashLine = keccak256(code);
+    } catch {
+      // Keep the placeholder; never echo the RPC error (it may name the RPC URL).
+    }
+
     const explorerAddr = explorerAddressUrl(result.walletAddress, config.chainId);
     const explorerTx = explorerTxUrl(result.txHash, config.chainId);
     const cname = chainName(config.chainId);
@@ -132,7 +143,12 @@ export async function handleDeployWallet(
           `🔑 Owner NFT: ${nftContractAddress} #${input.token_id}\n` +
           `🌐 Chain: ${cname}\n\n` +
           `ℹ️  Next steps:\n` +
-          `  1. Set AGENT_WALLET_ADDRESS=${result.walletAddress} in your .env\n` +
+          `  1. Set the wallet and its deployment identity in your .env (public values, not secrets):\n` +
+          `     AGENT_WALLET_ADDRESS=${result.walletAddress}\n` +
+          `     AGENT_WALLET_FACTORY=${factoryAddress}\n` +
+          `     AGENT_WALLET_TOKEN_CONTRACT=${nftContractAddress}\n` +
+          `     AGENT_WALLET_TOKEN_ID=${tokenId.toString()}\n` +
+          `     AGENT_WALLET_CODE_HASH=${codeHashLine}   (strongly recommended)\n` +
           `  2. Use set_spend_policy (via SDK) to configure autonomous spending limits\n` +
           `  3. Fund the wallet with ETH or USDC for agent payments`
         ),

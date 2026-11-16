@@ -85,7 +85,7 @@ describe('send_token', () => {
         chainId: 8453,
       }),
     } as any)
-    mockAgentTransferToken.mockResolvedValue('0x81ae50ad43f06964221426ea20e8b0fb1b925b6119eb11e149a350a7c4802588' as any)
+    mockAgentTransferToken.mockResolvedValue({ status: 'executed', txHash: '0x81ae50ad43f06964221426ea20e8b0fb1b925b6119eb11e149a350a7c4802588' } as any)
 
     const result = await handleSendToken({
       tokenSymbol: 'USDC',
@@ -175,7 +175,7 @@ describe('send_token', () => {
 
   it('replays an identical send_token retry without a second transfer', async () => {
     mockUsdcRegistry()
-    mockAgentTransferToken.mockResolvedValue('0x81ae50ad43f06964221426ea20e8b0fb1b925b6119eb11e149a350a7c4802588' as any)
+    mockAgentTransferToken.mockResolvedValue({ status: 'executed', txHash: '0x81ae50ad43f06964221426ea20e8b0fb1b925b6119eb11e149a350a7c4802588' } as any)
 
     const first = await handleSendToken(usdcSend)
     const retry = await handleSendToken(usdcSend)
@@ -194,8 +194,8 @@ describe('send_token', () => {
   it('broadcasts a second transfer when the recipient differs', async () => {
     mockUsdcRegistry()
     mockAgentTransferToken
-      .mockResolvedValueOnce('0xc480941a588f513a6f4ecbcee0826ea66147b0f68488131572522830b4ac60fb' as any)
-      .mockResolvedValueOnce('0x66e6299fee8deb3c350e639edf1de966dbbf639b0a4834080e9a98c438b60340' as any)
+      .mockResolvedValueOnce({ status: 'executed', txHash: '0xc480941a588f513a6f4ecbcee0826ea66147b0f68488131572522830b4ac60fb' } as any)
+      .mockResolvedValueOnce({ status: 'executed', txHash: '0x66e6299fee8deb3c350e639edf1de966dbbf639b0a4834080e9a98c438b60340' } as any)
 
     const first = await handleSendToken(usdcSend)
     const second = await handleSendToken({
@@ -211,7 +211,7 @@ describe('send_token', () => {
 
   it('fail-closes a hashless send_token success instead of caching it', async () => {
     mockUsdcRegistry()
-    mockAgentTransferToken.mockResolvedValue('' as any)
+    mockAgentTransferToken.mockResolvedValue({ status: 'executed', txHash: '' } as any)
 
     const failed = await handleSendToken(usdcSend)
     const retry = await handleSendToken(usdcSend)
@@ -225,7 +225,7 @@ describe('send_token', () => {
 
   it('fail-closes a malformed send_token txHash instead of caching it', async () => {
     mockUsdcRegistry()
-    mockAgentTransferToken.mockResolvedValue('0x123' as any)
+    mockAgentTransferToken.mockResolvedValue({ status: 'executed', txHash: '0x123' } as any)
 
     const failed = await handleSendToken(usdcSend)
     const retry = await handleSendToken(usdcSend)
@@ -259,7 +259,7 @@ describe('send_token', () => {
     mockUsdcRegistry()
     mockAgentTransferToken
       .mockRejectedValueOnce(new Error('execution reverted: insufficient balance (simulation)'))
-      .mockResolvedValueOnce('0xc480941a588f513a6f4ecbcee0826ea66147b0f68488131572522830b4ac60fb' as any)
+      .mockResolvedValueOnce({ status: 'executed', txHash: '0xc480941a588f513a6f4ecbcee0826ea66147b0f68488131572522830b4ac60fb' } as any)
 
     const failed = await handleSendToken(usdcSend)
     const retry = await handleSendToken(usdcSend)
@@ -272,11 +272,85 @@ describe('send_token', () => {
     expect(_spendIntentStoreSizes().unresolved).toBe(0)
   })
 
+  // ─── pay-2b (SO C4 / C6 addendum 4a829f99) ─────────────────────────────
+
+  it('SDK 8 queued transfer is never reported as paid and keeps the intent locked (C4)', async () => {
+    mockUsdcRegistry()
+    mockAgentTransferToken.mockImplementation(async (wallet: any) => {
+      await wallet.walletClient.writeContract({})
+      return { status: 'queued', txHash: '0x' + 'ee'.repeat(32), pendingTxId: 4n } as any
+    })
+
+    const queued = await handleSendToken(usdcSend)
+    const retry = await handleSendToken(usdcSend)
+
+    expect(queued.isError).toBe(true)
+    expect(queued.content[0].text).toContain('QUEUED for owner approval, not paid')
+    expect(queued.content[0].text).toContain('pendingTxId=4')
+    expect(queued.content[0].text).not.toMatch(/"txHash"/)
+    expect(retry.isError).toBe(true)
+    expect(mockAgentTransferToken).toHaveBeenCalledTimes(1)
+    expect(_spendIntentStoreSizes().unresolved).toBe(1)
+  })
+
+  it('C6(a): a generic error before the broadcast flag releases (retry may proceed)', async () => {
+    mockUsdcRegistry()
+    mockAgentTransferToken
+      .mockRejectedValueOnce(new Error('rpc unreachable'))
+      .mockResolvedValueOnce({ status: 'executed', txHash: '0x' + 'c4'.repeat(32) } as any)
+
+    const failed = await handleSendToken(usdcSend)
+    const retry = await handleSendToken(usdcSend)
+
+    expect(failed.isError).toBe(true)
+    expect(retry.isError).toBeUndefined()
+    expect(_spendIntentStoreSizes().unresolved).toBe(0)
+  })
+
+  it.each([
+    ['generic', () => new Error('rpc timeout')],
+    ['revert-looking', () => new Error('execution reverted (simulation)')],
+    ['verification-looking', () => Object.assign(new Error('agent wallet: verification failed'), { name: 'AgentWalletVerificationError' })],
+  ])('C6(b): a %s error after the broadcast flag never releases and sends exactly one tx', async (_label, make) => {
+    mockUsdcRegistry()
+    const sends = vi.fn()
+    mockAgentTransferToken.mockImplementation(async (wallet: any) => {
+      await wallet.walletClient.writeContract({})
+      sends()
+      throw make()
+    })
+
+    const failed = await handleSendToken(usdcSend)
+    const retry = await handleSendToken(usdcSend)
+
+    expect(failed.isError).toBe(true)
+    expect(retry.isError).toBe(true)
+    expect(sends).toHaveBeenCalledTimes(1)
+    expect(mockAgentTransferToken).toHaveBeenCalledTimes(1)
+    expect(_spendIntentStoreSizes().unresolved).toBe(1)
+  })
+
+  it('C6(c): the SDK 8 object return never releases and is never retryable (was the "no hash" double-spend risk)', async () => {
+    mockUsdcRegistry()
+    mockAgentTransferToken.mockImplementation(async (wallet: any) => {
+      await wallet.walletClient.writeContract({})
+      return { status: 'mystery' } as any
+    })
+
+    const failed = await handleSendToken(usdcSend)
+    const retry = await handleSendToken(usdcSend)
+
+    expect(failed.isError).toBe(true)
+    expect(retry.isError).toBe(true)
+    expect(mockAgentTransferToken).toHaveBeenCalledTimes(1)
+    expect(_spendIntentStoreSizes().unresolved).toBe(1)
+  })
+
   it('broadcasts two equal payments when idempotency keys differ', async () => {
     mockUsdcRegistry()
     mockAgentTransferToken
-      .mockResolvedValueOnce('0xc480941a588f513a6f4ecbcee0826ea66147b0f68488131572522830b4ac60fb' as any)
-      .mockResolvedValueOnce('0x66e6299fee8deb3c350e639edf1de966dbbf639b0a4834080e9a98c438b60340' as any)
+      .mockResolvedValueOnce({ status: 'executed', txHash: '0xc480941a588f513a6f4ecbcee0826ea66147b0f68488131572522830b4ac60fb' } as any)
+      .mockResolvedValueOnce({ status: 'executed', txHash: '0x66e6299fee8deb3c350e639edf1de966dbbf639b0a4834080e9a98c438b60340' } as any)
 
     const first = await handleSendToken({ ...usdcSend, idempotencyKey: 'invoice-1' })
     const second = await handleSendToken({ ...usdcSend, idempotencyKey: 'invoice-2' })
@@ -289,7 +363,7 @@ describe('send_token', () => {
 
   it('replays when the caller retries the same idempotency key', async () => {
     mockUsdcRegistry()
-    mockAgentTransferToken.mockResolvedValue('0x81ae50ad43f06964221426ea20e8b0fb1b925b6119eb11e149a350a7c4802588' as any)
+    mockAgentTransferToken.mockResolvedValue({ status: 'executed', txHash: '0x81ae50ad43f06964221426ea20e8b0fb1b925b6119eb11e149a350a7c4802588' } as any)
 
     const first = await handleSendToken({ ...usdcSend, idempotencyKey: 'invoice-1' })
     const retry = await handleSendToken({ ...usdcSend, idempotencyKey: 'invoice-1' })
@@ -302,7 +376,7 @@ describe('send_token', () => {
 
   it('refuses a keyed retry that changes the amount', async () => {
     mockUsdcRegistry()
-    mockAgentTransferToken.mockResolvedValue('0x81ae50ad43f06964221426ea20e8b0fb1b925b6119eb11e149a350a7c4802588' as any)
+    mockAgentTransferToken.mockResolvedValue({ status: 'executed', txHash: '0x81ae50ad43f06964221426ea20e8b0fb1b925b6119eb11e149a350a7c4802588' } as any)
 
     const first = await handleSendToken({ ...usdcSend, idempotencyKey: 'invoice-1' })
     const conflict = await handleSendToken({
