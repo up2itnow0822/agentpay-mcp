@@ -11,17 +11,12 @@
   "files": [
     "dist",
     "README.md",
-    "claude_desktop_config.json",
-    ".env.example",
-    "docs/*.md",
+    "LICENSE",
+    "CHANGELOG.md",
     "docs/*.json",
     "docs/fixtures/*.json",
-    "examples/smithery-paid-mcp-installation/*.md",
-    "Dockerfile",
-    "smithery.yaml",
-    "glama.json",
-    "docs/directory-introspection-readiness.md",
-    "llms.txt"
+    "llms.txt",
+    "examples/smithery-paid-mcp-installation/*.md"
   ],
   "scripts": {
     "build": "tsc",

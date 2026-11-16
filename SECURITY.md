@@ -1,6 +1,11 @@
 # Security Policy — agentpay-mcp
 
-Paused for security maintenance. Do not use in production.
+## Upgrade recommended: spend-cap fix
+
+If you use `agentpay-mcp` 4.3.0, update to v5.0.0. This release includes a
+bug fix for spend-cap enforcement, so spend limits apply as configured. v5.0.0
+is a breaking release: read the
+[Upgrading from 4.x](README.md#upgrading-from-4x) notes before you update.
 
 ## Supported Versions
 

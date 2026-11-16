@@ -40,6 +40,9 @@ which maps each finding to its repair and proving test.
   (F9, F15).
 - `send_payment` `token_decimals` is an assertion, not an override; a mismatch
   is refused (F2).
+- BREAKING: caller-supplied `token_decimals` is now refused for any token not
+  in the token registry, even with no spend cap set. Register the token with
+  `add_custom_token`, or omit `token_decimals` so decimals are read on-chain.
 - `list_chain_tokens` is paginated; `add_custom_token` accepts only supported
   chains and bounded input (F18).
 - `idempotencyKey` rejects control characters (C0, DEL, C1), invisible
