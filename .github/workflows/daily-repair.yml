@@ -300,6 +300,7 @@ jobs:
                the review's suggested_tier. Tier only decides draft vs ready:
                nothing is ever merged by automation.
           claude_args: |
+            --permission-mode default
             --allowedTools "Read,Edit,Write,Glob,Grep,LS,Bash(git status:*),Bash(git diff:*),Bash(git log:*),Bash(git show:*),Bash(git ls-files:*),Bash(gh issue view:*),Bash(gh pr list:*),Bash(gh pr view:*)"
 
       # Deterministic packaging of the working tree. Hooks are disabled; the
