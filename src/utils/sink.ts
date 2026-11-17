@@ -8,6 +8,7 @@
  */
 import { format } from 'node:util'
 import * as viemAccounts from 'viem/accounts'
+import { maskSensitiveTextFields } from './sink-sensitive-text.js'
 
 let bip39: Set<string> | null | undefined
 /** The BIP-39 English wordlist viem ships; null if unavailable (e.g. a test mock). */
@@ -242,7 +243,7 @@ export function redactSecrets(
 
 /** The one function every output passes through. */
 export function safeText(text: string): string {
-  return redactSecrets(text)
+  return maskSensitiveTextFields(redactSecrets(text))
 }
 
 /**
