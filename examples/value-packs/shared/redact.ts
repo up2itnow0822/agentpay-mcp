@@ -86,17 +86,19 @@ const HEX64_RE = /(?<![0-9a-fA-F])(0x)?[0-9a-fA-F]{64}(?![0-9a-fA-F])/g
 const SPLIT_HEX64_RE =
   /(?:^|(?<=[\s(,]))(?:0x)?(?:[0-9a-fA-F]{2}(?:[ \t\u00a0]+)){31}[0-9a-fA-F]{2}(?![0-9a-fA-F])/gi
 const SPLIT_HEX32_PAIR_RE =
-  /(?:^|(?<=[\s(,=]))(?:0x)?[0-9a-fA-F]{32}(?:[ \t\u00a0]+)[0-9a-fA-F]{32}(?![0-9a-fA-F])/gi
+  /(?:^|(?<=[\s(,=]))(?:0x)?[0-9a-fA-F]{32}(?:[ \t\u00a0\r\n]+)[0-9a-fA-F]{32}(?![0-9a-fA-F])/gi
 const TX_HASH_LABEL =
-  /(?:txHash|tx_hash|transactionHash|hash|tx|blockHash|block)\s*:\s*$/i
+  /\b(?:txHash|tx_hash|transactionHash|blockHash|block|hash|tx)\s*:\s*$/i
 const JSON_TX_HASH_VALUE =
-  /"(?:[A-Za-z0-9_]*(?:txHash|tx_hash|transactionHash|blockHash|block)|hash)"\s*:\s*"(?:0x)?$/i
+  /"(?:[A-Za-z0-9_]*(?:txHash|tx_hash|transactionHash|blockHash)|hash|tx|block)"\s*:\s*"(?:0x)?$/i
+const COOKIE_HEADER_LINE_RE = /\b(cookie|set-cookie)(\s*[:=]\s*)([^\r\n]*)/gi
 const HEADER_RE =
-  /\b(authorization|proxy-authorization|x-auth-token|x-api-key|api-key|x-payment-response|x-payment|cookie|set-cookie)(\s*[:=]\s*)(['"]?)[^\r\n'"]*\3/gi
+  /\b(authorization|proxy-authorization|x-auth-token|x-api-key|api-key|x-payment-response|x-payment)(\s*[:=]\s*)(['"]?)[^\r\n'"]*\3/gi
 const JSON_HEADER_RE =
   /"((?:authorization|proxy-authorization|x-auth-token|x-api-key|api-key|x-payment-response|x-payment|cookie|set-cookie))"\s*:\s*"([^"]*)"/gi
 const SINGLE_QUOTED_HEADER_RE =
-  /'(authorization|proxy-authorization)'\s*:\s*'[^']*'/gi
+  /'(authorization|proxy-authorization|x-auth-token|x-api-key|api-key|x-payment-response|x-payment)'\s*:\s*'[^']*'/gi
+const SINGLE_QUOTED_COOKIE_HEADER_RE = /'(cookie|set-cookie)'\s*:\s*[^\r\n]*/gi
 const BEARER_RE = /\bBearer\s+[A-Za-z0-9._~+/=-]{8,}/g
 /** R6: JWT-shaped tokens (three base64url segments; header segment starts with eyJ). */
 const JWT_RE = /eyJ[A-Za-z0-9_-]*(?:\s*\.\s*)[A-Za-z0-9_-]+(?:\s*\.\s*)[A-Za-z0-9_-]+/g
@@ -175,9 +177,14 @@ export function redactSecrets(
     // R3
     out = out.replace(URL_RE, (u) => redactUrl(u))
     // R6
+    out = out.replace(
+      COOKIE_HEADER_LINE_RE,
+      (_m, name: string, sep: string) => `${name}${sep}[redacted]`
+    )
     out = out.replace(HEADER_RE, (_m, name: string, sep: string, q: string) => `${name}${sep}${q}[redacted]${q}`)
     out = out.replace(JSON_HEADER_RE, (_m, name: string) => `"${name}":"[redacted]"`)
     out = out.replace(SINGLE_QUOTED_HEADER_RE, (_m, name: string) => `'${name}': '[redacted]'`)
+    out = out.replace(SINGLE_QUOTED_COOKIE_HEADER_RE, (_m, name: string) => `'${name}': '[redacted]'`)
     out = out.replace(BEARER_RE, 'Bearer [redacted]')
     out = out.replace(JWT_RE, '[redacted-jwt]')
     // R4 (whitespace-split 32-byte hex and contiguous hex64)
@@ -197,7 +204,7 @@ export function redactSecrets(
     return '[output withheld: redaction failed]'
   }
 }
-// END redact-core
+// END redact-core// END redact-core// END redact-core
 
 export function exampleSafeText(text: string): string {
   return redactSecrets(text);

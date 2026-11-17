@@ -2,9 +2,17 @@
  * Redaction rules R1-R7 of the round-3 output sink (SO f9fa2539 S2, S3, S7).
  * Every secret here is a FAKE value made up for the test.
  */
-import { describe, it, expect } from 'vitest'
+import { afterEach, describe, it, expect, vi } from 'vitest'
 import { HttpRequestError } from 'viem'
-import { redactSecrets, safeText, toolText } from '../src/utils/sink.js'
+import {
+  _resetStdioConsoleSinkForTests,
+  _resetStdioProtocolModeForTests,
+  enterStdioProtocolMode,
+  installStdioConsoleSink,
+  redactSecrets,
+  safeText,
+  toolText,
+} from '../src/utils/sink.js'
 
 const FAKE_KEY = '0x' + '1f'.repeat(32)
 const FAKE_RPC = 'https://base-mainnet.example-rpc.test/v2/FAKEfakeFAKE0123456789abcd'
@@ -176,6 +184,49 @@ describe('R4: bare 32-byte hex', () => {
     const addr = '0x' + '12'.repeat(20)
     expect(redactSecrets(addr, {})).toBe(addr)
   })
+  it('Sev4 word-boundary labels: ctx and secretHash do not exempt bare hex', () => {
+    const hex = 'ab'.repeat(32)
+    expect(redactSecrets(`ctx: 0x${hex}`, {})).toBe(`ctx: [redacted-hex64]`)
+    expect(redactSecrets(`secretHash: 0x${hex}`, {})).toBe(`secretHash: [redacted-hex64]`)
+  })
+  it('Sev4 keys ending in block do not exempt bare hex', () => {
+    const hex = 'ab'.repeat(32)
+    expect(redactSecrets(`fooBlock: 0x${hex}`, {})).toBe(`fooBlock: [redacted-hex64]`)
+  })
+  it('Sev4 still exempts txHash labelled output', () => {
+    const hex = 'ab'.repeat(32)
+    expect(redactSecrets(`txHash: 0x${hex}`, {})).toBe(`txHash: 0x${hex}`)
+  })
+  it('Sev4 split-key pattern accepts newline between 32-byte halves', () => {
+    const hex = 'ab'.repeat(32)
+    const a = hex.slice(0, 32)
+    const b = hex.slice(32)
+    expect(redactSecrets(`leaked ${a}\n${b}`, {})).toBe('leaked [redacted-hex64]')
+  })
+})
+
+describe('SO A3 console shim single-quoted headers', () => {
+  afterEach(() => {
+    _resetStdioConsoleSinkForTests()
+    _resetStdioProtocolModeForTests()
+    vi.restoreAllMocks()
+  })
+
+  it.each([
+    "{ 'x-api-key': 'FAKE' }",
+    "{ 'cookie': 'sid=FAKE' }",
+    "{ 'set-cookie': 'sid=FAKE; Path=/' }",
+    "{ 'x-payment': 'FAKE' }",
+    'Cookie: sid="FAKE"',
+  ])('stderr redacts %s', (line) => {
+    installStdioConsoleSink()
+    enterStdioProtocolMode()
+    const err = vi.spyOn(process.stderr, 'write').mockImplementation(() => true)
+    console.info(line)
+    const written = err.mock.calls.map((c) => String(c[0])).join('')
+    expect(written).not.toContain('FAKE')
+    expect(written).toContain('[redacted]')
+  })
 })
 
 describe('R5: BIP-39 mnemonics', () => {
@@ -229,6 +280,22 @@ describe('R6: auth headers and bearer tokens', () => {
   })
   it("masks single-quoted 'proxy-authorization'", () => {
     expect(redactSecrets("'proxy-authorization': 'FAKEproxy99'", {})).not.toContain('FAKEproxy99')
+  })
+  it("SO A3 masks Node-style single-quoted header objects via safeText", () => {
+    const cases = [
+      "{ 'x-api-key': 'FAKE' }",
+      "{ 'cookie': 'sid=FAKE' }",
+      "{ 'set-cookie': 'sid=FAKE; Path=/' }",
+      "{ 'x-payment': 'FAKE' }",
+    ]
+    for (const input of cases) {
+      const out = safeText(input)
+      expect(out).not.toContain('FAKE')
+      expect(out).toContain('[redacted]')
+    }
+    const cookieLine = safeText('Cookie: sid="FAKE"')
+    expect(cookieLine).not.toContain('FAKE')
+    expect(cookieLine).toMatch(/Cookie:\s*\[redacted\]/i)
   })
   it('masks x-auth-token header', () => {
     expect(redactSecrets('x-auth-token: FAKEauthToken12', {})).not.toContain('FAKEauthToken12')
