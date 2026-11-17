@@ -9,7 +9,9 @@ import {
   _resetStdioProtocolModeForTests,
   enterStdioProtocolMode,
   installStdioConsoleSink,
+  logErr,
   redactSecrets,
+  safeErrorText,
   safeText,
   toolText,
 } from '../src/utils/sink.js'
@@ -323,6 +325,67 @@ describe('R6: auth headers and bearer tokens', () => {
     ['https://api.example.com/x?x-api-key=FAKEqueryKey9', 'FAKEqueryKey9'],
   ])('%s', (input, secret) => {
     expect(redactSecrets(input, {})).not.toContain(secret)
+  })
+})
+
+describe('R6: multi-cookie regression (SO 963a883 review)', () => {
+  const SECRET = 'FAKEmultiCookieSECRET'
+  const cases = [
+    `Cookie: theme=dark; session=${SECRET}`,
+    `cookie: a=1; sid=${SECRET}; Path=/`,
+    `{'cookie':'a=1; sid=${SECRET}'}`,
+    `{"cookie":"a=1; sid=${SECRET}"}`,
+    `Set-Cookie: sid=${SECRET}; Path=/; HttpOnly`,
+  ] as const
+
+  it.each(cases)('safeText redacts multi-cookie line %s', (input) => {
+    const out = safeText(input)
+    expect(out).not.toContain(SECRET)
+    expect(out).toContain('[redacted]')
+  })
+
+  it.each(cases)('safeErrorText redacts multi-cookie line %s', (input) => {
+    const out = safeErrorText(input)
+    expect(out).not.toContain(SECRET)
+    expect(out).toContain('[redacted]')
+  })
+
+  it.each(cases)('toolText redacts multi-cookie line %s', (input) => {
+    const out = toolText(input)
+    expect(out.text).not.toContain(SECRET)
+    expect(out.text).toContain('[redacted]')
+  })
+
+  it.each(cases)('logErr redacts multi-cookie line %s', (input) => {
+    const err = vi.spyOn(process.stderr, 'write').mockImplementation(() => true)
+    logErr(input)
+    const written = err.mock.calls.map((c) => String(c[0])).join('')
+    expect(written).not.toContain(SECRET)
+    expect(written).toContain('[redacted]')
+    err.mockRestore()
+  })
+
+  it('Set-Cookie keeps Path and HttpOnly attributes in clear', () => {
+    const out = safeText(`Set-Cookie: sid=${SECRET}; Path=/; HttpOnly`)
+    expect(out).toMatch(/Path=\//)
+    expect(out).toContain('HttpOnly')
+    expect(out).not.toContain(SECRET)
+  })
+
+  afterEach(() => {
+    _resetStdioConsoleSinkForTests()
+    _resetStdioProtocolModeForTests()
+    vi.restoreAllMocks()
+  })
+
+  it.each(cases)('console shim stderr redacts multi-cookie line %s', (input) => {
+    installStdioConsoleSink()
+    enterStdioProtocolMode()
+    const err = vi.spyOn(process.stderr, 'write').mockImplementation(() => true)
+    console.info(input)
+    const written = err.mock.calls.map((c) => String(c[0])).join('')
+    expect(written).not.toContain(SECRET)
+    expect(written).toContain('[redacted]')
   })
 })
 

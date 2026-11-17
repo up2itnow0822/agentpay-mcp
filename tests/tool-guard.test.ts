@@ -50,8 +50,12 @@ describe('B1: guardToolCall end-to-end (safeText path)', () => {
   it.each(B1_GUARD_E2E_WIRE_FORMS)(
     'masks short key=value for %s through guardToolCall',
     async (wireKey) => {
+      const kvText =
+        wireKey === 'cookie' || wireKey === 'set-cookie'
+          ? `${wireKey}: ${B1_SHORT}\nsibling_ok=visible`
+          : `${wireKey}: ${B1_SHORT}; sibling_ok=visible`
       const r = await guardToolCall('b1_kv', () => ({
-        content: [{ type: 'text', text: `${wireKey}: ${B1_SHORT}; sibling_ok=visible` }],
+        content: [{ type: 'text', text: kvText }],
       }))
       expect(JSON.stringify(r)).not.toContain(B1_SHORT)
       expect(r.content[0]!.text).toContain('[redacted]')

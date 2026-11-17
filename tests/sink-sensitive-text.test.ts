@@ -63,7 +63,10 @@ describe('B1 sensitive text key matcher', () => {
   it.each(SENSITIVE_TEXT_KEY_WIRE_FORMS)(
     'masks 1–3 char key=value for wire key %s with sibling intact',
     (wireKey) => {
-      const line = `${wireKey}: ${SHORT}; sibling_ok=visible`
+      const line =
+        wireKey === 'cookie' || wireKey === 'set-cookie'
+          ? `${wireKey}: ${SHORT}\nsibling_ok=visible`
+          : `${wireKey}: ${SHORT}; sibling_ok=visible`
       const out = safeText(line)
       expect(out).not.toContain(SHORT)
       expect(out).toContain('[redacted]')

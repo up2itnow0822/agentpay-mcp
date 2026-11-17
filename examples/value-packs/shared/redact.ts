@@ -103,12 +103,17 @@ const HTTP_REDACT_HEADER_NAMES = [
   'set-cookie',
 ] as const
 const HTTP_HEADER_NAME_ALT = HTTP_REDACT_HEADER_NAMES.join('|')
-const HTTP_HEADER_COOKIE_ALT = 'cookie|set-cookie'
+const HTTP_HEADER_COOKIE_ONLY = 'cookie'
+const HTTP_HEADER_SET_COOKIE = 'set-cookie'
 const HTTP_HEADER_NON_COOKIE_ALT = HTTP_REDACT_HEADER_NAMES.filter(
   (n) => n !== 'cookie' && n !== 'set-cookie'
 ).join('|')
 const COOKIE_HEADER_LINE_RE = new RegExp(
-  `\\b(${HTTP_HEADER_COOKIE_ALT})(\\s*[:=]\\s*)([^\\r\\n;]*)`,
+  `(?<![-])\\b(${HTTP_HEADER_COOKIE_ONLY})(\\s*[:=]\\s*)([^\\r\\n]*)`,
+  'gi'
+)
+const SET_COOKIE_HEADER_LINE_RE = new RegExp(
+  `\\b(${HTTP_HEADER_SET_COOKIE})(\\s*[:=]\\s*)([^\\r\\n]*)`,
   'gi'
 )
 const HEADER_RE = new RegExp(
@@ -124,7 +129,11 @@ const SINGLE_QUOTED_HEADER_RE = new RegExp(
   'gi'
 )
 const SINGLE_QUOTED_COOKIE_HEADER_RE = new RegExp(
-  `'(${HTTP_HEADER_COOKIE_ALT})'\\s*:\\s*[^\\r\\n;]*`,
+  `'(${HTTP_HEADER_COOKIE_ONLY})'\\s*:\\s*[^\\r\\n]*`,
+  'gi'
+)
+const SINGLE_QUOTED_SET_COOKIE_HEADER_RE = new RegExp(
+  `'(${HTTP_HEADER_SET_COOKIE})'\\s*:\\s*([^\\r\\n]*)`,
   'gi'
 )
 const BEARER_RE = /\bBearer\s+[A-Za-z0-9._~+/=-]{8,}/g
@@ -146,6 +155,37 @@ function hexHashExempt(offset: number, whole: string): boolean {
   if (TX_HASH_LABEL.test(before)) return true
   const jsonBefore = whole.slice(Math.max(0, offset - 64), offset)
   return JSON_TX_HASH_VALUE.test(jsonBefore)
+}
+
+const SET_COOKIE_ATTR = /^(?:Path|Domain|Expires|Max-Age|SameSite)$/i
+const SET_COOKIE_FLAG = /^(?:HttpOnly|Secure)$/i
+
+/** Mask the first cookie-pair on Set-Cookie; keep declared attributes; mask later name=value pairs. */
+function redactSetCookieHeaderValue(raw: string): string {
+  const parts = raw.split(';')
+  if (parts.length === 0) return '[redacted]'
+  const out: string[] = []
+  const first = parts[0]!.trim()
+  const firstEq = first.indexOf('=')
+  if (firstEq >= 0) {
+    out.push(`${first.slice(0, firstEq).trim()}=[redacted]`)
+  } else {
+    out.push('[redacted]')
+  }
+  for (let i = 1; i < parts.length; i++) {
+    const seg = parts[i]!.trim()
+    if (!seg) continue
+    const eq = seg.indexOf('=')
+    if (eq < 0) {
+      out.push(SET_COOKIE_FLAG.test(seg) ? seg : '[redacted]')
+      continue
+    }
+    const name = seg.slice(0, eq).trim()
+    const val = seg.slice(eq + 1)
+    if (SET_COOKIE_ATTR.test(name)) out.push(`${name}=${val}`)
+    else out.push(`${name}=[redacted]`)
+  }
+  return out.join('; ')
 }
 
 /** R5: a run of 12–24 BIP-39 words (12/15/18/21/24) is masked. */
@@ -204,15 +244,28 @@ export function redactSecrets(
     if (opts.errorContext) out = out.replace(/\bURL:[ \t]*(?!\[redacted\])\S+/g, 'URL: [redacted]')
     // R3
     out = out.replace(URL_RE, (u) => redactUrl(u))
-    // R6
+    // R6 (set-cookie before cookie so Set-Cookie is not treated as a cookie suffix)
+    out = out.replace(
+      SET_COOKIE_HEADER_LINE_RE,
+      (_m, name: string, sep: string, val: string) => `${name}${sep}${redactSetCookieHeaderValue(val)}`
+    )
     out = out.replace(
       COOKIE_HEADER_LINE_RE,
       (_m, name: string, sep: string) => `${name}${sep}[redacted]`
     )
     out = out.replace(HEADER_RE, (_m, name: string, sep: string, q: string) => `${name}${sep}${q}[redacted]${q}`)
-    out = out.replace(JSON_HEADER_RE, (_m, name: string) => `"${name}":"[redacted]"`)
+    out = out.replace(JSON_HEADER_RE, (_m, name: string, val: string) => {
+      if (name.toLowerCase() === 'set-cookie') {
+        return `"${name}":"${redactSetCookieHeaderValue(val)}"`
+      }
+      return `"${name}":"[redacted]"`
+    })
     out = out.replace(SINGLE_QUOTED_HEADER_RE, (_m, name: string) => `'${name}': '[redacted]'`)
     out = out.replace(SINGLE_QUOTED_COOKIE_HEADER_RE, (_m, name: string) => `'${name}': '[redacted]'`)
+    out = out.replace(
+      SINGLE_QUOTED_SET_COOKIE_HEADER_RE,
+      (_m, name: string, val: string) => `'${name}': '${redactSetCookieHeaderValue(val)}'`
+    )
     out = out.replace(BEARER_RE, 'Bearer [redacted]')
     out = out.replace(JWT_RE, '[redacted-jwt]')
     // R4 (whitespace-split 32-byte hex and contiguous hex64)

@@ -38,6 +38,9 @@ const SENSITIVE_KEY_EXACT = new Set([
 
 const SENSITIVE_KEY_SUFFIXES = ['password', 'passphrase', 'secret', 'privatekey'] as const
 
+/** Handled by redactSecrets Set-Cookie rules (partial mask + attributes). */
+const B1_REDACT_CORE_SET_COOKIE = 'setcookie'
+
 export function isSensitiveTextKeyName(name: string): boolean {
   const normalized = normalizeSensitiveKeyName(name)
   if (SENSITIVE_KEY_EXACT.has(normalized)) return true
@@ -91,16 +94,19 @@ export const B1_TOKEN_FIELD_SURVIVORS = ['tokenAddress', 'tokenId', 'tokenAmount
 
 const JSON_STRING_FIELD_RE = /"((?:\\.|[^"\\])*)"\s*:\s*"((?:\\.|[^"\\])*)"/g
 
-const KV_FIELD_RE = /\b([A-Za-z][A-Za-z0-9_.\-]*)\s*[:=]\s*("(?:\\.|[^"\\])*"|[^\s,;&\]}]+)/g
+const KV_FIELD_RE =
+  /(?<![-])\b([A-Za-z][A-Za-z0-9_.\-]*)\s*[:=]\s*("(?:\\.|[^"\\])*"|[^\s,;&\]}]+)/g
 
 export function maskSensitiveTextFields(text: string): string {
   let out = text.replace(JSON_STRING_FIELD_RE, (match, rawKey: string, _rawVal: string) => {
     const key = rawKey.replace(/\\"/g, '"').replace(/\\\\/g, '\\')
+    if (normalizeSensitiveKeyName(key) === B1_REDACT_CORE_SET_COOKIE) return match
     if (!isSensitiveTextKeyName(key)) return match
     const escapedKey = JSON.stringify(key).slice(1, -1)
     return `"${escapedKey}":"[redacted]"`
   })
   out = out.replace(KV_FIELD_RE, (match, rawKey: string, rawVal: string) => {
+    if (normalizeSensitiveKeyName(rawKey) === B1_REDACT_CORE_SET_COOKIE) return match
     if (!isSensitiveTextKeyName(rawKey)) return match
     const middle = match.slice(rawKey.length, match.length - rawVal.length)
     return `${rawKey}${middle}[redacted]`
