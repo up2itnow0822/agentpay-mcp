@@ -100,6 +100,11 @@ export async function handleBridgeUsdc(
   input: BridgeUsdcInput
 ): Promise<{ content: Array<{ type: 'text'; text: string }>; isError?: boolean }> {
   try {
+  if (process.env['AGENTPAY_ENABLE_EOA_BRIDGE']?.trim() !== '1') {
+    throw new DefiniteSpendFailure(
+      'bridge_usdc is disabled by default on SDK 7.0.0 wrappers until the operator sets AGENTPAY_ENABLE_EOA_BRIDGE=1.'
+    )
+  }
     const wallet = getWallet()
     const config = getConfig()
 

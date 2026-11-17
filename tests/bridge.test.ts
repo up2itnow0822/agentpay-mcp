@@ -1,7 +1,7 @@
 /**
  * Tests for bridge_usdc tool.
  */
-import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 
 vi.mock('../src/utils/wallet-binding.js', () => ({
   assertExpectedSmartWallet: vi.fn().mockResolvedValue(undefined),
@@ -90,10 +90,25 @@ async function broadcastThenThrow(message: string): Promise<never> {
 }
 
 describe('bridge_usdc', () => {
+  const savedBridgeFlag = process.env.AGENTPAY_ENABLE_EOA_BRIDGE
+
   beforeEach(() => {
+    process.env.AGENTPAY_ENABLE_EOA_BRIDGE = '1'
     vi.clearAllMocks()
     _resetPolicyStore()
     _resetSpendIntentStore()
+  })
+
+  afterEach(() => {
+    if (savedBridgeFlag === undefined) delete process.env.AGENTPAY_ENABLE_EOA_BRIDGE
+    else process.env.AGENTPAY_ENABLE_EOA_BRIDGE = savedBridgeFlag
+  })
+
+  it('refuses bridge_usdc until AGENTPAY_ENABLE_EOA_BRIDGE=1 (SEC-20261116-05)', async () => {
+    delete process.env.AGENTPAY_ENABLE_EOA_BRIDGE
+    const result = await handleBridgeUsdc({ fromChain: 'base', toChain: 'polygon', amount: '1' })
+    expect(result.isError).toBe(true)
+    expect(result.content[0].text).toMatch(/AGENTPAY_ENABLE_EOA_BRIDGE=1/)
   })
 
   it('bridges USDC from base to polygon successfully', async () => {
