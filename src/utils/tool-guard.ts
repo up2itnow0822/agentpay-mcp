@@ -18,11 +18,6 @@ type ToolResult = {
 const TOOL_ERROR_WITHHELD = '[tool error withheld: safe formatting failed]'
 export const REQUEST_ERROR_WITHHELD = 'request error withheld'
 
-const REDACTED_OBJECT_KEY = '[redacted]'
-
-const SENSITIVE_OBJECT_KEY =
-  /(?:^|_)(authorization|api[-_]?key|x[-_]?auth[-_]?token|access[-_]?token|client[-_]?secret|password|credential|bearer|cookie|secret|token)(?:$|_)/i
-
 function readOwnValue(obj: Record<string, unknown>, key: string): unknown {
   try {
     return obj[key]
@@ -31,18 +26,30 @@ function readOwnValue(obj: Record<string, unknown>, key: string): unknown {
   }
 }
 
+/** Deterministic output key; disambiguate when safeText collides with a sibling. */
+function redactedObjectKey(originalKey: string, used: Set<string>): string {
+  const base = safeText(originalKey)
+  if (!used.has(base)) {
+    used.add(base)
+    return base
+  }
+  let n = 2
+  while (used.has(`${base} #${n}`)) n += 1
+  const disambiguated = `${base} #${n}`
+  used.add(disambiguated)
+  return disambiguated
+}
+
 function redactDeep(value: unknown): unknown {
   if (typeof value === 'string') return safeText(value)
   if (Array.isArray(value)) return value.map(redactDeep)
   if (value && typeof value === 'object') {
     const out: Record<string, unknown> = {}
+    const usedKeys = new Set<string>()
     const record = value as Record<string, unknown>
     for (const k of Object.keys(record)) {
-      if (SENSITIVE_OBJECT_KEY.test(k)) {
-        out[REDACTED_OBJECT_KEY] = '[redacted]'
-        continue
-      }
-      out[k] = redactDeep(readOwnValue(record, k))
+      const outKey = redactedObjectKey(k, usedKeys)
+      out[outKey] = redactDeep(readOwnValue(record, k))
     }
     return out
   }

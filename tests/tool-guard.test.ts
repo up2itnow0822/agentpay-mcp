@@ -29,13 +29,37 @@ describe('S1: dispatcher boundary', () => {
   it('redacts sensitive object keys (A2)', () => {
     const r = redactToolResult({
       content: [{ type: 'text', text: 'ok' }],
-      structuredContent: { api_key: `https://x/v2/${SECRET}`, nested: { client_secret: SECRET } },
+      structuredContent: {
+        api_key: `https://x/v2/${SECRET}`,
+        nested: { client_secret: `https://x/v2/${SECRET}` },
+      },
     }) as { structuredContent: Record<string, unknown> }
     expect(JSON.stringify(r)).not.toContain(SECRET)
-    expect(r.structuredContent).not.toHaveProperty('api_key')
-    expect(r.structuredContent['[redacted]']).toBe('[redacted]')
-    expect((r.structuredContent.nested as Record<string, unknown>)['[redacted]']).toBe('[redacted]')
-    expect((r.structuredContent.nested as Record<string, unknown>)).not.toHaveProperty('client_secret')
+    expect(String(r.structuredContent.api_key)).toContain('[redacted]')
+    expect(String((r.structuredContent.nested as Record<string, unknown>).client_secret)).toContain('[redacted]')
+  })
+
+  it('redacts object keys that embed RPC URLs (A2 round 3)', () => {
+    const evilKey = `https://x/v2/${SECRET}/_meta`
+    const r = redactToolResult({
+      structuredContent: { [evilKey]: 'safe-value' },
+    }) as { structuredContent: Record<string, unknown> }
+    const serialized = JSON.stringify(r)
+    expect(serialized).not.toContain(SECRET)
+    expect(Object.keys(r.structuredContent)).not.toContain(evilKey)
+    expect(r.structuredContent[Object.keys(r.structuredContent)[0]!]).toBe('safe-value')
+  })
+
+  it('disambiguates redacted object keys without dropping sibling values (A2 round 3)', () => {
+    const keyA = 'https://x.y/v2/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/keyA'
+    const keyB = 'https://x.y/v2/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb/keyB'
+    const r = redactToolResult({
+      structuredContent: { [keyA]: 'value-one', [keyB]: 'value-two' },
+    }) as { structuredContent: Record<string, unknown> }
+    const keys = Object.keys(r.structuredContent)
+    expect(keys).toHaveLength(2)
+    expect(new Set(Object.values(r.structuredContent))).toEqual(new Set(['value-one', 'value-two']))
+    expect(keys.some((k) => k.includes(' #2'))).toBe(true)
   })
 
   it('redacts _meta values holding RPC URLs (A2)', () => {
