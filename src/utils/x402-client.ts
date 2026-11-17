@@ -35,6 +35,7 @@ import {
   type SpendReservation,
 } from '../tools/budget.js'
 import { DefiniteSpendFailure } from './spend-intent.js'
+import { guardX402ProbeResponse } from './x402-402-guard.js'
 import { getConfig } from './client.js'
 import { assertExpectedSmartWallet } from './wallet-binding.js'
 
@@ -199,6 +200,7 @@ export function createAgentPayX402Client(
       if (probe.status !== 402) {
         return probe
       }
+      await guardX402ProbeResponse(url, probe)
       return sdk.settle402AndRetry(probe, url, hopInit, sdkTransport)
     },
   }

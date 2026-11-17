@@ -28,6 +28,16 @@ vi.mock('../src/utils/client.js', () => ({
   })),
 }))
 
+vi.mock('../src/utils/identity-io-guard.js', async (importOriginal) => {
+  const { UAIDResolver } = await import('agentwallet-sdk')
+  return {
+    createBoundedUaidResolver: () => new UAIDResolver(),
+    identityIoLimitsFromEnv: () => ({ timeoutMs: 8000, cacheTtlMs: 120000 }),
+    MAX_IDENTITY_CACHE_TTL_MS: 600_000,
+    MAX_IDENTITY_TIMEOUT_MS: 30_000,
+  }
+})
+
 import {
   handleVerifyAgentIdentity,
   handleGetReputation,
@@ -324,10 +334,20 @@ describe('verify_agent_uaid fencing', () => {
   })
 
   it('keeps broker free text inside the fence', async () => {
+    MockERC8004Client.mockImplementation(function () {
+      return {
+        lookupAgentIdentity: vi.fn().mockResolvedValue({
+          agentId: 7n,
+          owner: OWNER,
+          agentWallet: WALLET,
+        }),
+      }
+    } as any)
     MockUAIDResolver.mockImplementation(function () {
       return {
-        verify: vi.fn().mockResolvedValue({
-          verified: true,
+        resolve: vi.fn().mockResolvedValue({
+          resolved: true,
+          registryVerified: true,
           protocol: 'erc8004',
           trustScore: 87,
           identity: {
@@ -348,6 +368,7 @@ describe('verify_agent_uaid fencing', () => {
     const summary = JSON.parse(result.content[0]!.text)
     expect(summary).toEqual({
       uaid: UAID,
+      brokerAttested: true,
       verified: true,
       protocol: 'erc8004',
       trustScore: 87,
@@ -367,8 +388,9 @@ describe('verify_agent_uaid fencing', () => {
   it('fences an unknown protocol and an out-of-range trust score', async () => {
     MockUAIDResolver.mockImplementation(function () {
       return {
-        verify: vi.fn().mockResolvedValue({
-          verified: 'yes',
+        resolve: vi.fn().mockResolvedValue({
+          resolved: true,
+          registryVerified: false,
           protocol: INJECTION,
           trustScore: Infinity,
           identity: null,
@@ -377,7 +399,8 @@ describe('verify_agent_uaid fencing', () => {
     } as any)
     const result = await handleVerifyAgentUAID({ uaid: UAID })
     const summary = JSON.parse(result.content[0]!.text)
-    expect(summary.verified).toBe(false) // only literal true counts
+    expect(summary.brokerAttested).toBe(false)
+    expect(summary.verified).toBe(false)
     expect(summary.protocol).toBeNull()
     expect(summary.trustScore).toBeNull()
     expect(summary.identity).toBeNull()

@@ -528,18 +528,42 @@ export async function handleVerifyAgentUAID(
     }
 
     const resolver = createBoundedUaidResolver()
-    const result = (await resolver.verify(input.uaid)) as unknown as Record<string, unknown>
+    const resolution = await resolver.resolve(input.uaid)
+    const brokerAttested = resolution.registryVerified === true
+    trusted['brokerAttested'] = brokerAttested
+    trusted['verified'] = false
 
-    trusted['verified'] = result['verified'] === true
-    placeTyped(trusted, untrusted, 'protocol', result['protocol'], (v) =>
+    if (parsed.protocol === 'erc8004') {
+      const chainRef = resolution.chain ?? (resolution.identity as { chain?: string } | null)?.chain
+      const chainIdMatch =
+        typeof chainRef === 'string' ? chainRef.match(/^eip155:(\d{1,12})$/) : null
+      const agentIdRaw = resolution.identity?.agentId
+      const agentId = trustedDecimalId(agentIdRaw)
+      if (chainIdMatch && agentId) {
+        const chainId = Number(chainIdMatch[1])
+        const chainName = CHAIN_ID_TO_NAME[chainId]
+        if (chainName) {
+          try {
+            const identityClient = new ERC8004Client({ chain: chainName })
+            await identityClient.lookupAgentIdentity(BigInt(agentId))
+            trusted['verified'] = true
+          } catch {
+            trusted['verified'] = false
+          }
+        }
+      }
+    }
+
+    const result = resolution as unknown as Record<string, unknown>
+    placeTyped(trusted, untrusted, 'protocol', result['protocol'] ?? resolution.protocol, (v) =>
       typeof v === 'string' && KNOWN_UAID_PROTOCOLS.has(v) ? v : undefined
     )
-    placeTyped(trusted, untrusted, 'trustScore', result['trustScore'], (v) => {
+    placeTyped(trusted, untrusted, 'trustScore', result['trustScore'] ?? resolution.trustScore, (v) => {
       const n = trustedFiniteNumber(v)
       return n !== undefined && n >= 0 && n <= 100 ? n : undefined
     })
 
-    const id = result['identity']
+    const id = result['identity'] ?? resolution.identity
     if (id && typeof id === 'object') {
       const rawId = id as Record<string, unknown>
       const trustedId: Record<string, unknown> = {}

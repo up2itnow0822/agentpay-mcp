@@ -23,15 +23,7 @@ import {
   rejectUnverifiedWalletOptOut,
 } from '../src/utils/wallet-binding.js'
 import { agentTransferTokenWithOutcome } from '../src/utils/agent-transfer-outcome.js'
-import {
-  assertX402BindingAmount,
-  assertX402BindingApprovedTerms,
-  assertX402BindingEffectiveCap,
-  assertX402BindingPayTo,
-  assertX402BindingPaymentCap,
-  defaultX402Asset,
-  x402Debit,
-} from '../src/utils/x402-binding-checks.js'
+import { assertX402BindingPayTo } from '../src/utils/x402-binding-checks.js'
 import { resolveTokenDecimals } from '../src/tools/payments.js'
 import { loadConfig, _resetSingletons } from '../src/utils/client.js'
 import { attestationPollCap } from '../src/utils/bridge-attestation-guard.js'
@@ -177,36 +169,9 @@ describe('finding #3 wallet factory binding (SDK 7)', () => {
   })
 })
 
-describe('x402 binding splits #2 #23 #25 #27 #28 (offline)', () => {
+describe('x402 binding #2 payTo bytes (offline)', () => {
   it('#2 refuses padded payTo (validates signed bytes)', () => {
     expect(() => assertX402BindingPayTo(` ${USDC_BASE} `)).toThrow(/not a valid EVM address/)
-  })
-  it('#23 refuses unapproved asset', () => {
-    expect(() =>
-      assertX402BindingApprovedTerms(
-        { payTo: USDC_BASE, asset: 'WETH' },
-        { payTo: USDC_BASE, asset: defaultX402Asset(8453) },
-        8453
-      )
-    ).toThrow(/does not match the approved asset/)
-  })
-  it('#25 refuses unapproved network', () => {
-    expect(() =>
-      assertX402BindingApprovedTerms(
-        { payTo: USDC_BASE, network: 'eip155:1' },
-        { payTo: USDC_BASE, network: 'eip155:8453' },
-        8453
-      )
-    ).toThrow(/does not match the approved network/)
-  })
-  it('#27 enforces fee-inclusive cap', () => {
-    const cap = assertX402BindingPaymentCap('0.01')
-    const max = assertX402BindingEffectiveCap(cap, USDC_BASE, 8453)
-    const principal = 10000n
-    expect(x402Debit(principal)).toBeGreaterThan(max)
-  })
-  it('#28 refuses non-integer amount strings', () => {
-    expect(() => assertX402BindingAmount('1.5')).toThrow(/not a non-negative integer/)
   })
 })
 

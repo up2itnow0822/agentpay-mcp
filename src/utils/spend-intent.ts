@@ -1801,6 +1801,55 @@ type SpendIntentOptions<T> = {
   lockScope?: readonly string[]
 }
 
+/**
+ * Run a resume step for a spend intent that is already locked after a partial
+ * value move (e.g. CCTP burn with attestation timeout). Clears the lock on
+ * success and settles like a normal completion.
+ */
+export async function runLockedSpendResume<T>(
+  key: string,
+  fingerprint: string,
+  run: () => Promise<T>,
+  options?: Pick<SpendIntentOptions<T>, 'durable' | 'shouldSettle'>
+): Promise<{ value: T; replayed: false }> {
+  ensureJournalLoaded()
+  const locked = unresolved.get(key)
+  if (!locked) {
+    throw new UnresolvedSpendIntentError(
+      'No locked spend intent to resume; reconcile or clear the prior attempt first.'
+    )
+  }
+  assertFingerprint(locked.fingerprint, fingerprint)
+  try {
+    const value = await run()
+    if (options?.shouldSettle && !options.shouldSettle(value)) {
+      journal({ op: 'definite', key })
+      return { value, replayed: false }
+    }
+    const entry: SettledIntent<T> = {
+      settledAt: Date.now(),
+      value,
+      durable: Boolean(options?.durable),
+      fingerprint,
+    }
+    if (entry.durable) {
+      rememberDurable(key, entry)
+    } else {
+      settledEphemeral.set(key, entry)
+    }
+    unresolved.delete(key)
+    journal({ op: 'settle', key, fp: fingerprint, durable: entry.durable })
+    return { value, replayed: false }
+  } catch (error: unknown) {
+    if (error instanceof DefiniteSpendFailure) {
+      journal({ op: 'definite', key })
+      unresolved.delete(key)
+      throw error
+    }
+    throw error
+  }
+}
+
 export async function withSpendIntent<T>(
   key: string,
   run: () => Promise<T>,

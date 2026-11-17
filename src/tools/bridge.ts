@@ -20,10 +20,17 @@ import {
   runClassifiedSpend,
   withSpendIntent,
   wrapDefiniteSdkReads,
+  runLockedSpendResume,
 } from '../utils/spend-intent.js'
 import { withReservedSpend } from './budget.js'
 import { parseAmountStrict } from '../utils/amount.js'
-import { bridgeUsdcWithAttestationGuard } from '../utils/bridge-attestation-guard.js'
+import {
+  bridgeUsdcResumeAfterBurn,
+  bridgeUsdcWithAttestationGuard,
+  BridgeAttestationTimeoutError,
+  getBridgeAttestationPending,
+  clearBridgeAttestationPending,
+} from '../utils/bridge-attestation-guard.js'
 import { assertExpectedSmartWallet } from '../utils/wallet-binding.js'
 
 // Supported CCTP V2 chain names
@@ -124,6 +131,41 @@ export async function handleBridgeUsdc(
       idempotencyKey: input.idempotencyKey,
     })
 
+    const attestationPending = getBridgeAttestationPending(intent.key)
+    if (attestationPending) {
+      const resumeBridge = classifyBridgeApproveUsdc(
+        wrapDefiniteSdkReads(
+          createBridge(wallet.walletClient as AnyWalletClient, input.fromChain as SupportedChain)
+        )
+      )
+      const { value } = await runLockedSpendResume(
+        intent.key,
+        intent.fingerprint,
+        async () => {
+          const result = await runClassifiedSpend(wallet.walletClient, () =>
+            bridgeUsdcResumeAfterBurn(resumeBridge, attestationPending)
+          )
+          clearBridgeAttestationPending(intent.key)
+          const burnTxHash = requireSettlementHash(result.burnTxHash, 'bridge_usdc burn')
+          const mintTxHash = requireSettlementHash(result.mintTxHash, 'bridge_usdc mint')
+          return {
+            success: true as const,
+            burnTxHash,
+            mintTxHash,
+            fromChain: result.fromChain,
+            toChain: result.toChain,
+            recipient: result.recipient,
+            amount: input.amount,
+            rawAmount: rawAmount.toString(),
+            elapsedMs: result.elapsedMs,
+            attestationResumed: true,
+          }
+        },
+        { durable: Boolean(input.idempotencyKey?.trim()) }
+      )
+      return { content: [textContent(JSON.stringify(value))] }
+    }
+
     const { value, replayed } = await withSpendIntent(
       intent.key,
       async () => {
@@ -159,7 +201,8 @@ export async function handleBridgeUsdc(
           rawAmount,
           input.toChain as SupportedChain,
           {},
-          input.fromChain as SupportedChain
+          input.fromChain as SupportedChain,
+          intent.key
         )
       )
       const burnTxHash = requireSettlementHash(result.burnTxHash, 'bridge_usdc burn')
@@ -193,6 +236,21 @@ export async function handleBridgeUsdc(
       ],
     }
   } catch (error: unknown) {
+    if (error instanceof BridgeAttestationTimeoutError) {
+      return {
+        content: [
+          textContent(
+            JSON.stringify({
+              success: false,
+              attestationPending: true,
+              burnTxHash: error.burnTxHash,
+              message: error.message,
+            })
+          ),
+        ],
+        isError: true,
+      }
+    }
     return {
       content: [textContent(formatError(error, 'bridge_usdc'))],
       isError: true,

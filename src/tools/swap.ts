@@ -1,30 +1,15 @@
 /**
  * swap.ts — swap_tokens tool.
  *
- * Wraps agentwallet-sdk v6 attachSwap / SwapModule (Uniswap V3).
- * Supported chains: base, arbitrum, optimism, polygon.
+ * Route A (MCP 5.0.0): disabled — schema retained, no on-chain execution.
  */
 import { z } from 'zod'
-import { attachSwap, getGlobalRegistry, parseAmount } from 'agentwallet-sdk'
-import type { Address } from 'viem'
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-type AnyWallet = any
-import { getConfig, getWallet } from '../utils/client.js'
 import { textContent, formatError } from '../utils/format.js'
-import { assertConfiguredChain } from '../utils/wallet-chain.js'
 import {
-  DEFAULT_SWAP_SLIPPAGE_BPS,
   DefiniteSpendFailure,
   IDEMPOTENCY_KEY_JSON_SCHEMA,
   IdempotencyKeyZodSchema,
-  requireSettlementHash,
-  runClassifiedSpend,
-  swapTokensIntentIdentity,
-  withSpendIntent,
-  wrapDefiniteSdkReads,
 } from '../utils/spend-intent.js'
-import { withReservedSpend } from './budget.js'
-import { assertExpectedSmartWallet } from '../utils/wallet-binding.js'
 
 // ─── Schema ────────────────────────────────────────────────────────────────
 
@@ -35,7 +20,7 @@ export const SwapTokensSchema = z.object({
   chainId: z
     .number()
     .int()
-    .describe('Chain ID where the swap will execute (e.g. 8453 for Base Mainnet)'),
+    .describe('Chain ID where the swap would execute (e.g. 8453 for Base Mainnet)'),
   slippageBps: z
     .number()
     .int()
@@ -46,15 +31,12 @@ export const SwapTokensSchema = z.object({
   minAmountOut: z
     .string()
     .describe(
-      'Minimum output amount in human units of the buy token (required). ' +
-        'Slippage alone is not sufficient; the swap is refused if the quote minimum is below this floor.'
+      'Minimum output amount in human units of the buy token (required when swaps are enabled).'
     ),
   idempotencyKey: IdempotencyKeyZodSchema.optional()
     .describe(
       'Caller-supplied idempotency key. Distinct keys allow two equal swaps; ' +
-        'the same key replays the original swap; reusing it with a different ' +
-        'payload is refused. MCP retries without a key still collapse on the ' +
-        'settled payload for five minutes.'
+        'the same key replays the original swap when swaps are enabled.'
     ),
 })
 
@@ -66,11 +48,8 @@ export const swapTokensTool = {
   name: 'swap_tokens',
   description:
     'Swap one ERC-20 token for another using Uniswap V3. ' +
-    'Resolves token addresses from the registry, executes the swap via SwapModule. ' +
-    'Requires minAmountOut (caller output floor) in addition to slippageBps. ' +
-    'Supported chains: base (8453), arbitrum (42161), optimism (10), polygon (137). ' +
-    'Identical retries replay the original tx; pass idempotencyKey to distinguish two equal swaps. ' +
-    'An RPC drop after broadcast fail-closes instead of sending a second swap.',
+    'DISABLED in AgentPay MCP 5.0.0 (route A): the tool is registered for schema ' +
+    'compatibility and returns a disabled error without any on-chain swap.',
   inputSchema: {
     type: 'object' as const,
     properties: {
@@ -78,12 +57,17 @@ export const swapTokensTool = {
       toSymbol: { type: 'string', description: 'Symbol of token to buy (e.g. "WETH")' },
       amount: { type: 'string', description: 'Amount to sell in human-readable units' },
       chainId: { type: 'number', description: 'Chain ID (8453=Base, 42161=Arbitrum, 10=Optimism, 137=Polygon)' },
-      slippageBps: { type: 'number', description: 'Slippage in basis points (default: 50)' },
-      minAmountOut: { type: 'string', description: 'Minimum buy-token output in human units (required).' },
+      slippageBps: {
+        type: 'number',
+        description: 'Slippage tolerance in basis points (50 = 0.5%)',
+      },
+      minAmountOut: {
+        type: 'string',
+        description: 'Minimum output amount in human units of the buy token',
+      },
       idempotencyKey: {
         ...IDEMPOTENCY_KEY_JSON_SCHEMA,
-        description:
-          'Optional idempotency key (1-128 non-whitespace chars). Distinct keys allow two equal swaps.',
+        description: 'Optional idempotency key when swaps are enabled in a future release.',
       },
     },
     required: ['fromSymbol', 'toSymbol', 'amount', 'chainId', 'minAmountOut'],
@@ -93,132 +77,13 @@ export const swapTokensTool = {
 // ─── Handler ───────────────────────────────────────────────────────────────
 
 export async function handleSwapTokens(
-  input: SwapTokensInput
+  _input: SwapTokensInput
 ): Promise<{ content: Array<{ type: 'text'; text: string }>; isError?: boolean }> {
   try {
-    assertConfiguredChain(input.chainId, 'swap_tokens')
-    const config = getConfig()
-    const wallet = getWallet()
-    await assertExpectedSmartWallet(wallet, config, { requireBinding: true })
-    const registry = getGlobalRegistry()
-
-    const fromToken = registry.getToken(input.fromSymbol.toUpperCase(), input.chainId)
-    if (!fromToken) {
-      throw new Error(
-        `Token "${input.fromSymbol}" not found for chain ${input.chainId}. ` +
-        'Use add_custom_token to register it first.'
-      )
-    }
-
-    const toToken = registry.getToken(input.toSymbol.toUpperCase(), input.chainId)
-    if (!toToken) {
-      throw new Error(
-        `Token "${input.toSymbol}" not found for chain ${input.chainId}. ` +
-        'Use add_custom_token to register it first.'
-      )
-    }
-
-    const rawAmountIn = parseAmount(input.amount, fromToken.decimals)
-    const rawMinAmountOut = parseAmount(input.minAmountOut, toToken.decimals)
-    const slippageBps = input.slippageBps ?? DEFAULT_SWAP_SLIPPAGE_BPS
-    const intent = swapTokensIntentIdentity({
-      chainId: input.chainId,
-      fromTokenAddress: fromToken.address,
-      toTokenAddress: toToken.address,
-      rawAmountIn,
-      slippageBps,
-      rawMinAmountOut,
-      idempotencyKey: input.idempotencyKey,
-    })
-
-    const { value, replayed } = await withSpendIntent(
-      intent.key,
-      async () => {
-      // Enforce the in-process spend policy on the amount sold before swapping.
-      // rawAmountIn is in fromToken base units (e.g. 6 decimals for USDC);
-      // enforceSpendPolicy normalises it to the policy's 9-decimal
-      // ETH-equivalent caps (1 whole token counts as 1 ETH-equivalent). The SDK
-      // SwapModule custodies tokens at — and sends swap proceeds to — the agent
-      // smart-account address (attachSwap passes wallet.address as
-      // accountAddress and uses it as the swap recipient), so that address is
-      // the policy merchant: allowlist-only policies must include the agent
-      // wallet (smart-account) address to permit swaps.
-      const swapRecipient = wallet.address
-      if (!swapRecipient) {
-        throw new DefiniteSpendFailure(
-          'Wallet has no address; cannot verify spend policy for swap_tokens.'
-        )
-      }
-
-      return withReservedSpend(
-        {
-          merchant: swapRecipient,
-          amount: rawAmountIn,
-          decimals: fromToken.decimals,
-        },
-        async () => {
-      const swapWallet = wrapDefiniteSdkReads(attachSwap(wallet as AnyWallet))
-      const quote = await swapWallet.getQuote(
-        fromToken.address as Address,
-        toToken.address as Address,
-        rawAmountIn,
-        { slippageBps }
-      )
-      if (quote.amountOutMinimum < rawMinAmountOut) {
-        throw new DefiniteSpendFailure(
-          `swap_tokens refuses: quoted minimum output (${quote.amountOutMinimum.toString()}) ` +
-            `is below caller minAmountOut floor (${rawMinAmountOut.toString()}).`
-        )
-      }
-
-      const result = await runClassifiedSpend(wallet.walletClient, () =>
-        swapWallet.swap(
-          fromToken.address as Address,
-          toToken.address as Address,
-          rawAmountIn,
-          { slippageBps }
-        )
-      )
-      const txHash = requireSettlementHash(result.txHash, 'swap_tokens')
-
-      return {
-        success: true as const,
-        txHash,
-        feeTxHash: result.feeTxHash ?? null,
-        approvalRequired: result.approvalRequired,
-        approvalTxHash: result.approvalTxHash ?? null,
-        fromToken: fromToken.symbol,
-        toToken: toToken.symbol,
-        amountIn: input.amount,
-        minAmountOut: input.minAmountOut,
-        rawAmountIn: rawAmountIn.toString(),
-        quote: result.quote
-          ? {
-              amountInNet: result.quote.amountInNet?.toString(),
-              amountOutMinimum: result.quote.amountOutMinimum?.toString(),
-              poolFeeTier: result.quote.poolFeeTier,
-              feeAmount: result.quote.feeAmount?.toString(),
-              gasEstimate: result.quote.gasEstimate?.toString(),
-            }
-          : null,
-        chainId: input.chainId,
-      }
-        }
-      )
-      },
-      {
-        durable: Boolean(input.idempotencyKey?.trim()),
-        fingerprint: intent.fingerprint,
-      }
+    throw new DefiniteSpendFailure(
+      'swap_tokens is disabled in AgentPay MCP 5.0.0 (route A). ' +
+        'The tool keeps its schema for compatibility; no on-chain swap is performed.'
     )
-
-    return {
-      content: [
-        textContent(
-          JSON.stringify(replayed ? { ...value, idempotentRetry: true } : value)
-        ),
-      ],
-    }
   } catch (error: unknown) {
     return {
       content: [textContent(formatError(error, 'swap_tokens'))],

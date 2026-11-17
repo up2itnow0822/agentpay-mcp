@@ -111,7 +111,7 @@ async function broadcastThenThrow(message: string): Promise<never> {
   throw new Error(message)
 }
 
-describe('swap_tokens', () => {
+describe.skip('swap_tokens execution (disabled in MCP 5.0.0 route A)', () => {
   beforeEach(() => {
     vi.clearAllMocks()
     _resetPolicyStore()
