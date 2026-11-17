@@ -46,6 +46,7 @@ export const SwapTokensSchema = z.object({
     .describe('Slippage tolerance in basis points (default: 50 = 0.5%)'),
   minAmountOut: z
     .string()
+    .optional()
     .describe(
       'Minimum output amount in human units of the buy token (required when swaps are enabled).'
     ),
@@ -86,7 +87,7 @@ export const swapTokensTool = {
         description: 'Optional idempotency key when swaps are enabled in a future release.',
       },
     },
-    required: ['fromSymbol', 'toSymbol', 'amount', 'chainId', 'minAmountOut'],
+    required: ['fromSymbol', 'toSymbol', 'amount', 'chainId'],
   },
 }
 
@@ -139,6 +140,11 @@ export async function handleSwapTokensExecution(
       )
     }
 
+    if (!input.minAmountOut?.trim()) {
+      throw new DefiniteSpendFailure(
+        'swap_tokens (execution) requires minAmountOut when swaps are enabled.'
+      )
+    }
     const rawAmountIn = parseAmount(input.amount, fromToken.decimals)
     const rawMinAmountOut = parseAmount(input.minAmountOut, toToken.decimals)
     const slippageBps = input.slippageBps ?? DEFAULT_SWAP_SLIPPAGE_BPS

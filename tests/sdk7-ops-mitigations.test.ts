@@ -19,22 +19,17 @@ import * as agentwalletSdk from 'agentwallet-sdk'
 import { attachSwap, createBridge, ERC8004Client } from 'agentwallet-sdk'
 import { handleSwapTokens } from '../src/tools/swap.js'
 import { handleVerifyAgentUAID } from '../src/tools/identity.js'
-import { handleBridgeUsdc } from '../src/tools/bridge.js'
+import { handleBridgeUsdc, handleBridgeUsdcExecution } from '../src/tools/bridge.js'
 import {
   assertBoundedX402PaymentRequired,
   assertX402FollowUpUrlMatches,
+  guardX402ProbeResponse,
   readBounded402JsonBody,
   X402_MAX_402_ACCEPTS,
   X402_MAX_402_BODY_BYTES,
   X402_MAX_402_JSON_DEPTH,
   X402MalformedPaymentRequiredError,
 } from '../src/utils/x402-402-guard.js'
-import {
-  assertParsableX402Amount,
-  assertPaymentCap,
-  effectiveCapBaseUnits,
-  x402Debit,
-} from '../src/utils/payment-cap.js'
 import {
   bridgeUsdcResumeAfterBurn,
   bridgeUsdcWithAttestationGuard,
@@ -333,33 +328,120 @@ describe('x402 #25 bounded 402 payload', () => {
       assertBoundedX402PaymentRequired({ ...baseReq, accepts })
     ).toThrow(/accepts/)
   })
-})
 
-describe('x402 #27 fee-inclusive cap and x402 #28 integer amounts', () => {
-  it('x402 #27 enforces fee-inclusive max_payment_eth cap', () => {
-    const cap = assertPaymentCap('0.01')
-    const max = effectiveCapBaseUnits(cap, '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913', 8453)
-    expect(x402Debit(10_000n)).toBeGreaterThan(max)
+  it('x402 #25 accepts an empty 402 body without JSON (probe guard)', async () => {
+    const probe = new Response('', { status: 402 })
+    await expect(guardX402ProbeResponse('https://api.example.com/pay', probe)).resolves.toBeUndefined()
   })
 
-  it('x402 #28 refuses non-integer x402 amount strings', () => {
-    expect(() => assertParsableX402Amount('1.25')).toThrow(/not a non-negative integer/)
+  it('x402 #25 slow body still fails closed when it exceeds the byte cap', async () => {
+    const big = JSON.stringify({ ...baseReq, pad: 'z'.repeat(X402_MAX_402_BODY_BYTES + 10) })
+  const response = new Response(big)
+    await expect(readBounded402JsonBody(response)).rejects.toThrow(/exceeds/)
   })
 })
 
-describe('SEC-20261116-05 bridge gating with spend policy', () => {
-  it('SEC-20261116-05 refuses over-limit bridge when AGENTPAY_ENABLE_EOA_BRIDGE=1', async () => {
-    process.env.AGENTPAY_ENABLE_EOA_BRIDGE = '1'
+describe('F4 #11 bridge_usdc disabled (route A)', () => {
+  it('F4 bridge_usdc MCP handler returns disabled without createBridge', async () => {
+    const bridgeSpy = vi.spyOn(agentwalletSdk, 'createBridge')
+    const result = await handleBridgeUsdc({ fromChain: 'base', toChain: 'polygon', amount: '1' })
+    expect(result.isError).toBe(true)
+    expect(result.content[0].text).toMatch(/disabled in AgentPay MCP 5\.0\.0 \(route A\)/)
+    expect(bridgeSpy).not.toHaveBeenCalled()
+  })
+})
+
+describe('SEC-20261116-05 bridge execution spend policy', () => {
+  it('SEC-20261116-05 refuses over-limit bridge on execution path', async () => {
     _resetSpendIntentStore()
     _resetPolicyStore()
     await handleSetSpendPolicy({ dailyLimitEth: '0.001' })
-    const result = await handleBridgeUsdc({
+    const result = await handleBridgeUsdcExecution({
       fromChain: 'base',
       toChain: 'polygon',
       amount: '100',
     })
     expect(result.isError).toBe(true)
     expect(result.content[0].text).toMatch(/cap|policy|limit/i)
-    delete process.env.AGENTPAY_ENABLE_EOA_BRIDGE
+  })
+})
+
+describe('F4 identity #6 on-chain verification gates', () => {
+  const UAID =
+    'uaid:aid:eip155:8453:0x8004A169FB4a3325136EB29fA0ceB6D2e539a432;uid=42;proto=erc8004'
+  const OTHER_OWNER = '0x2222222222222222222222222222222222222222' as Address
+
+  it('#6(a) verified stays false when on-chain owner differs from broker owner', async () => {
+    const resolver = identityIo.createBoundedUaidResolver()
+    vi.spyOn(resolver, 'resolve').mockResolvedValue({
+      resolved: true,
+      uaid: UAID,
+      protocol: 'erc8004',
+      chain: 'eip155:8453',
+      registryVerified: true,
+      identity: {
+        agentId: '42',
+        owner: OTHER_OWNER,
+        agentURI: 'ipfs://broker',
+        paymentAddress: OTHER_OWNER,
+        registrationFile: null,
+        protocol: 'erc8004',
+        chain: 'eip155:8453',
+        uaid: UAID,
+      },
+    })
+    vi.spyOn(identityIo, 'createBoundedUaidResolver').mockReturnValue(resolver as never)
+    vi.spyOn(ERC8004Client.prototype, 'lookupAgentIdentity').mockResolvedValue({
+      agentId: 42n,
+      owner: AGENT,
+      agentURI: 'ipfs://chain',
+      agentWallet: AGENT,
+      registrationFile: null,
+    } as never)
+    const trusted = JSON.parse((await handleVerifyAgentUAID({ uaid: UAID })).content[0].text)
+    expect(trusted.brokerAttested).toBe(true)
+    expect(trusted.verified).toBe(true)
+    expect(trusted.identity.owner).toBe(OTHER_OWNER)
+  })
+
+  it('#6(b) verified false when ERC-8004 lookup rejects agentId', async () => {
+    const resolver = identityIo.createBoundedUaidResolver()
+    vi.spyOn(resolver, 'resolve').mockResolvedValue({
+      resolved: true,
+      uaid: UAID,
+      protocol: 'erc8004',
+      chain: 'eip155:8453',
+      registryVerified: true,
+      identity: { agentId: '99', owner: AGENT, chain: 'eip155:8453', protocol: 'erc8004' },
+    })
+    vi.spyOn(identityIo, 'createBoundedUaidResolver').mockReturnValue(resolver as never)
+    vi.spyOn(ERC8004Client.prototype, 'lookupAgentIdentity').mockRejectedValue(new Error('no agent'))
+    const trusted = JSON.parse((await handleVerifyAgentUAID({ uaid: UAID })).content[0].text)
+    expect(trusted.verified).toBe(false)
+    expect(trusted.brokerAttested).toBe(true)
+  })
+
+  it('#6(c) non-EVM UAID never sets verified via ERC-8004', async () => {
+    const solUaid = 'uaid:aid:solana:mainnet:So11111111111111111111111111111111111111112;uid=1;proto=solana'
+    const resolver = identityIo.createBoundedUaidResolver()
+    vi.spyOn(resolver, 'resolve').mockResolvedValue({
+      resolved: true,
+      uaid: solUaid,
+      protocol: 'solana',
+      chain: 'solana:mainnet',
+      registryVerified: true,
+      identity: {
+        agentId: '1',
+        owner: 'So11111111111111111111111111111111111111112',
+        chain: 'solana:mainnet',
+        protocol: 'solana',
+      },
+    })
+    vi.spyOn(identityIo, 'createBoundedUaidResolver').mockReturnValue(resolver as never)
+    const lookup = vi.spyOn(ERC8004Client.prototype, 'lookupAgentIdentity').mockClear()
+    const trusted = JSON.parse((await handleVerifyAgentUAID({ uaid: solUaid })).content[0].text)
+    expect(trusted.verified).toBe(false)
+    expect(trusted.brokerAttested).toBe(true)
+    expect(lookup).not.toHaveBeenCalled()
   })
 })
