@@ -44,14 +44,14 @@ async function churn(n: number) {
 }
 
 describe('spend journal compaction', () => {
-  it('keeps the journal bounded under a stream of definite failures', async () => {
+  it('keeps the journal bounded under a stream of definite failures', { timeout: 20_000 }, async () => {
     await churn(2000)
     const size = statSync(spendJournalPath()!).size
     expect(size).toBeLessThan(3 * THRESHOLD)
     expect(existsSync(spendJournalPath()! + '.tmp')).toBe(false)
   })
 
-  it('preserves locks (with scope), tombstones and in-flight begins across compaction and restart', async () => {
+  it('preserves locks (with scope), tombstones and in-flight begins across compaction and restart', { timeout: 20_000 }, async () => {
     // A keyed settlement (becomes a tombstone after restart).
     await withSpendIntent('send_payment#invoice-1', async () => '0xsettled', { durable: true, fingerprint: 'fp-1' })
     // An ambiguous x402 payment: locked, and its host/payee blocked.

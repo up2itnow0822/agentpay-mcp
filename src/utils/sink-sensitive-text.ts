@@ -36,7 +36,9 @@ const SENSITIVE_KEY_EXACT = new Set([
   'dbpassword',
 ])
 
-const SENSITIVE_KEY_SUFFIXES = ['password', 'passphrase', 'secret', 'privatekey'] as const
+const SENSITIVE_KEY_SUFFIXES = ['password', 'passphrase', 'secret', 'privatekey', 'apikey'] as const
+
+const SENSITIVE_KV_TO_EOL = new Set(['seed', 'mnemonic'])
 
 /** Only the HTTP header wire form is masked by redactSecrets Set-Cookie rules. */
 function isR6SetCookieHeaderKey(name: string): boolean {
@@ -97,7 +99,9 @@ export const B1_TOKEN_FIELD_SURVIVORS = ['tokenAddress', 'tokenId', 'tokenAmount
 const JSON_STRING_FIELD_RE = /"((?:\\.|[^"\\])*)"\s*:\s*"((?:\\.|[^"\\])*)"/g
 
 const KV_FIELD_RE =
-  /(?<![-])\b([A-Za-z][A-Za-z0-9_.\-]*)\s*[:=]\s*("(?:\\.|[^"\\])*"|[^\s,;&\]}]+)/g
+  /\b([A-Za-z][A-Za-z0-9_.\-]*)\s*[:=]\s*("(?:\\.|[^"\\])*"|[^\s,;&\]}]+)/g
+const KV_EOL_FIELD_RE =
+  /\b([A-Za-z][A-Za-z0-9_.\-]*)\s*[:=]\s*([^\r\n]+)/g
 
 export function maskSensitiveTextFields(text: string): string {
   let out = text.replace(JSON_STRING_FIELD_RE, (match, rawKey: string, _rawVal: string) => {
@@ -106,6 +110,14 @@ export function maskSensitiveTextFields(text: string): string {
     if (!isSensitiveTextKeyName(key)) return match
     const escapedKey = JSON.stringify(key).slice(1, -1)
     return `"${escapedKey}":"[redacted]"`
+  })
+  out = out.replace(KV_EOL_FIELD_RE, (match, rawKey: string) => {
+    if (isR6SetCookieHeaderKey(rawKey)) return match
+    if (!SENSITIVE_KV_TO_EOL.has(normalizeSensitiveKeyName(rawKey))) return match
+    const sepEnd = match.search(/[:=]\s*/)
+    if (sepEnd < 0) return match
+    const sepThrough = match.slice(sepEnd).match(/^[:=]\s*/)?.[0]?.length ?? 1
+    return `${rawKey}${match.slice(rawKey.length, sepEnd + sepThrough)}[redacted]`
   })
   out = out.replace(KV_FIELD_RE, (match, rawKey: string, rawVal: string) => {
     if (isR6SetCookieHeaderKey(rawKey)) return match

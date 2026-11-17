@@ -16,8 +16,8 @@
   },
   {
     "file": "src/utils/sink.ts",
-    "sha256": "8eba6a358c32dffad9cef96d3eb59ce7439bef240f5cfe22c3031ea2926c4661",
-    "reason": "stdio console shim; routes dependency console.* through safeErrorText to stderr in MCP stdio mode"
+    "sha256": "08caa6e423afc1dd7ec9dc9bddaab322f285e7d4c83eb018499e45515c152686",
+    "reason": "stdio console shim; routes dependency console.* through safeTextForLog to stderr in MCP stdio mode"
   },
   {
     "file": "src/index.ts",

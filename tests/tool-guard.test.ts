@@ -5,6 +5,7 @@ import {
   B1_GUARD_E2E_WIRE_FORMS,
   B1_TOKEN_FIELD_SURVIVORS,
 } from '../src/utils/sink-sensitive-text.js'
+import { b1KvFixtureLine } from './b1-kv-fixture.js'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { CallToolResultSchema } from '@modelcontextprotocol/sdk/types.js'
 import * as format from '../src/utils/format.js'
@@ -50,10 +51,7 @@ describe('B1: guardToolCall end-to-end (safeText path)', () => {
   it.each(B1_GUARD_E2E_WIRE_FORMS)(
     'masks short key=value for %s through guardToolCall',
     async (wireKey) => {
-      const kvText =
-        wireKey === 'cookie' || wireKey === 'set-cookie'
-          ? `${wireKey}: ${B1_SHORT}\nsibling_ok=visible`
-          : `${wireKey}: ${B1_SHORT}; sibling_ok=visible`
+      const kvText = b1KvFixtureLine(wireKey, B1_SHORT)
       const r = await guardToolCall('b1_kv', () => ({
         content: [{ type: 'text', text: kvText }],
       }))

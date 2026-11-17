@@ -17,6 +17,7 @@ import {
   toolText,
 } from '../src/utils/sink.js'
 import * as sinkModule from '../src/utils/sink.js'
+import * as sinkSensitive from '../src/utils/sink-sensitive-text.js'
 
 type CorpusRow = {
   id: string
@@ -157,8 +158,8 @@ describe('redaction corpus', () => {
 describe('F13 safeText family identity', () => {
   afterEach(() => vi.restoreAllMocks())
 
-  it('stderr logErr and console shim both invoke the same exported safeText', () => {
-    const spy = vi.spyOn(sinkModule, 'safeText')
+  it('stderr logErr and console shim both invoke the same exported safeText-family sink', () => {
+    const spy = vi.spyOn(sinkModule.REDACTION_LOG_ENTRY, 'redact')
     const err = vi.spyOn(process.stderr, 'write').mockImplementation(() => true)
   const out = vi.spyOn(process.stdout, 'write').mockImplementation(() => true)
     try {
@@ -211,13 +212,13 @@ describe('log path fail-closed', () => {
   })
 
   it('stderr writes exactly [log withheld by redaction guard] when redaction throws', () => {
-    vi.spyOn(sinkModule, 'safeText').mockImplementation(() => {
+    vi.spyOn(sinkSensitive, 'maskSensitiveTextFields').mockImplementation(() => {
       throw new Error('redact blew up')
     })
     const err = vi.spyOn(process.stderr, 'write').mockImplementation(() => true)
     logErr(RAW)
     const written = err.mock.calls.map((c) => String(c[0])).join('')
-    expect(written).toBe('[log withheld by redaction guard]\n')
+    expect(written).toBe(`${sinkModule.LOG_REDACTION_WITHHELD}\n`)
     expect(written).not.toContain(RAW)
     err.mockRestore()
   })
@@ -225,13 +226,13 @@ describe('log path fail-closed', () => {
   it('console shim writes exactly [log withheld by redaction guard] when redaction throws', () => {
     installStdioConsoleSink()
     enterStdioProtocolMode()
-    vi.spyOn(sinkModule, 'safeText').mockImplementation(() => {
+    vi.spyOn(sinkSensitive, 'maskSensitiveTextFields').mockImplementation(() => {
       throw new Error('redact blew up')
     })
     const err = vi.spyOn(process.stderr, 'write').mockImplementation(() => true)
     console.info(RAW)
     const written = err.mock.calls.map((c) => String(c[0])).join('')
-    expect(written).toBe('[log withheld by redaction guard]\n')
+    expect(written).toBe(`${sinkModule.LOG_REDACTION_WITHHELD}\n`)
     expect(written).not.toContain(RAW)
     err.mockRestore()
   })

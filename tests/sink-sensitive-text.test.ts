@@ -6,6 +6,7 @@ import {
 } from '../src/utils/sink-sensitive-text.js'
 import { safeText } from '../src/utils/sink.js'
 import { guardToolCall } from '../src/utils/tool-guard.js'
+import { b1KvFixtureLine } from './b1-kv-fixture.js'
 
 /** Must not appear as a substring of any sensitive wire key name (e.g. avoid "xy" in "proxy"). */
 const SHORT = 'q7q'
@@ -64,10 +65,7 @@ describe('B1 sensitive text key matcher', () => {
   it.each(SENSITIVE_TEXT_KEY_WIRE_FORMS)(
     'masks 1–3 char key=value for wire key %s with sibling intact',
     (wireKey) => {
-      const line =
-        wireKey === 'cookie' || wireKey === 'set-cookie'
-          ? `${wireKey}: ${SHORT}\nsibling_ok=visible`
-          : `${wireKey}: ${SHORT}; sibling_ok=visible`
+      const line = b1KvFixtureLine(wireKey, SHORT)
       const out = safeText(line)
       expect(out).not.toContain(SHORT)
       expect(out).toContain('[redacted]')

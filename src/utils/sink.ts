@@ -112,11 +112,12 @@ const HTTP_REDACT_HEADER_NAMES = [
 const HTTP_HEADER_NAME_ALT = HTTP_REDACT_HEADER_NAMES.join('|')
 const HTTP_HEADER_COOKIE_ONLY = 'cookie'
 const HTTP_HEADER_SET_COOKIE = 'set-cookie'
+const HTTP_HEADER_COOKIE_PAIR_ALT = `${HTTP_HEADER_COOKIE_ONLY}|${HTTP_HEADER_SET_COOKIE}`
 const HTTP_HEADER_NON_COOKIE_ALT = HTTP_REDACT_HEADER_NAMES.filter(
   (n) => n !== 'cookie' && n !== 'set-cookie'
 ).join('|')
 const COOKIE_HEADER_LINE_RE = new RegExp(
-  `(?<![-])\\b(${HTTP_HEADER_COOKIE_ONLY})(\\s*[:=]\\s*)([^\\r\\n]*)`,
+  `(?<!set-)(?<![a-zA-Z0-9])(${HTTP_HEADER_COOKIE_ONLY})(\\s*[:=]\\s*)((?:[^\\r\\n"\\\\]|\\\\.)*)`,
   'gi'
 )
 const SET_COOKIE_HEADER_LINE_RE = new RegExp(
@@ -124,9 +125,19 @@ const SET_COOKIE_HEADER_LINE_RE = new RegExp(
   'gi'
 )
 const HEADER_RE = new RegExp(
-  `\\b(${HTTP_HEADER_NON_COOKIE_ALT})(\\s*[:=]\\s*)(['"]?)([^\\r\\n;'"]*)\\3`,
+  `\\b(${HTTP_HEADER_NON_COOKIE_ALT})(\\s*[:=]\\s*)(['"]?)[^\\r\\n'"]*\\3`,
   'gi'
 )
+const JSON_COOKIE_HEADER_ARRAY_RE = new RegExp(
+  `"(${HTTP_HEADER_COOKIE_PAIR_ALT})"\\s*:\\s*(\\[[\\s\\S]*?\\])`,
+  'gi'
+)
+const SINGLE_QUOTED_COOKIE_HEADER_ARRAY_RE = new RegExp(
+  `'(${HTTP_HEADER_COOKIE_PAIR_ALT})'\\s*:\\s*(\\[[\\s\\S]*?\\])`,
+  'gi'
+)
+const CLI_SENSITIVE_FLAG_RE =
+  /\B--(?:access[-_]?token|api[-_]?key|client[-_]?secret|password|secret|x[-_]?api[-_]?key)(?:=|\s+)([^\s"'`,]+)/gi
 const JSON_HEADER_RE = new RegExp(
   `"(${HTTP_HEADER_NAME_ALT})"\\s*:\\s*"([^"]*)"`,
   'gi'
@@ -149,6 +160,10 @@ const JWT_RE = /eyJ[A-Za-z0-9_-]*(?:\s*\.\s*)[A-Za-z0-9_-]+(?:\s*\.\s*)[A-Za-z0-
 // Any whitespace between words (incl. NBSP), so a mnemonic split across lines still matches.
 const WORD_RUN_RE =
   /(?:\d+[.)]\s*)?[a-zA-Z]{3,8}(?:(?:[ \t\r\n\u00a0]+(?:\d+[.)]\s*)?)[a-zA-Z]{3,8}){11,23}\b/g
+const COMMA_MNEMONIC_RE =
+  /\b(?:[a-zA-Z]{3,8}\s*,\s*){11,}[a-zA-Z]{3,8}\b/g
+const JSON_ARRAY_MNEMONIC_RE =
+  /\[("(?:\\.|[^"\\])*"(?:\s*,\s*"(?:\\.|[^"\\])*"){11,})\]/g
 
 function mnemonicWords(run: string): string[] {
   return run
@@ -193,6 +208,19 @@ function redactSetCookieHeaderValue(raw: string): string {
     else out.push(`${name}=[redacted]`)
   }
   return out.join('; ')
+}
+
+function redactHeaderArrayBracketBody(body: string, headerName: string): string {
+  const setCookie = headerName.toLowerCase() === 'set-cookie'
+  return body.replace(/'((?:\\.|[^'\\])*)'|"((?:\\.|[^"\\])*)"/g, (match, sq: string, dq: string) => {
+    const raw =
+      sq !== undefined
+        ? sq.replace(/\\'/g, "'").replace(/\\\\/g, '\\')
+        : dq.replace(/\\"/g, '"').replace(/\\\\/g, '\\')
+    const redacted = setCookie ? redactSetCookieHeaderValue(raw) : '[redacted]'
+    if (sq !== undefined) return `'${redacted}'`
+    return `"${redacted}"`
+  })
 }
 
 /** R5: a run of 12–24 BIP-39 words (12/15/18/21/24) is masked. */
@@ -257,10 +285,23 @@ export function redactSecrets(
       (_m, name: string, sep: string, val: string) => `${name}${sep}${redactSetCookieHeaderValue(val)}`
     )
     out = out.replace(
+      /(?:\\r\\n|\\n|[\r\n]+)\s*(cookie)\s*:\s*(?:[^"\\]|\\.)*/gi,
+      (m) => m.replace(/(\s*)(cookie)(\s*:\s*)(?:[^"\\]|\\.)*/i, '$1$2$3[redacted]')
+    )
+    out = out.replace(
       COOKIE_HEADER_LINE_RE,
       (_m, name: string, sep: string) => `${name}${sep}[redacted]`
     )
+    out = out.replace(
+      JSON_COOKIE_HEADER_ARRAY_RE,
+      (_m, name: string, body: string) => `"${name}":${redactHeaderArrayBracketBody(body, name)}`
+    )
+    out = out.replace(
+      SINGLE_QUOTED_COOKIE_HEADER_ARRAY_RE,
+      (_m, name: string, body: string) => `'${name}': ${redactHeaderArrayBracketBody(body, name)}`
+    )
     out = out.replace(HEADER_RE, (_m, name: string, sep: string, q: string) => `${name}${sep}${q}[redacted]${q}`)
+    out = out.replace(CLI_SENSITIVE_FLAG_RE, (m, val: string) => m.replace(val, '[redacted]'))
     out = out.replace(JSON_HEADER_RE, (_m, name: string, val: string) => {
       if (name.toLowerCase() === 'set-cookie') {
         return `"${name}":"${redactSetCookieHeaderValue(val)}"`
@@ -287,6 +328,32 @@ export function redactSecrets(
     )
     // R5
     out = redactMnemonics(out)
+    out = out.replace(COMMA_MNEMONIC_RE, (run) => {
+      const words = run.split(/\s*,\s*/).filter(Boolean).map((w) => w.toLowerCase())
+      const BIP39 = bip39Words()
+      const okLen = [12, 15, 18, 21, 24].includes(words.length)
+      if (!BIP39) return okLen ? '[redacted-mnemonic]' : run
+      let streak = 0
+      for (const w of words) {
+        streak = BIP39.has(w) ? streak + 1 : 0
+        if (streak >= 12) return '[redacted-mnemonic]'
+      }
+      return run
+    })
+    out = out.replace(JSON_ARRAY_MNEMONIC_RE, (match, inner: string) => {
+      const words = [...inner.matchAll(/"((?:\\.|[^"\\])*)"/g)].map((m) =>
+        m[1]!.replace(/\\"/g, '"').replace(/\\\\/g, '\\').toLowerCase()
+      )
+      const BIP39 = bip39Words()
+      const okLen = [12, 15, 18, 21, 24].includes(words.length)
+      if (!BIP39) return okLen ? '[redacted-mnemonic]' : match
+      let streak = 0
+      for (const w of words) {
+        streak = BIP39.has(w) ? streak + 1 : 0
+        if (streak >= 12) return '[redacted-mnemonic]'
+      }
+      return match
+    })
     return out
   } catch {
     return '[output withheld: redaction failed]'
@@ -294,10 +361,34 @@ export function redactSecrets(
 }
 // END redact-core
 
-/** The one function every output passes through. */
-export function safeText(text: string): string {
-  // B1 field mask runs first so header-like key=value lines keep stable keys before pattern redaction.
-  return redactSecrets(maskSensitiveTextFields(text))
+export const LOG_REDACTION_WITHHELD = '[log withheld by redaction guard]'
+
+let logRedactDepth = 0
+
+export type SafeTextOptions = { errorContext?: boolean }
+
+/** The one function every user-visible string passes through (B1 + redactSecrets). */
+export function safeText(text: string, opts: SafeTextOptions = {}): string {
+  const masked = maskSensitiveTextFields(String(text))
+  return redactSecrets(masked, process.env, opts)
+}
+
+/** stderr / console shim: fail-closed and non-reentrant. */
+export function safeTextForLog(text: string): string {
+  logRedactDepth++
+  try {
+    if (logRedactDepth > 1) return LOG_REDACTION_WITHHELD
+    return safeText(text, { errorContext: true })
+  } catch {
+    return LOG_REDACTION_WITHHELD
+  } finally {
+    logRedactDepth--
+  }
+}
+
+/** Shared log-path redaction entry (stderr + console shim); tests spy this for F13. */
+export const REDACTION_LOG_ENTRY = {
+  redact: (text: string): string => safeTextForLog(text),
 }
 
 /**
@@ -305,7 +396,7 @@ export function safeText(text: string): string {
  * every `URL:` field, whatever precedes it.
  */
 export function safeErrorText(text: string): string {
-  return redactSecrets(text, process.env, { errorContext: true })
+  return safeText(text, { errorContext: true })
 }
 
 /** MCP text content block; `textContent` in format.ts re-exports this. */
@@ -335,7 +426,7 @@ export function isStdioProtocolMode(): boolean {
 
 /** Redacted line to stderr. */
 export function logErr(line: string): void {
-  process.stderr.write(safeErrorText(line) + '\n')
+  process.stderr.write(REDACTION_LOG_ENTRY.redact(line) + '\n')
 }
 
 type ConsoleLevel = 'log' | 'info' | 'debug' | 'warn' | 'error'
@@ -361,10 +452,10 @@ export function installStdioConsoleSink(): void {
   const forward = (level: ConsoleLevel, args: unknown[]): void => {
     const line = format(...args)
     if (stdioProtocolMode) {
-      process.stderr.write(safeErrorText(line) + '\n') // output-sink-allow: stdio console shim; same rules as logErr
+      process.stderr.write(REDACTION_LOG_ENTRY.redact(line) + '\n') // output-sink-allow: stdio console shim; same rules as logErr
       return
     }
-    const redacted = safeText(line) + '\n'
+    const redacted = safeText(line, { errorContext: level === 'error' || level === 'warn' }) + '\n'
     if (level === 'error' || level === 'warn') {
       process.stderr.write(redacted)
     } else {
