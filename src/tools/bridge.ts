@@ -7,7 +7,7 @@ import { z } from 'zod'
 import { createBridge } from 'agentwallet-sdk'
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type AnyWalletClient = any
-import { getConfig, getWallet } from '../utils/client.js'
+import { getWallet } from '../utils/client.js'
 import { textContent, formatError } from '../utils/format.js'
 import { assertConfiguredBridgeSource } from '../utils/wallet-chain.js'
 import {
@@ -20,18 +20,9 @@ import {
   runClassifiedSpend,
   withSpendIntent,
   wrapDefiniteSdkReads,
-  runLockedSpendResume,
 } from '../utils/spend-intent.js'
 import { withReservedSpend } from './budget.js'
 import { parseAmountStrict } from '../utils/amount.js'
-import {
-  bridgeUsdcResumeAfterBurn,
-  bridgeUsdcWithAttestationGuard,
-  BridgeAttestationTimeoutError,
-  getBridgeAttestationPending,
-  clearBridgeAttestationPending,
-} from '../utils/bridge-attestation-guard.js'
-import { assertExpectedSmartWallet } from '../utils/wallet-binding.js'
 
 // Supported CCTP V2 chain names
 const SUPPORTED_CHAINS = [
@@ -107,13 +98,7 @@ export async function handleBridgeUsdc(
   input: BridgeUsdcInput
 ): Promise<{ content: Array<{ type: 'text'; text: string }>; isError?: boolean }> {
   try {
-  if (process.env['AGENTPAY_ENABLE_EOA_BRIDGE']?.trim() !== '1') {
-    throw new DefiniteSpendFailure(
-      'bridge_usdc is disabled by default on SDK 7.0.0 wrappers until the operator sets AGENTPAY_ENABLE_EOA_BRIDGE=1.'
-    )
-  }
     const wallet = getWallet()
-    const config = getConfig()
 
     if (input.fromChain === input.toChain) {
       throw new Error('fromChain and toChain must be different')
@@ -130,41 +115,6 @@ export async function handleBridgeUsdc(
       rawAmount,
       idempotencyKey: input.idempotencyKey,
     })
-
-    const attestationPending = getBridgeAttestationPending(intent.key)
-    if (attestationPending) {
-      const resumeBridge = classifyBridgeApproveUsdc(
-        wrapDefiniteSdkReads(
-          createBridge(wallet.walletClient as AnyWalletClient, input.fromChain as SupportedChain)
-        )
-      )
-      const { value } = await runLockedSpendResume(
-        intent.key,
-        intent.fingerprint,
-        async () => {
-          const result = await runClassifiedSpend(wallet.walletClient, () =>
-            bridgeUsdcResumeAfterBurn(resumeBridge, attestationPending)
-          )
-          clearBridgeAttestationPending(intent.key)
-          const burnTxHash = requireSettlementHash(result.burnTxHash, 'bridge_usdc burn')
-          const mintTxHash = requireSettlementHash(result.mintTxHash, 'bridge_usdc mint')
-          return {
-            success: true as const,
-            burnTxHash,
-            mintTxHash,
-            fromChain: result.fromChain,
-            toChain: result.toChain,
-            recipient: result.recipient,
-            amount: input.amount,
-            rawAmount: rawAmount.toString(),
-            elapsedMs: result.elapsedMs,
-            attestationResumed: true,
-          }
-        },
-        { durable: Boolean(input.idempotencyKey?.trim()) }
-      )
-      return { content: [textContent(JSON.stringify(value))] }
-    }
 
     const { value, replayed } = await withSpendIntent(
       intent.key,
@@ -194,16 +144,8 @@ export async function handleBridgeUsdc(
           createBridge(wallet.walletClient as AnyWalletClient, input.fromChain as SupportedChain)
         )
       )
-      await assertExpectedSmartWallet(wallet, config, { requireBinding: true })
       const result = await runClassifiedSpend(wallet.walletClient, () =>
-        bridgeUsdcWithAttestationGuard(
-          bridge,
-          rawAmount,
-          input.toChain as SupportedChain,
-          {},
-          input.fromChain as SupportedChain,
-          intent.key
-        )
+        bridge.bridge(rawAmount, input.toChain as SupportedChain)
       )
       const burnTxHash = requireSettlementHash(result.burnTxHash, 'bridge_usdc burn')
       const mintTxHash = requireSettlementHash(result.mintTxHash, 'bridge_usdc mint')
@@ -236,21 +178,6 @@ export async function handleBridgeUsdc(
       ],
     }
   } catch (error: unknown) {
-    if (error instanceof BridgeAttestationTimeoutError) {
-      return {
-        content: [
-          textContent(
-            JSON.stringify({
-              success: false,
-              attestationPending: true,
-              burnTxHash: error.burnTxHash,
-              message: error.message,
-            })
-          ),
-        ],
-        isError: true,
-      }
-    }
     return {
       content: [textContent(formatError(error, 'bridge_usdc'))],
       isError: true,

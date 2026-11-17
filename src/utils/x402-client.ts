@@ -35,9 +35,6 @@ import {
   type SpendReservation,
 } from '../tools/budget.js'
 import { DefiniteSpendFailure } from './spend-intent.js'
-import { guardX402ProbeResponse } from './x402-402-guard.js'
-import { getConfig } from './client.js'
-import { assertExpectedSmartWallet } from './wallet-binding.js'
 
 export type AgentPayX402Kind = 'payment' | 'session'
 
@@ -122,7 +119,6 @@ export function createAgentPayX402Client(
     supportedNetworks: supportedX402NetworksForChainId(options.chainId),
     onBeforePayment: async (req) => {
       try {
-        await assertExpectedSmartWallet(wallet, getConfig(), { requireBinding: true })
         // The 402's payTo is remote-controlled and ends up inside error
         // messages (SDK allowlist rejection, viem InvalidAddressError).
         // Reject non-addresses before signing or interpolating.
@@ -200,7 +196,6 @@ export function createAgentPayX402Client(
       if (probe.status !== 402) {
         return probe
       }
-      await guardX402ProbeResponse(url, probe)
       return sdk.settle402AndRetry(probe, url, hopInit, sdkTransport)
     },
   }

@@ -32,7 +32,6 @@
  */
 import { z } from 'zod'
 import { ERC8004Client, ReputationClient, UAIDResolver } from 'agentwallet-sdk'
-import { createBoundedUaidResolver } from '../utils/identity-io-guard.js'
 import { getAddress, isAddress, type Address } from 'viem'
 import { getConfig } from '../utils/client.js'
 import {
@@ -527,43 +526,19 @@ export async function handleVerifyAgentUAID(
       )
     }
 
-    const resolver = createBoundedUaidResolver()
-    const resolution = await resolver.resolve(input.uaid)
-    const brokerAttested = resolution.registryVerified === true
-    trusted['brokerAttested'] = brokerAttested
-    trusted['verified'] = false
+    const resolver = new UAIDResolver()
+    const result = (await resolver.verify(input.uaid)) as unknown as Record<string, unknown>
 
-    if (parsed.protocol === 'erc8004') {
-      const chainRef = resolution.chain ?? (resolution.identity as { chain?: string } | null)?.chain
-      const chainIdMatch =
-        typeof chainRef === 'string' ? chainRef.match(/^eip155:(\d{1,12})$/) : null
-      const agentIdRaw = resolution.identity?.agentId
-      const agentId = trustedDecimalId(agentIdRaw)
-      if (chainIdMatch && agentId) {
-        const chainId = Number(chainIdMatch[1])
-        const chainName = CHAIN_ID_TO_NAME[chainId]
-        if (chainName) {
-          try {
-            const identityClient = new ERC8004Client({ chain: chainName })
-            await identityClient.lookupAgentIdentity(BigInt(agentId))
-            trusted['verified'] = true
-          } catch {
-            trusted['verified'] = false
-          }
-        }
-      }
-    }
-
-    const result = resolution as unknown as Record<string, unknown>
-    placeTyped(trusted, untrusted, 'protocol', result['protocol'] ?? resolution.protocol, (v) =>
+    trusted['verified'] = result['verified'] === true
+    placeTyped(trusted, untrusted, 'protocol', result['protocol'], (v) =>
       typeof v === 'string' && KNOWN_UAID_PROTOCOLS.has(v) ? v : undefined
     )
-    placeTyped(trusted, untrusted, 'trustScore', result['trustScore'] ?? resolution.trustScore, (v) => {
+    placeTyped(trusted, untrusted, 'trustScore', result['trustScore'], (v) => {
       const n = trustedFiniteNumber(v)
       return n !== undefined && n >= 0 && n <= 100 ? n : undefined
     })
 
-    const id = result['identity'] ?? resolution.identity
+    const id = result['identity']
     if (id && typeof id === 'object') {
       const rawId = id as Record<string, unknown>
       const trustedId: Record<string, unknown> = {}

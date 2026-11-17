@@ -4,8 +4,7 @@
  */
 import { z } from 'zod';
 import { getAddress, isAddress, zeroAddress, type Address } from 'viem';
-import { getGlobalRegistry } from 'agentwallet-sdk';
-import { agentExecuteWithOutcome } from '../utils/agent-execute-outcome.js';
+import { agentExecute, agentTransferToken, getGlobalRegistry } from 'agentwallet-sdk';
 import { getWallet, getConfig, type AgentWalletInstance } from '../utils/client.js';
 import {
   textContent,
@@ -18,16 +17,11 @@ import {
   DefiniteSpendFailure,
   IDEMPOTENCY_KEY_JSON_SCHEMA,
   IdempotencyKeyZodSchema,
-  QueuedSpendError,
-  requireExecutedCall,
-  requireExecutedTransfer,
   requireSettlementHash,
   runClassifiedSpend,
   sendPaymentIntentIdentity,
   withSpendIntent,
 } from '../utils/spend-intent.js';
-import { assertExpectedSmartWallet } from '../utils/wallet-binding.js';
-import { UnverifiedSpendError, agentTransferTokenWithOutcome } from '../utils/agent-transfer-outcome.js';
 
 const NATIVE_TOKEN = zeroAddress;
 
@@ -168,28 +162,26 @@ export async function handleSendPayment(
 
     const { value: txHash, replayed } = await withSpendIntent(
       intent.key,
-      async () =>
+      () =>
         // Policy is reserved before the write and committed / released /
         // locked by the classified outcome. amountWei is in the token's own
         // base units; decimals lets the policy normalise to its caps.
-        withReservedSpend({ merchant: toAddress, amount: amountWei, decimals }, async () => {
-          await assertExpectedSmartWallet(wallet, config, { requireBinding: true })
-          return requireSettlementHash(
+        withReservedSpend({ merchant: toAddress, amount: amountWei, decimals }, async () =>
+          requireSettlementHash(
             await runClassifiedSpend(wallet.walletClient, async () => {
               if (isNativeEth) {
-                const result = await agentExecuteWithOutcome(wallet, { to: toAddress, value: amountWei }, 'send_payment');
-                return requireExecutedCall(result, 'send_payment');
+                const result = await agentExecute(wallet, { to: toAddress, value: amountWei });
+                return result.txHash;
               }
-              const outcome = await agentTransferTokenWithOutcome(wallet, {
+              return agentTransferToken(wallet, {
                 token: tokenAddress,
                 to: toAddress,
                 amount: amountWei,
               });
-              return requireExecutedTransfer(outcome, 'send_payment');
             }),
             'send_payment'
           )
-        }),
+        ),
       {
         durable: Boolean(input.idempotencyKey?.trim()),
         fingerprint: intent.fingerprint,
@@ -219,23 +211,6 @@ export async function handleSendPayment(
       ],
     };
   } catch (error: unknown) {
-    if (error instanceof QueuedSpendError) {
-      return {
-        content: [
-          textContent(
-            `⏳ **Payment Pending Owner Approval**\n\n${error.message}\n` +
-              'Funds have not left the wallet yet.'
-          ),
-        ],
-        isError: true,
-      }
-    }
-    if (error instanceof UnverifiedSpendError) {
-      return {
-        content: [textContent(`⚠️ ${error.message}`)],
-        isError: true,
-      }
-    }
     return {
       content: [textContent(formatError(error, 'send_payment'))],
       isError: true,
@@ -260,7 +235,7 @@ export function resolveTokenDecimals(
     assertDecimalsMatch(token, explicitDecimals, authoritative);
     return authoritative;
   }
-  rejectUnregisteredExplicitDecimals(token, explicitDecimals, chainId);
+  if (explicitDecimals !== undefined) return explicitDecimals;
 
   throw new Error(
     `Unknown decimals for token ${token} on chain ${chainId}. ` +
@@ -272,19 +247,6 @@ export function resolveTokenDecimals(
 function knownTokenDecimals(token: Address, chainId: number): number | undefined {
   if (token.toLowerCase() === NATIVE_TOKEN) return 18;
   return getGlobalRegistry().getTokenByAddress(token, chainId)?.decimals;
-}
-
-function rejectUnregisteredExplicitDecimals(
-  token: Address,
-  explicitDecimals: number | undefined,
-  chainId: number
-): void {
-  if (explicitDecimals !== undefined) {
-    throw new DefiniteSpendFailure(
-      `Spend cap requires a registered token; token ${token} is not in the registry ` +
-        `on chain ${chainId}. Register it with add_custom_token, or omit token_decimals.`
-    );
-  }
 }
 
 /**
@@ -332,7 +294,6 @@ export async function resolveTransferDecimals(
     assertDecimalsMatch(token, explicitDecimals, known);
     return known;
   }
-  rejectUnregisteredExplicitDecimals(token, explicitDecimals, chainId);
   const publicClient = (wallet as unknown as {
     publicClient?: { readContract?: (_args: unknown) => Promise<unknown> };
   }).publicClient;

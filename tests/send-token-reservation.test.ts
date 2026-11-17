@@ -5,21 +5,6 @@
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 
-vi.mock('../src/utils/wallet-binding.js', () => ({
-  assertExpectedSmartWallet: vi.fn().mockResolvedValue(undefined),
-}))
-
-vi.mock('../src/utils/agent-transfer-outcome.js', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('../src/utils/agent-transfer-outcome.js')>()
-  return {
-    ...actual,
-    agentTransferTokenWithOutcome: vi.fn(async (wallet: unknown, params: unknown) => {
-      const hash = await agentTransferToken(wallet as never, params as never)
-      return { status: 'executed', txHash: hash as `0x${string}` }
-    }),
-  }
-})
-
 const agentTransferToken = vi.hoisted(() => vi.fn())
 
 vi.mock('agentwallet-sdk', async (importOriginal) => {

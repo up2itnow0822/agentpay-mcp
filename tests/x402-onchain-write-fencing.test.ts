@@ -27,10 +27,6 @@
  * absence rather than a broken rig.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-
-vi.mock('../src/utils/wallet-binding.js', () => ({
-  assertExpectedSmartWallet: vi.fn().mockResolvedValue(undefined),
-}))
 import {
   createWalletClient,
   createPublicClient,

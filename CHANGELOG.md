@@ -7,43 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
-## [Unreleased] — 5.0.x on agentwallet-sdk 7.0.0
+## [Unreleased]
 
 ### Security
-- **SEC-20261105-02:** Single redacting output sink (`src/utils/sink.ts`). All MCP tool
-  text, `formatError` / `formatUntrustedBody`, error causes, operator stderr, and the
-  index.ts dispatcher pass through `safeText` / `toolText` before leaving the process.
-  AST + behavioral tests enforce no bypass (SO S1–S6).
+- **SEC-20261105-02:** Single redacting output sink (`src/utils/sink.ts`). MCP tool
+  results, `formatError` / `formatUntrustedBody`, CLI/operator stderr, and stdio
+  console output pass through `safeText` / `toolText` before leaving the process.
+  Tool dispatch is wrapped in `guardToolCall`; examples vendor the same redact core.
+  Proved by `tests/output-sink.test.ts`, `tests/redact.test.ts`, `tests/tool-guard.test.ts`,
+  and `tests/stdio-protocol-mode.test.ts`.
 
-### Notes for installers
-- npm may print a **deprecation notice** for `agentwallet-sdk@7.0.0` when installing
-  `agentpay-mcp@5.0.0`. That upstream advisory reflects issues addressed in
-  **agentwallet-sdk 8.0.0**, not an instruction to stop using this MCP release today.
-- **5.0.0 remains on SDK 7.0.0** on purpose: wrapper mitigations in this package
-  enforce factory wallet binding, x402 term binding, swap output floors, queued-
-  transfer detection, bounded bridge attestation polling, and bounded identity
-  broker I/O without requiring an SDK major bump.
-- Plan to adopt **agentpay-mcp 8.0.0** with **agentwallet-sdk 8.x** as the next
-  coordinated release once operator migration material is ready.
-
-### STOP (requires agentwallet-sdk 8.x — not in this release)
-- Native SDK 8 deployment identity inside `createWallet` (factory binding at SDK layer).
-- SDK 8 structured `agentTransferToken` return values (`executed` / `queued` objects without receipt parsing).
-- SwapModule AgentAccount execution path with SDK-enforced output floors (this release uses `minAmountOut` + quote pre-check on SDK 7).
-
-### Security (SDK 7 wrappers)
-- Wallet binding env (`AGENT_WALLET_FACTORY`, `AGENT_WALLET_TOKEN_CONTRACT`,
-  `AGENT_WALLET_TOKEN_ID`) is enforced before `send_payment`, `send_token`,
-  `swap_tokens`, `bridge_usdc`, and x402 writes.
-- **Breaking:** `swap_tokens` requires `minAmountOut` (caller output floor) in addition
-  to `slippageBps`; swaps refuse when the quoted minimum is below that floor.
-- Token transfers classify queued owner-approval outcomes from receipts instead
-  of reporting "Payment Sent" when nothing moved.
-- `bridge_usdc` caps Circle attestation polls and refuses attestations whose
-  message does not match the local burn.
-- UAID resolution uses bounded timeout and cache TTL from operator env.
-
----
+------
 
 ## [5.0.0] - 2026-10-25
 
