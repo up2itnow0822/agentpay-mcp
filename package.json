@@ -78,7 +78,8 @@
     "proxy-addr": "2.0.8",
     "source-map-js": "1.2.2",
     "@modelcontextprotocol/sdk": "1.32.2",
-    "body-parser": "2.4.0"
+    "body-parser": "2.4.0",
+    "picomatch": "npm:@ryotsu/picomatch@4.0.7-a"
   },
   "devDependencies": {
     "@types/node": "^20.11.0",
