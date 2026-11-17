@@ -52,7 +52,7 @@ vi.mock('../src/utils/client.js', () => {
   }
 })
 
-import { handleBridgeUsdc } from '../src/tools/bridge.js'
+import { handleBridgeUsdc, handleBridgeUsdcExecution } from '../src/tools/bridge.js'
 import { handleSetSpendPolicy, _resetPolicyStore } from '../src/tools/budget.js'
 import { _resetSpendIntentStore } from '../src/utils/spend-intent.js'
 import { getWallet } from '../src/utils/client.js'
@@ -89,27 +89,23 @@ async function broadcastThenThrow(message: string): Promise<never> {
   throw new Error(message)
 }
 
-describe('bridge_usdc', () => {
-  const savedBridgeFlag = process.env.AGENTPAY_ENABLE_EOA_BRIDGE
+describe('bridge_usdc MCP surface (route A disabled)', () => {
+  it('returns a disabled error and never calls createBridge (SEC-20261116-05)', async () => {
+    const result = await handleBridgeUsdc({ fromChain: 'base', toChain: 'polygon', amount: '1' })
+    expect(result.isError).toBe(true)
+    expect(result.content[0].text).toMatch(/disabled in AgentPay MCP 5\.0\.0 \(route A\)/)
+    expect(mockCreateBridge).not.toHaveBeenCalled()
+  })
+})
 
+describe('bridge_usdc execution (internal path; MCP route A disabled)', () => {
   beforeEach(() => {
-    process.env.AGENTPAY_ENABLE_EOA_BRIDGE = '1'
     vi.clearAllMocks()
     _resetPolicyStore()
     _resetSpendIntentStore()
   })
 
-  afterEach(() => {
-    if (savedBridgeFlag === undefined) delete process.env.AGENTPAY_ENABLE_EOA_BRIDGE
-    else process.env.AGENTPAY_ENABLE_EOA_BRIDGE = savedBridgeFlag
-  })
-
-  it('refuses bridge_usdc until AGENTPAY_ENABLE_EOA_BRIDGE=1 (SEC-20261116-05)', async () => {
-    delete process.env.AGENTPAY_ENABLE_EOA_BRIDGE
-    const result = await handleBridgeUsdc({ fromChain: 'base', toChain: 'polygon', amount: '1' })
-    expect(result.isError).toBe(true)
-    expect(result.content[0].text).toMatch(/AGENTPAY_ENABLE_EOA_BRIDGE=1/)
-  })
+  const runBridge = handleBridgeUsdcExecution
 
   it('bridges USDC from base to polygon successfully', async () => {
     const mockBridge = vi.fn().mockResolvedValue({
@@ -123,7 +119,7 @@ describe('bridge_usdc', () => {
     })
     mockCreateBridge.mockReturnValue(withAllowance(mockBridge) as any)
 
-    const result = await handleBridgeUsdc({
+    const result = await runBridge({
       fromChain: 'base',
       toChain: 'polygon',
       amount: '100',
@@ -144,7 +140,7 @@ describe('bridge_usdc', () => {
   it('returns error when fromChain equals toChain', async () => {
     mockCreateBridge.mockReturnValue(withAllowance(vi.fn()) as any)
 
-    const result = await handleBridgeUsdc({
+    const result = await runBridge({
       fromChain: 'base',
       toChain: 'base',
       amount: '50',
@@ -158,7 +154,7 @@ describe('bridge_usdc', () => {
   it('returns error for invalid amount', async () => {
     mockCreateBridge.mockReturnValue(withAllowance(vi.fn()) as any)
 
-    const result = await handleBridgeUsdc({
+    const result = await runBridge({
       fromChain: 'base',
       toChain: 'arbitrum',
       amount: 'not-a-number',
@@ -172,7 +168,7 @@ describe('bridge_usdc', () => {
     const mockBridge = vi.fn()
     mockCreateBridge.mockReturnValue(withAllowance(mockBridge) as any)
 
-    const result = await handleBridgeUsdc({
+    const result = await runBridge({
       fromChain: 'base',
       toChain: 'polygon',
       amount: '1,000',
@@ -188,7 +184,7 @@ describe('bridge_usdc', () => {
     mockCreateBridge.mockReturnValue(withAllowance(mockBridge) as any)
 
     for (const bad of ['1e3', '0x10', '1.2.3', '', '-5']) {
-      const result = await handleBridgeUsdc({
+      const result = await runBridge({
         fromChain: 'base',
         toChain: 'polygon',
         amount: bad,
@@ -204,7 +200,7 @@ describe('bridge_usdc', () => {
     const mockBridge = vi.fn()
     mockCreateBridge.mockReturnValue(withAllowance(mockBridge) as any)
 
-    const result = await handleBridgeUsdc({
+    const result = await runBridge({
       fromChain: 'base',
       toChain: 'polygon',
       amount: '0.0000001',
@@ -227,7 +223,7 @@ describe('bridge_usdc', () => {
     })
     mockCreateBridge.mockReturnValue(withAllowance(mockBridge) as any)
 
-    const result = await handleBridgeUsdc({
+    const result = await runBridge({
       fromChain: 'base',
       toChain: 'polygon',
       amount: '10000000000000.000001',
@@ -246,7 +242,7 @@ describe('bridge_usdc', () => {
     )
     mockCreateBridge.mockReturnValue(withAllowance(mockBridge) as any)
 
-    const result = await handleBridgeUsdc({
+    const result = await runBridge({
       fromChain: 'base',
       toChain: 'arbitrum',
       amount: '200',
@@ -270,7 +266,7 @@ describe('bridge_usdc', () => {
       allowedRecipients: ['0x0000000000000000000000000000000000000001'],
     })
 
-    const result = await handleBridgeUsdc({
+    const result = await runBridge({
       fromChain: 'base',
       toChain: 'polygon',
       amount: '100',
@@ -293,7 +289,7 @@ describe('bridge_usdc', () => {
 
     await handleSetSpendPolicy({ dailyLimitEth: '50' })
 
-    const result = await handleBridgeUsdc({
+    const result = await runBridge({
       fromChain: 'base',
       toChain: 'polygon',
       amount: '100',
@@ -314,7 +310,7 @@ describe('bridge_usdc', () => {
 
     await handleSetSpendPolicy({ perTxCapEth: '10' })
 
-    const result = await handleBridgeUsdc({
+    const result = await runBridge({
       fromChain: 'base',
       toChain: 'polygon',
       amount: '100',
@@ -343,7 +339,7 @@ describe('bridge_usdc', () => {
     })
     mockCreateBridge.mockReturnValue(withAllowance(mockBridge) as any)
 
-    const result = await handleBridgeUsdc({
+    const result = await runBridge({
       fromChain: 'base',
       toChain: 'polygon',
       amount: '100',
@@ -355,7 +351,7 @@ describe('bridge_usdc', () => {
   })
 
   it('refuses a CCTP source the wallet cannot sign before creating the bridge', async () => {
-    const result = await handleBridgeUsdc({
+    const result = await runBridge({
       fromChain: 'optimism',
       toChain: 'base',
       amount: '100',
@@ -379,8 +375,8 @@ describe('bridge_usdc', () => {
     })
     mockCreateBridge.mockReturnValue(withAllowance(mockBridge) as any)
 
-    const first = await handleBridgeUsdc(baseToPolygon)
-    const retry = await handleBridgeUsdc(baseToPolygon)
+    const first = await runBridge(baseToPolygon)
+    const retry = await runBridge(baseToPolygon)
 
     expect(first.isError).toBeUndefined()
     expect(retry.isError).toBeUndefined()
@@ -417,8 +413,8 @@ describe('bridge_usdc', () => {
       })
     mockCreateBridge.mockReturnValue(withAllowance(mockBridge) as any)
 
-    const first = await handleBridgeUsdc(baseToPolygon)
-    const second = await handleBridgeUsdc({
+    const first = await runBridge(baseToPolygon)
+    const second = await runBridge({
       fromChain: 'base',
       toChain: 'arbitrum',
       amount: '100',
@@ -442,8 +438,8 @@ describe('bridge_usdc', () => {
     })
     mockCreateBridge.mockReturnValue(withAllowance(mockBridge) as any)
 
-    const failed = await handleBridgeUsdc(baseToPolygon)
-    const retry = await handleBridgeUsdc(baseToPolygon)
+    const failed = await runBridge(baseToPolygon)
+    const retry = await runBridge(baseToPolygon)
 
     expect(failed.isError).toBe(true)
     expect(failed.content[0].text).toContain('malformed transaction hash')
@@ -464,8 +460,8 @@ describe('bridge_usdc', () => {
     })
     mockCreateBridge.mockReturnValue(withAllowance(mockBridge) as any)
 
-    const failed = await handleBridgeUsdc(baseToPolygon)
-    const retry = await handleBridgeUsdc(baseToPolygon)
+    const failed = await runBridge(baseToPolygon)
+    const retry = await runBridge(baseToPolygon)
 
     expect(failed.isError).toBe(true)
     expect(failed.content[0].text).toContain('returned without a transaction hash')
@@ -478,8 +474,8 @@ describe('bridge_usdc', () => {
     const mockBridge = vi.fn().mockImplementationOnce(() => broadcastThenThrow('rpc timeout'))
     mockCreateBridge.mockReturnValue(withAllowance(mockBridge) as any)
 
-    const failed = await handleBridgeUsdc(baseToPolygon)
-    const retry = await handleBridgeUsdc(baseToPolygon)
+    const failed = await runBridge(baseToPolygon)
+    const retry = await runBridge(baseToPolygon)
 
     expect(failed.isError).toBe(true)
     expect(failed.content[0].text).toContain('rpc timeout')
@@ -497,9 +493,9 @@ describe('bridge_usdc', () => {
       )
       mockCreateBridge.mockReturnValue(withAllowance(mockBridge) as any)
 
-      const failed = await handleBridgeUsdc(baseToPolygon)
+      const failed = await runBridge(baseToPolygon)
       vi.advanceTimersByTime(5 * 60 * 1000 + 1)
-      const retry = await handleBridgeUsdc(baseToPolygon)
+      const retry = await runBridge(baseToPolygon)
 
       expect(failed.isError).toBe(true)
       expect(failed.content[0].text).toContain('Circle attestation timeout')
@@ -523,11 +519,11 @@ describe('bridge_usdc', () => {
     })
     mockCreateBridge.mockReturnValue(withAllowance(mockBridge) as any)
 
-    const first = await handleBridgeUsdc({
+    const first = await runBridge({
       ...baseToPolygon,
       idempotencyKey: 'invoice-1',
     })
-    const conflict = await handleBridgeUsdc({
+    const conflict = await runBridge({
       ...baseToPolygon,
       amount: '50',
       idempotencyKey: 'invoice-1',
@@ -555,8 +551,8 @@ describe('bridge_usdc', () => {
     })
     mockCreateBridge.mockReturnValue(withAllowance(mockBridge, getUsdcAllowance) as any)
 
-    const failed = await handleBridgeUsdc(baseToPolygon)
-    const retried = await handleBridgeUsdc(baseToPolygon)
+    const failed = await runBridge(baseToPolygon)
+    const retried = await runBridge(baseToPolygon)
 
     expect(failed.isError).toBe(true)
     expect(failed.content[0].text).toContain('allowance rpc timeout')

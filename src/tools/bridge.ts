@@ -1,45 +1,26 @@
 /**
  * bridge.ts — bridge_usdc tool.
  *
- * Wraps agentwallet-sdk v6 BridgeModule (CCTP V2 cross-chain USDC bridge).
+ * Route A (MCP 5.0.0): the MCP handler is DISABLED — schema retained, no
+ * on-chain CCTP execution via the tool surface. Execution logic lives in
+ * `handleBridgeUsdcExecution` (see bridge-usdc-execution.ts) for tests and a
+ * future re-enable.
  */
 import { z } from 'zod'
-import { createBridge } from 'agentwallet-sdk'
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-type AnyWalletClient = any
-import { getConfig, getWallet } from '../utils/client.js'
 import { textContent, formatError } from '../utils/format.js'
-import { assertConfiguredBridgeSource } from '../utils/wallet-chain.js'
 import {
   DefiniteSpendFailure,
   IDEMPOTENCY_KEY_JSON_SCHEMA,
   IdempotencyKeyZodSchema,
-  bridgeUsdcIntentIdentity,
-  classifyBridgeApproveUsdc,
-  requireSettlementHash,
-  runClassifiedSpend,
-  withSpendIntent,
-  wrapDefiniteSdkReads,
-  runLockedSpendResume,
 } from '../utils/spend-intent.js'
-import { withReservedSpend } from './budget.js'
-import { parseAmountStrict } from '../utils/amount.js'
-import {
-  bridgeUsdcResumeAfterBurn,
-  bridgeUsdcWithAttestationGuard,
-  BridgeAttestationTimeoutError,
-  getBridgeAttestationPending,
-  clearBridgeAttestationPending,
-} from '../utils/bridge-attestation-guard.js'
-import { assertExpectedSmartWallet } from '../utils/wallet-binding.js'
+
+export { handleBridgeUsdcExecution } from './bridge-usdc-execution.js'
 
 // Supported CCTP V2 chain names
 const SUPPORTED_CHAINS = [
   'base', 'ethereum', 'optimism', 'arbitrum', 'polygon',
   'avalanche', 'linea', 'unichain', 'sonic', 'worldchain',
 ] as const
-
-type SupportedChain = (typeof SUPPORTED_CHAINS)[number]
 
 // ─── Schema ────────────────────────────────────────────────────────────────
 
@@ -70,10 +51,10 @@ export const bridgeUsdcTool = {
   name: 'bridge_usdc',
   description:
     'Bridge USDC across chains using Circle\'s CCTP V2 protocol. ' +
-    'Supported chains: base, ethereum, optimism, arbitrum, polygon, avalanche, linea, unichain, sonic, worldchain. ' +
-    'The bridge approves USDC, burns on source, polls Circle IRIS for attestation, then mints on destination. ' +
-    'Identical retries replay the original burn/mint; pass idempotencyKey to distinguish two equal bridges. ' +
-    'An RPC drop after broadcast fail-closes instead of burning a second time.',
+    'DISABLED in AgentPay MCP 5.0.0 (route A): the tool is registered for schema ' +
+    'compatibility and returns a disabled error without any on-chain bridge. ' +
+    'Supported chains when re-enabled: base, ethereum, optimism, arbitrum, polygon, ' +
+    'avalanche, linea, unichain, sonic, worldchain.',
   inputSchema: {
     type: 'object' as const,
     properties: {
@@ -103,154 +84,16 @@ export const bridgeUsdcTool = {
 
 // ─── Handler ───────────────────────────────────────────────────────────────
 
+/** MCP tool surface: route A disabled (no on-chain call). */
 export async function handleBridgeUsdc(
-  input: BridgeUsdcInput
+  _input: BridgeUsdcInput
 ): Promise<{ content: Array<{ type: 'text'; text: string }>; isError?: boolean }> {
   try {
-  if (process.env['AGENTPAY_ENABLE_EOA_BRIDGE']?.trim() !== '1') {
     throw new DefiniteSpendFailure(
-      'bridge_usdc is disabled by default on SDK 7.0.0 wrappers until the operator sets AGENTPAY_ENABLE_EOA_BRIDGE=1.'
+      'bridge_usdc is disabled in AgentPay MCP 5.0.0 (route A). ' +
+        'The tool keeps its schema for compatibility; no on-chain CCTP bridge is performed.'
     )
-  }
-    const wallet = getWallet()
-    const config = getConfig()
-
-    if (input.fromChain === input.toChain) {
-      throw new Error('fromChain and toChain must be different')
-    }
-
-    assertConfiguredBridgeSource(input.fromChain, 'bridge_usdc')
-
-    // Parse USDC amount (6 decimals) — strict string parsing, no float rounding
-    const USDC_DECIMALS = 6
-    const rawAmount = parseAmountStrict(input.amount, USDC_DECIMALS)
-    const intent = bridgeUsdcIntentIdentity({
-      fromChain: input.fromChain,
-      toChain: input.toChain,
-      rawAmount,
-      idempotencyKey: input.idempotencyKey,
-    })
-
-    const attestationPending = getBridgeAttestationPending(intent.key)
-    if (attestationPending) {
-      const resumeBridge = classifyBridgeApproveUsdc(
-        wrapDefiniteSdkReads(
-          createBridge(wallet.walletClient as AnyWalletClient, input.fromChain as SupportedChain)
-        )
-      )
-      const { value } = await runLockedSpendResume(
-        intent.key,
-        intent.fingerprint,
-        async () => {
-          const result = await runClassifiedSpend(wallet.walletClient, () =>
-            bridgeUsdcResumeAfterBurn(resumeBridge, attestationPending)
-          )
-          clearBridgeAttestationPending(intent.key)
-          const burnTxHash = requireSettlementHash(result.burnTxHash, 'bridge_usdc burn')
-          const mintTxHash = requireSettlementHash(result.mintTxHash, 'bridge_usdc mint')
-          return {
-            success: true as const,
-            burnTxHash,
-            mintTxHash,
-            fromChain: result.fromChain,
-            toChain: result.toChain,
-            recipient: result.recipient,
-            amount: input.amount,
-            rawAmount: rawAmount.toString(),
-            elapsedMs: result.elapsedMs,
-            attestationResumed: true,
-          }
-        },
-        { durable: Boolean(input.idempotencyKey?.trim()) }
-      )
-      return { content: [textContent(JSON.stringify(value))] }
-    }
-
-    const { value, replayed } = await withSpendIntent(
-      intent.key,
-      async () => {
-      // Enforce the in-process spend policy before burning USDC on the source
-      // chain. rawAmount is USDC 6-decimal base units; enforceSpendPolicy
-      // normalises it to the policy's 9-decimal ETH-equivalent caps (1 USDC
-      // counts as 1 ETH-equivalent) — never compare 6-decimal base units
-      // against wei-scale caps directly. CCTP mints to the burning wallet's own
-      // address, so the policy merchant is the agent wallet itself: allowlist-only
-      // policies must include the agent wallet address to permit bridging.
-      const bridgeRecipient = wallet.walletClient?.account?.address
-      if (!bridgeRecipient) {
-        throw new DefiniteSpendFailure(
-          'Wallet client has no account; cannot verify spend policy for bridge_usdc.'
-        )
-      }
-      return withReservedSpend(
-        {
-          merchant: bridgeRecipient,
-          amount: rawAmount,
-          decimals: USDC_DECIMALS,
-        },
-        async () => {
-      const bridge = classifyBridgeApproveUsdc(
-        wrapDefiniteSdkReads(
-          createBridge(wallet.walletClient as AnyWalletClient, input.fromChain as SupportedChain)
-        )
-      )
-      await assertExpectedSmartWallet(wallet, config, { requireBinding: true })
-      const result = await runClassifiedSpend(wallet.walletClient, () =>
-        bridgeUsdcWithAttestationGuard(
-          bridge,
-          rawAmount,
-          input.toChain as SupportedChain,
-          {},
-          input.fromChain as SupportedChain,
-          intent.key
-        )
-      )
-      const burnTxHash = requireSettlementHash(result.burnTxHash, 'bridge_usdc burn')
-      const mintTxHash = requireSettlementHash(result.mintTxHash, 'bridge_usdc mint')
-
-      return {
-        success: true as const,
-        burnTxHash,
-        mintTxHash,
-        fromChain: result.fromChain,
-        toChain: result.toChain,
-        recipient: result.recipient,
-        amount: input.amount,
-        rawAmount: rawAmount.toString(),
-        elapsedMs: result.elapsedMs,
-      }
-        }
-      )
-      },
-      {
-        durable: Boolean(input.idempotencyKey?.trim()),
-        fingerprint: intent.fingerprint,
-      }
-    )
-
-    return {
-      content: [
-        textContent(
-          JSON.stringify(replayed ? { ...value, idempotentRetry: true } : value)
-        ),
-      ],
-    }
   } catch (error: unknown) {
-    if (error instanceof BridgeAttestationTimeoutError) {
-      return {
-        content: [
-          textContent(
-            JSON.stringify({
-              success: false,
-              attestationPending: true,
-              burnTxHash: error.burnTxHash,
-              message: error.message,
-            })
-          ),
-        ],
-        isError: true,
-      }
-    }
     return {
       content: [textContent(formatError(error, 'bridge_usdc'))],
       isError: true,

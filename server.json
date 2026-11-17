@@ -164,13 +164,6 @@
           "name": "AGENTPAY_RECEIPT_TIMEOUT_MS"
         },
         {
-          "description": "Set to 1 to enable bridge_usdc (EOA-signed CCTP) on SDK 7.0.0 wrappers; off by default (SEC-20261116-05)",
-          "isRequired": false,
-          "format": "string",
-          "isSecret": false,
-          "name": "AGENTPAY_ENABLE_EOA_BRIDGE"
-        },
-        {
           "description": "Max Circle CCTP attestation polls for bridge_usdc (capped at SDK default)",
           "isRequired": false,
           "format": "string",

@@ -2,17 +2,7 @@
  * SDK 7.0.0 wrapper mitigations — real SDK paths, offline / in-process RPC.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import {
-  createWalletClient,
-  custom,
-  encodeAbiParameters,
-  encodeEventTopics,
-  getAddress,
-  pad,
-  toEventHash,
-  type Address,
-  type Hex,
-} from 'viem'
+import { createWalletClient, custom, getAddress, type Address, type Hex } from 'viem'
 import { base } from 'viem/chains'
 import { privateKeyToAccount } from 'viem/accounts'
 import * as agentwalletSdk from 'agentwallet-sdk'
@@ -27,6 +17,7 @@ import { assertX402BindingPayTo } from '../src/utils/x402-binding-checks.js'
 import { resolveTokenDecimals } from '../src/tools/payments.js'
 import { loadConfig, _resetSingletons } from '../src/utils/client.js'
 import { attestationPollCap } from '../src/utils/bridge-attestation-guard.js'
+import { erc20TransferLog, executedWalletLog } from './helpers/erc20-logs.js'
 import { createBoundedUaidResolver } from '../src/utils/identity-io-guard.js'
 import * as walletPreflight from '../src/utils/wallet-preflight.js'
 
@@ -115,43 +106,11 @@ describe('finding #3 wallet factory binding (SDK 7)', () => {
       }),
     })
     const walletAddr = getAddress(wallet.address)
-    const executedLog = {
-      address: walletAddr,
-      topics: [
-        toEventHash({
-          type: 'event',
-          name: 'TransactionExecuted',
-          inputs: [
-            { name: 'target', type: 'address', indexed: true },
-            { name: 'value', type: 'uint256', indexed: false },
-            { name: 'data', type: 'bytes', indexed: false },
-            { name: 'executor', type: 'address', indexed: true },
-          ],
-        }),
-        pad(to, { size: 32 }),
-        pad(walletAddr, { size: 32 }),
-      ] as [Hex, Hex, Hex],
-      data: encodeAbiParameters(
-        [
-          { name: 'value', type: 'uint256' },
-          { name: 'data', type: 'bytes' },
-        ],
-        [1n, '0x']
-      ),
-    }
     const wait = vi.fn().mockResolvedValue({
       status: 'success',
       logs: [
-        executedLog,
-        {
-          address: USDC_BASE,
-          topics: [
-            '0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3efa' as Hex,
-            pad(walletAddr, { size: 32 }),
-            pad(to, { size: 32 }),
-          ],
-          data: pad('0x1', { size: 32 }),
-        },
+        executedWalletLog(walletAddr, to, 1n),
+        erc20TransferLog(USDC_BASE as Address, walletAddr, to, 1n),
       ],
     })
     ;(wallet as { publicClient: { waitForTransactionReceipt: typeof wait } }).publicClient = {
@@ -204,6 +163,54 @@ describe('bridge and identity bounds (#12/#14, #6/#18/#29)', () => {
   it('fails closed on partial wallet binding env', () => {
     process.env.AGENT_WALLET_FACTORY = FACTORY
     expect(() => loadWalletBindingIdentity()).toThrow(/Wallet binding is incomplete/)
+  })
+
+  it('requireBinding=true always runs deployment identity startup gate', async () => {
+    Object.assign(process.env, {
+      AGENT_PRIVATE_KEY: AGENT_KEY,
+      AGENT_WALLET_ADDRESS: ACCOUNT,
+      CHAIN_ID: '8453',
+    })
+    _resetSingletons()
+    const startup = vi
+      .spyOn(walletPreflight, 'ensureWalletStartupVerified')
+      .mockRejectedValue(new Error('deployment identity missing'))
+    const wallet = createWallet({
+      accountAddress: ACCOUNT,
+      chain: 'base',
+      walletClient: createWalletClient({
+        account: privateKeyToAccount(AGENT_KEY),
+        chain: base,
+        transport: custom({ request: async () => null }),
+      }),
+    })
+    const config = loadConfig()
+    await expect(assertExpectedSmartWallet(wallet, config, { requireBinding: true })).rejects.toThrow(
+      /deployment identity missing/
+    )
+    expect(startup).toHaveBeenCalled()
+  })
+
+  it('receiptTimeoutMs honors AGENTPAY_RECEIPT_TIMEOUT_MS within bounds', async () => {
+    const { receiptTimeoutMs, waitForSuccessReceipt } = await import(
+      '../src/utils/agent-transfer-outcome.js'
+    )
+    process.env.AGENTPAY_RECEIPT_TIMEOUT_MS = '45000'
+    expect(receiptTimeoutMs()).toBe(45_000)
+    process.env.AGENTPAY_RECEIPT_TIMEOUT_MS = '9999999'
+    expect(receiptTimeoutMs()).toBe(600_000)
+    const txHash = ('0x' + 'dd'.repeat(32)) as `0x${string}`
+    const wallet = createWallet({
+      accountAddress: ACCOUNT,
+      chain: 'base',
+      walletClient: createWalletClient({
+        account: privateKeyToAccount(AGENT_KEY),
+        chain: base,
+        transport: custom({ request: async () => null }),
+      }),
+    })
+    vi.spyOn(wallet.publicClient, 'waitForTransactionReceipt').mockRejectedValue(new Error('timeout'))
+    await expect(waitForSuccessReceipt(wallet, txHash, 'send_token')).rejects.toThrow(/unverified/)
   })
   it('creates UAID resolver with bounded timeout', () => {
     process.env.AGENTPAY_IDENTITY_TIMEOUT_MS = '999999'

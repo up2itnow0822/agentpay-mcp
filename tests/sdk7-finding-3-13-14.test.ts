@@ -5,19 +5,16 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   createWalletClient,
   custom,
-  encodeAbiParameters,
-  encodeEventTopics,
   getAddress,
   keccak256,
   pad,
-  toEventHash,
   type Address,
   type Hex,
 } from 'viem'
 import { base } from 'viem/chains'
 import { privateKeyToAccount } from 'viem/accounts'
 import * as agentwalletSdk from 'agentwallet-sdk'
-import { AgentAccountV2Abi, createWallet } from 'agentwallet-sdk'
+import { createWallet } from 'agentwallet-sdk'
 import { _resetSingletons, loadConfig } from '../src/utils/client.js'
 import { ensureWalletStartupVerified, requireDeploymentIdentityEnv, _resetWalletStartupGate } from '../src/utils/wallet-preflight.js'
 import {
@@ -32,6 +29,11 @@ import {
   extractMessageSentFromTransmitter,
 } from '../src/utils/cctp-message-guard.js'
 import { DefiniteSpendFailure } from '../src/utils/spend-intent.js'
+import {
+  erc20TransferLog,
+  executedWalletLog,
+  queuedWalletLog,
+} from './helpers/erc20-logs.js'
 
 const FACTORY = '0x7777777777777777777777777777777777777777' as Address
 const NFT = '0x8888888888888888888888888888888888888888' as Address
@@ -39,76 +41,6 @@ const ACCOUNT = '0x9999999999999999999999999999999999999999' as Address
 const AGENT_KEY = ('0x' + '11'.repeat(32)) as `0x${string}`
 const USDC_BASE = '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913' as Address
 const TRANSMITTER = '0x81D40F21F12A8F0E3252Bccb954D722d4c464B64' as Address
-
-function queuedWalletLog(wallet: ReturnType<typeof makeWallet>, to: Address, txId: bigint) {
-  const walletAddr = getAddress(wallet.address)
-  return {
-    address: walletAddr,
-    topics: [
-      toEventHash({
-        type: 'event',
-        name: 'TransactionQueued',
-        inputs: [
-          { name: 'txId', type: 'uint256', indexed: true },
-          { name: 'to', type: 'address', indexed: true },
-          { name: 'value', type: 'uint256', indexed: false },
-          { name: 'token', type: 'address', indexed: false },
-          { name: 'amount', type: 'uint256', indexed: false },
-        ],
-      }),
-      pad(`0x${txId.toString(16)}`, { size: 32 }),
-      pad(to, { size: 32 }),
-    ] as [Hex, Hex, Hex],
-    data: encodeAbiParameters(
-      [
-        { name: 'value', type: 'uint256' },
-        { name: 'token', type: 'address' },
-        { name: 'amount', type: 'uint256' },
-      ],
-      [0n, '0x0000000000000000000000000000000000000000', 0n]
-    ),
-  }
-}
-
-function erc20TransferLog(token: Address, from: Address, to: Address, amount: bigint) {
-  return {
-    address: getAddress(token),
-    topics: [
-      '0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3efa' as Hex,
-      pad(from, { size: 32 }),
-      pad(to, { size: 32 }),
-    ] as [Hex, Hex, Hex],
-    data: pad(`0x${amount.toString(16)}`, { size: 32 }),
-  }
-}
-
-function executedWalletLog(wallet: ReturnType<typeof makeWallet>, to: Address, value: bigint) {
-  const walletAddr = getAddress(wallet.address)
-  return {
-    address: walletAddr,
-    topics: [
-      toEventHash({
-        type: 'event',
-        name: 'TransactionExecuted',
-        inputs: [
-          { name: 'target', type: 'address', indexed: true },
-          { name: 'value', type: 'uint256', indexed: false },
-          { name: 'data', type: 'bytes', indexed: false },
-          { name: 'executor', type: 'address', indexed: true },
-        ],
-      }),
-      pad(to, { size: 32 }),
-      pad(walletAddr, { size: 32 }),
-    ] as [Hex, Hex, Hex],
-    data: encodeAbiParameters(
-      [
-        { name: 'value', type: 'uint256' },
-        { name: 'data', type: 'bytes' },
-      ],
-      [value, '0x']
-    ),
-  }
-}
 
 function makeWallet(overrides: Record<string, unknown> = {}) {
   return createWallet({
@@ -279,7 +211,7 @@ describe('#13 transfer receipt classification (a)-(e)', () => {
     vi.spyOn(agentwalletSdk, 'agentTransferToken').mockResolvedValue(txHash)
     vi.spyOn(wallet.publicClient, 'waitForTransactionReceipt').mockResolvedValue({
       status: 'success',
-      logs: [queuedWalletLog(wallet, to, 7n)],
+      logs: [queuedWalletLog(getAddress(wallet.address), to, 7n)],
     } as never)
     const out = await agentTransferTokenWithOutcome(wallet, { token: USDC_BASE, to, amount: 5n })
     expect(out.status).toBe('queued')
@@ -291,7 +223,7 @@ describe('#13 transfer receipt classification (a)-(e)', () => {
     vi.spyOn(wallet.publicClient, 'waitForTransactionReceipt').mockResolvedValue({
       status: 'success',
       logs: [
-        executedWalletLog(wallet, to, 5n),
+        executedWalletLog(getAddress(wallet.address), to, 5n),
         erc20TransferLog(USDC_BASE, getAddress(wallet.address), to, 5n),
       ],
     } as never)
@@ -302,14 +234,9 @@ describe('#13 transfer receipt classification (a)-(e)', () => {
   it('(d) missing Transfer after TransactionExecuted is sent, unverified', async () => {
     const wallet = makeWallet()
     vi.spyOn(agentwalletSdk, 'agentTransferToken').mockResolvedValue(txHash)
-    const executed = encodeEventTopics({
-      abi: AgentAccountV2Abi,
-      eventName: 'TransactionExecuted',
-      args: { target: to, value: 5n, data: '0x', executor: getAddress(wallet.address) },
-    })
     vi.spyOn(wallet.publicClient, 'waitForTransactionReceipt').mockResolvedValue({
       status: 'success',
-      logs: [{ address: ACCOUNT, topics: executed, data: '0x' }],
+      logs: [executedWalletLog(getAddress(wallet.address), to, 5n)],
     } as never)
     await expect(agentTransferTokenWithOutcome(wallet, { token: USDC_BASE, to, amount: 5n })).rejects.toThrow(
       /sent, unverified/
