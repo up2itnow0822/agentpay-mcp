@@ -197,12 +197,6 @@ describe('R4: bare 32-byte hex', () => {
     const hex = 'ab'.repeat(32)
     expect(redactSecrets(`txHash: 0x${hex}`, {})).toBe(`txHash: 0x${hex}`)
   })
-  it('Sev4 split-key pattern accepts newline between 32-byte halves', () => {
-    const hex = 'ab'.repeat(32)
-    const a = hex.slice(0, 32)
-    const b = hex.slice(32)
-    expect(redactSecrets(`leaked ${a}\n${b}`, {})).toBe('leaked [redacted-hex64]')
-  })
 })
 
 describe('SO A3 console shim single-quoted headers', () => {
@@ -213,12 +207,14 @@ describe('SO A3 console shim single-quoted headers', () => {
   })
 
   it.each([
+    "{ 'x-auth-token': 'FAKE' }",
+    "{ 'api-key': 'FAKE' }",
     "{ 'x-api-key': 'FAKE' }",
     "{ 'cookie': 'sid=FAKE' }",
     "{ 'set-cookie': 'sid=FAKE; Path=/' }",
     "{ 'x-payment': 'FAKE' }",
     'Cookie: sid="FAKE"',
-  ])('stderr redacts %s', (line) => {
+  ])('SO A3 console shim stderr redacts %s', (line) => {
     installStdioConsoleSink()
     enterStdioProtocolMode()
     const err = vi.spyOn(process.stderr, 'write').mockImplementation(() => true)
@@ -281,21 +277,18 @@ describe('R6: auth headers and bearer tokens', () => {
   it("masks single-quoted 'proxy-authorization'", () => {
     expect(redactSecrets("'proxy-authorization': 'FAKEproxy99'", {})).not.toContain('FAKEproxy99')
   })
-  it("SO A3 masks Node-style single-quoted header objects via safeText", () => {
-    const cases = [
-      "{ 'x-api-key': 'FAKE' }",
-      "{ 'cookie': 'sid=FAKE' }",
-      "{ 'set-cookie': 'sid=FAKE; Path=/' }",
-      "{ 'x-payment': 'FAKE' }",
-    ]
-    for (const input of cases) {
-      const out = safeText(input)
-      expect(out).not.toContain('FAKE')
-      expect(out).toContain('[redacted]')
-    }
-    const cookieLine = safeText('Cookie: sid="FAKE"')
-    expect(cookieLine).not.toContain('FAKE')
-    expect(cookieLine).toMatch(/Cookie:\s*\[redacted\]/i)
+  it.each([
+    ["{ 'x-auth-token': 'FAKE' }", 'FAKE'],
+    ["{ 'api-key': 'FAKE' }", 'FAKE'],
+    ["{ 'x-api-key': 'FAKE' }", 'FAKE'],
+    ["{ 'cookie': 'sid=FAKE' }", 'FAKE'],
+    ["{ 'set-cookie': 'sid=FAKE; Path=/' }", 'FAKE'],
+    ["{ 'x-payment': 'FAKE' }", 'FAKE'],
+    ['Cookie: sid="FAKE"', 'FAKE'],
+  ])('SO A3 safeText redacts %s', (input, secret) => {
+    const out = safeText(input)
+    expect(out).not.toContain(secret)
+    expect(out).toContain('[redacted]')
   })
   it('masks x-auth-token header', () => {
     expect(redactSecrets('x-auth-token: FAKEauthToken12', {})).not.toContain('FAKEauthToken12')

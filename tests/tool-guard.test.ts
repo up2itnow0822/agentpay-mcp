@@ -1,7 +1,12 @@
 import { readFileSync } from 'node:fs'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import * as format from '../src/utils/format.js'
-import { guardRequest, guardToolCall, redactToolResult } from '../src/utils/tool-guard.js'
+import {
+  REQUEST_ERROR_WITHHELD,
+  guardRequest,
+  guardToolCall,
+  redactToolResult,
+} from '../src/utils/tool-guard.js'
 
 // Fake secret only (S7).
 const SECRET = 'FAKEsecretPATHnotreal'
@@ -27,8 +32,18 @@ describe('S1: dispatcher boundary', () => {
       structuredContent: { api_key: `https://x/v2/${SECRET}`, nested: { client_secret: SECRET } },
     }) as { structuredContent: Record<string, unknown> }
     expect(JSON.stringify(r)).not.toContain(SECRET)
-    expect(String(r.structuredContent.api_key)).toContain('[redacted]')
-    expect(r.structuredContent.nested).toEqual({ client_secret: '[redacted]' })
+    expect(r.structuredContent).not.toHaveProperty('api_key')
+    expect(r.structuredContent['[redacted]']).toBe('[redacted]')
+    expect((r.structuredContent.nested as Record<string, unknown>)['[redacted]']).toBe('[redacted]')
+    expect((r.structuredContent.nested as Record<string, unknown>)).not.toHaveProperty('client_secret')
+  })
+
+  it('redacts _meta values holding RPC URLs (A2)', () => {
+    const r = redactToolResult({
+      structuredContent: { _meta: `URL: https://x/v2/${SECRET}` },
+    }) as { structuredContent: { _meta: string } }
+    expect(JSON.stringify(r)).not.toContain(SECRET)
+    expect(r.structuredContent._meta).toContain('[redacted]')
   })
 
   it('fail-closed when a structuredContent getter throws (A1)', async () => {
@@ -79,6 +94,26 @@ describe('S1: dispatcher boundary', () => {
       content: [{ type: 'text', text: `URL: https://x/v2/${SECRET}\nRequest body: {}` }],
     }))
     expect(JSON.stringify(r)).not.toContain(SECRET)
+  })
+
+  it('guardRequest withholds when error.message getter throws', async () => {
+    const evil = Object.create(Error.prototype) as Error
+    Object.defineProperty(evil, 'message', {
+      configurable: true,
+      get(): string {
+        throw new Error(`URL: https://x/v2/${SECRET}`)
+      },
+    })
+    await expect(
+      guardRequest(() => {
+        throw evil
+      })
+    ).rejects.toThrow(REQUEST_ERROR_WITHHELD)
+    const err = await guardRequest(() => {
+      throw evil
+    }).catch((e: Error) => e)
+    expect(err.message).toBe(REQUEST_ERROR_WITHHELD)
+    expect(JSON.stringify(err)).not.toContain(SECRET)
   })
 
   it('list-handler errors carry no secret in the JSON-RPC message', async () => {

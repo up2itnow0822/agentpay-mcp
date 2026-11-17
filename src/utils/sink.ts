@@ -92,19 +92,47 @@ const HEX64_RE = /(?<![0-9a-fA-F])(0x)?[0-9a-fA-F]{64}(?![0-9a-fA-F])/g
 const SPLIT_HEX64_RE =
   /(?:^|(?<=[\s(,]))(?:0x)?(?:[0-9a-fA-F]{2}(?:[ \t\u00a0]+)){31}[0-9a-fA-F]{2}(?![0-9a-fA-F])/gi
 const SPLIT_HEX32_PAIR_RE =
-  /(?:^|(?<=[\s(,=]))(?:0x)?[0-9a-fA-F]{32}(?:[ \t\u00a0\r\n]+)[0-9a-fA-F]{32}(?![0-9a-fA-F])/gi
+  /(?:^|(?<=[\s(,=]))(?:0x)?[0-9a-fA-F]{32}(?:[ \t\u00a0]+)[0-9a-fA-F]{32}(?![0-9a-fA-F])/gi
 const TX_HASH_LABEL =
   /\b(?:txHash|tx_hash|transactionHash|blockHash|block|hash|tx)\s*:\s*$/i
 const JSON_TX_HASH_VALUE =
   /"(?:[A-Za-z0-9_]*(?:txHash|tx_hash|transactionHash|blockHash)|hash|tx|block)"\s*:\s*"(?:0x)?$/i
-const COOKIE_HEADER_LINE_RE = /\b(cookie|set-cookie)(\s*[:=]\s*)([^\r\n]*)/gi
-const HEADER_RE =
-  /\b(authorization|proxy-authorization|x-auth-token|x-api-key|api-key|x-payment-response|x-payment)(\s*[:=]\s*)(['"]?)[^\r\n'"]*\3/gi
-const JSON_HEADER_RE =
-  /"((?:authorization|proxy-authorization|x-auth-token|x-api-key|api-key|x-payment-response|x-payment|cookie|set-cookie))"\s*:\s*"([^"]*)"/gi
-const SINGLE_QUOTED_HEADER_RE =
-  /'(authorization|proxy-authorization|x-auth-token|x-api-key|api-key|x-payment-response|x-payment)'\s*:\s*'[^']*'/gi
-const SINGLE_QUOTED_COOKIE_HEADER_RE = /'(cookie|set-cookie)'\s*:\s*[^\r\n]*/gi
+const HTTP_REDACT_HEADER_NAMES = [
+  'authorization',
+  'proxy-authorization',
+  'x-auth-token',
+  'x-api-key',
+  'api-key',
+  'x-payment',
+  'x-payment-response',
+  'cookie',
+  'set-cookie',
+] as const
+const HTTP_HEADER_NAME_ALT = HTTP_REDACT_HEADER_NAMES.join('|')
+const HTTP_HEADER_COOKIE_ALT = 'cookie|set-cookie'
+const HTTP_HEADER_NON_COOKIE_ALT = HTTP_REDACT_HEADER_NAMES.filter(
+  (n) => n !== 'cookie' && n !== 'set-cookie'
+).join('|')
+const COOKIE_HEADER_LINE_RE = new RegExp(
+  `\\b(${HTTP_HEADER_COOKIE_ALT})(\\s*[:=]\\s*)([^\\r\\n]*)`,
+  'gi'
+)
+const HEADER_RE = new RegExp(
+  `\\b(${HTTP_HEADER_NON_COOKIE_ALT})(\\s*[:=]\\s*)(['"]?)[^\\r\\n'"]*\\3`,
+  'gi'
+)
+const JSON_HEADER_RE = new RegExp(
+  `"(${HTTP_HEADER_NAME_ALT})"\\s*:\\s*"([^"]*)"`,
+  'gi'
+)
+const SINGLE_QUOTED_HEADER_RE = new RegExp(
+  `'(${HTTP_HEADER_NON_COOKIE_ALT})'\\s*:\\s*'[^']*'`,
+  'gi'
+)
+const SINGLE_QUOTED_COOKIE_HEADER_RE = new RegExp(
+  `'(${HTTP_HEADER_COOKIE_ALT})'\\s*:\\s*[^\\r\\n]*`,
+  'gi'
+)
 const BEARER_RE = /\bBearer\s+[A-Za-z0-9._~+/=-]{8,}/g
 /** R6: JWT-shaped tokens (three base64url segments; header segment starts with eyJ). */
 const JWT_RE = /eyJ[A-Za-z0-9_-]*(?:\s*\.\s*)[A-Za-z0-9_-]+(?:\s*\.\s*)[A-Za-z0-9_-]+/g

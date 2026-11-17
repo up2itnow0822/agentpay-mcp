@@ -16,6 +16,9 @@ type ToolResult = {
 }
 
 const TOOL_ERROR_WITHHELD = '[tool error withheld: safe formatting failed]'
+export const REQUEST_ERROR_WITHHELD = 'request error withheld'
+
+const REDACTED_OBJECT_KEY = '[redacted]'
 
 const SENSITIVE_OBJECT_KEY =
   /(?:^|_)(authorization|api[-_]?key|x[-_]?auth[-_]?token|access[-_]?token|client[-_]?secret|password|credential|bearer|cookie|secret|token)(?:$|_)/i
@@ -35,12 +38,11 @@ function redactDeep(value: unknown): unknown {
     const out: Record<string, unknown> = {}
     const record = value as Record<string, unknown>
     for (const k of Object.keys(record)) {
-      let v = readOwnValue(record, k)
       if (SENSITIVE_OBJECT_KEY.test(k)) {
-        out[k] = '[redacted]'
+        out[REDACTED_OBJECT_KEY] = '[redacted]'
         continue
       }
-      out[k] = redactDeep(v)
+      out[k] = redactDeep(readOwnValue(record, k))
     }
     return out
   }
@@ -74,6 +76,12 @@ export async function guardRequest<T>(run: () => Promise<T> | T): Promise<T> {
   try {
     return await run()
   } catch (error: unknown) {
-    throw new Error(safeErrorText(error instanceof Error ? error.message : String(error)))
+    let rawMessage: string
+    try {
+      rawMessage = error instanceof Error ? error.message : String(error)
+    } catch {
+      throw new Error(REQUEST_ERROR_WITHHELD)
+    }
+    throw new Error(safeErrorText(rawMessage))
   }
 }
