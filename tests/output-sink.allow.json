@@ -23,10 +23,5 @@
     "file": "src/index.ts",
     "sha256": "5f2509a508215db60e214e553bf88ee55b6ceef0c94a5b89947fbd118df319d2",
     "reason": "imports console-bootstrap before tool modules; the import line matches the console regex but performs no I/O"
-  },
-  {
-    "file": "src/utils/spend-intent.ts",
-    "sha256": "5c3819d4e4f1562fbc796ca62c0d52ce0e26bc10c941d7e24970de042e2b5ae0",
-    "reason": "journal compaction failure logs to stderr; allowlisted to avoid sink<->journal import cycle"
   }
 ]

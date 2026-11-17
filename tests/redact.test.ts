@@ -11,6 +11,15 @@ const FAKE_RPC = 'https://base-mainnet.example-rpc.test/v2/FAKEfakeFAKE012345678
 const ENV = { RPC_URL: FAKE_RPC, AGENT_PRIVATE_KEY: FAKE_KEY, SOME_API_KEY: 'fake-api-key-value-123', OTEL_AUTH: 'fake-auth-0987654' }
 
 describe('R1: URL-encoded secret env values', () => {
+  it('masks double URL-encoding of a configured secret', () => {
+    const rpc = 'https://rpc.fake.test/v2/key=a/b'
+    const once = encodeURIComponent(rpc)
+    const twice = encodeURIComponent(once)
+    const out = redactSecrets(`q=${twice}`, { RPC_URL: rpc })
+    expect(out).not.toContain(once)
+    expect(out).not.toContain(twice)
+    expect(out).toContain('[redacted]')
+  })
   it('masks encodeURIComponent(RPC_URL) when it differs from the raw value', () => {
     const rpc = 'https://rpc.fake.test/v2/key=a/b'
     const encoded = encodeURIComponent(rpc)
@@ -110,6 +119,19 @@ describe('R3/S3: credential-bearing URLs keep scheme://host:port only', () => {
   })
 })
 
+describe('A4: prose must not exempt private keys', () => {
+  const hex = 'ab'.repeat(32)
+  it('masks transaction signing failed for key 0x…', () => {
+    const out = redactSecrets(`transaction signing failed for key 0x${hex}`, { AGENT_PRIVATE_KEY: `0x${hex}` })
+    expect(out).not.toContain(hex)
+    expect(out).toContain('[redacted]')
+  })
+  it('masks similar prose with hash wording but no label', () => {
+    const out = redactSecrets(`could not verify hash material 0x${hex}`, {})
+    expect(out).toBe('could not verify hash material [redacted-hex64]')
+  })
+})
+
 describe('R4: bare 32-byte hex', () => {
   const hex = 'ab'.repeat(32)
   it('masks unlabelled hex64', () => {
@@ -120,18 +142,24 @@ describe('R4: bare 32-byte hex', () => {
     'txHash: 0x',
     'tx_hash: 0x',
     'transactionHash: 0x',
-    'blockHash 0x',
-    'transaction 0x',
+    'hash: 0x',
+    'tx: 0x',
+    'blockHash: 0x',
   ])('keeps labelled %j', (label) => {
     expect(redactSecrets(`${label}${hex}`, {})).toBe(`${label}${hex}`)
   })
   it('keeps tx hash with long whitespace run before hex (A8 / 60de729)', () => {
-    const label = `tx hash:${' '.repeat(40)}0x`
+    const label = `hash:${' '.repeat(32)}`
     expect(redactSecrets(`${label}${hex}`, {})).toBe(`${label}${hex}`)
   })
   it('masks whitespace-split unconfigured private key', () => {
     const split = hex.match(/.{2}/g)!.join(' ')
     expect(redactSecrets(`leaked ${split}`, {})).toBe('leaked [redacted-hex64]')
+  })
+  it('masks a 64-hex key split into two 32-char halves (Sev4)', () => {
+    const a = hex.slice(0, 32)
+    const b = hex.slice(32)
+    expect(redactSecrets(`k=${a} ${b}`, {})).toBe('k=[redacted-hex64]')
   })
   it('keeps 20-byte addresses', () => {
     const addr = '0x' + '12'.repeat(20)
@@ -166,6 +194,12 @@ describe('R5: BIP-39 mnemonics', () => {
 describe('R6: JWT-shaped tokens', () => {
   const jwt =
     'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJmYWtlIn0.FAKEsigFAKEsigFAKEsigFAKEsigFAKEsig00'
+  it('masks a JWT with spaces around dots', () => {
+    const spaced = jwt.replace(/\./g, ' . ')
+    const out = redactSecrets(`t=${spaced}`, {})
+    expect(out).not.toContain('eyJhbGci')
+    expect(out).toContain('[redacted-jwt]')
+  })
   it('masks a bare JWT', () => {
     const out = redactSecrets(`token ${jwt} end`, {})
     expect(out).not.toContain(jwt)
@@ -179,6 +213,23 @@ describe('R6: JWT-shaped tokens', () => {
 })
 
 describe('R6: auth headers and bearer tokens', () => {
+  it("masks single-quoted 'authorization'", () => {
+    expect(redactSecrets("'authorization': 'FAKEbearer123456'", {})).not.toContain('FAKEbearer123456')
+  })
+  it("masks single-quoted 'proxy-authorization'", () => {
+    expect(redactSecrets("'proxy-authorization': 'FAKEproxy99'", {})).not.toContain('FAKEproxy99')
+  })
+  it('masks x-auth-token header', () => {
+    expect(redactSecrets('x-auth-token: FAKEauthToken12', {})).not.toContain('FAKEauthToken12')
+  })
+  it('masks api-key header', () => {
+    expect(redactSecrets('api-key: FAKEapiKeyHeader9', {})).not.toContain('FAKEapiKeyHeader9')
+  })
+  it('masks credentials query parameter URL', () => {
+    const out = redactSecrets('https://api.example.com/x?credentials=FAKEcred99', {})
+    expect(out).not.toContain('FAKEcred99')
+    expect(out).toContain('[redacted]')
+  })
   it.each([
     ['Authorization: Bearer FAKEtoken123456', 'FAKEtoken123456'],
     ['Proxy-Authorization: Basic FAKEproxyauth99', 'FAKEproxyauth99'],

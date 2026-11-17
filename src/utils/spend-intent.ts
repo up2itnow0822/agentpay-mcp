@@ -23,6 +23,7 @@ import { dirname, join } from 'node:path'
 import { classifySpendError, isEvmTxHash } from 'agentwallet-sdk'
 import { z } from 'zod'
 import { normalizeHost } from './net-guard.js'
+import { logErr } from './sink.js'
 
 /**
  * In-process spend-intent cache so an identical send_token, swap_tokens, or
@@ -1121,7 +1122,7 @@ function compactJournal(path: string, dir: string): void {
     journalBytes = compactedBytes = Buffer.byteLength(text)
   } catch (error: unknown) {
     compactedBytes = journalBytes // back off; the old journal is intact
-    console.error( // output-sink-allow: journal compaction must log to stderr without pulling spend-journal into sink import cycle
+    logErr(
       `[agentpay] spend journal compaction failed; keeping the existing journal: ${error instanceof Error ? error.message : String(error)}`
     )
   }
