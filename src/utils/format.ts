@@ -6,7 +6,9 @@ import { randomBytes } from 'node:crypto';
 import type { Address, Hash } from 'viem';
 import { formatEther, formatUnits } from 'viem';
 import { z } from 'zod';
-import { safeErrorText, safeText, toolText } from './sink.js';
+import { PRE_SCRUB_CUT_MARKER } from './scrub-bounds.js';
+import { REDACTION_GUARD_ERROR_TEXT } from './tool-guard.js';
+import { safeErrorText, safeText, ScrubBudgetExceededError, toolText } from './sink.js';
 export { redactSecrets } from './sink.js';
 
 // ─── ETH / token formatting ────────────────────────────────────────────────
@@ -568,9 +570,19 @@ export function describeFinalUrl(
  */
 export function formatUntrustedBody(body: string, maxLen: number): string {
   const nonce = markerNonce();
-  const redacted = safeText(body);
-  const truncated =
-    redacted.length > maxLen ? redacted.slice(0, maxLen) + '\n\n... [response truncated]' : redacted;
+  let redacted: string
+  try {
+    redacted = safeText(body)
+  } catch (e) {
+    if (e instanceof ScrubBudgetExceededError) redacted = REDACTION_GUARD_ERROR_TEXT
+    else throw e
+  }
+  const hadPreScrubCut = redacted.includes(PRE_SCRUB_CUT_MARKER)
+  let truncated =
+    redacted.length > maxLen ? redacted.slice(0, maxLen) + '\n\n... [response truncated]' : redacted
+  if (hadPreScrubCut && !truncated.includes(PRE_SCRUB_CUT_MARKER)) {
+    truncated += PRE_SCRUB_CUT_MARKER
+  }
 
   // Never grows the body: forged delimiters and over-long backtick runs are
   // both replaced by strictly shorter text.

@@ -3,7 +3,10 @@
  * structuredContent / _meta / non-text blocks; redact each text through safeText.
  */
 import { formatError, sanitizeUntrustedInline } from './format.js'
-import { logErr, safeErrorText, safeText, toolText } from './sink.js'
+import { REDACTION_GUARD_ERROR_TEXT, TEXT_OUTPUT_MAX_BYTES } from './scrub-bounds.js'
+import { logErr, redactionGuardToolText, safeErrorText, safeText, ScrubBudgetExceededError, toolText } from './sink.js'
+
+export { REDACTION_GUARD_ERROR_TEXT, TEXT_OUTPUT_MAX_BYTES }
 
 export type ToolResult = {
   content: Array<{ type: 'text'; text: string }>
@@ -13,15 +16,10 @@ export type ToolResult = {
 const TOOL_ERROR_WITHHELD = '[tool error withheld: safe formatting failed]'
 export const REQUEST_ERROR_WITHHELD = 'request error withheld'
 
-export const REDACTION_GUARD_ERROR_TEXT =
-  'Result withheld by redaction guard. Check status before retrying; a payment may have executed.'
-
-export const TEXT_OUTPUT_MAX_BYTES = 4 * 1024 * 1024
-
 function withholdToolResult(reason: string): ToolResult {
   logErr(`[tool-guard:withhold:${reason}]`)
   return {
-    content: [toolText(REDACTION_GUARD_ERROR_TEXT)],
+    content: [redactionGuardToolText()],
     isError: true,
   }
 }
@@ -66,9 +64,13 @@ export function redactToolResult(result: unknown): ToolResult {
     } catch {
       return withholdToolResult('text')
     }
+    if (new TextEncoder().encode(text).length > TEXT_OUTPUT_MAX_BYTES) {
+      return withholdToolResult('size-cap')
+    }
     try {
       text = safeText(text)
-    } catch {
+    } catch (e) {
+      if (e instanceof ScrubBudgetExceededError) return withholdToolResult('scrub-budget')
       return withholdToolResult('redact')
     }
     if (new TextEncoder().encode(text).length > TEXT_OUTPUT_MAX_BYTES) {
@@ -90,11 +92,13 @@ export async function guardToolCall(
     return redactToolResult(await run())
   } catch (error: unknown) {
     try {
+      const formatted = formatError(error, `Tool "${sanitizeUntrustedInline(String(name), 64)}"`)
       return {
-        content: [toolText(formatError(error, `Tool "${sanitizeUntrustedInline(String(name), 64)}"`))],
+        content: [toolText(formatted)],
         isError: true,
       }
-    } catch {
+    } catch (e) {
+      if (e instanceof ScrubBudgetExceededError) return withholdToolResult('scrub-budget')
       return {
         content: [toolText(TOOL_ERROR_WITHHELD)],
         isError: true,

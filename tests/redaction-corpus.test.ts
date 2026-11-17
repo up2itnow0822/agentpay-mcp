@@ -278,8 +278,8 @@ describe('corpus timing budgets', () => {
 
   it.each(timingRows)('$id timing $family', { timeout: 10_000 }, (row) => {
     const gen = row.generator!
-    const warm = buildTimingInput({ ...gen, count: Math.min(gen.count, 500), bytes: 0 })
-    const warmBuilt = gen.prefix + gen.repeat.repeat(Math.min(gen.count, 500)) + gen.suffix
+    const warmCount = Math.min(gen.count, 500)
+    const warmBuilt = gen.prefix + gen.repeat.repeat(warmCount) + gen.suffix
     if (row.fn === 'safeText') safeText(warmBuilt)
     else formatUntrustedBody(warmBuilt, (row.fn_args?.maxLen as number) ?? 64 * 1024)
 

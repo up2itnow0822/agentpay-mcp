@@ -8,8 +8,20 @@
  */
 import { format } from 'node:util'
 import * as viemAccounts from 'viem/accounts'
+import { runWithScrubBudget, ScrubBudgetExceededError, truncateForPreScrub } from './scrub-pipeline.js'
 import { maskSensitiveTextFields } from './sink-sensitive-text.js'
-import { TEXT_OUTPUT_MAX_BYTES } from './tool-guard.js'
+import {
+  REDACTION_GUARD_ERROR_TEXT,
+  PRE_SCRUB_CAP_BYTES,
+  PRE_SCRUB_CUT_MARKER,
+  PRE_SCRUB_TAIL_DROP_BYTES,
+  TEXT_OUTPUT_MAX_BYTES,
+  testScrubBudgetMs,
+} from './scrub-bounds.js'
+
+export { ScrubBudgetExceededError } from './scrub-pipeline.js'
+export { PRE_SCRUB_CAP_BYTES, PRE_SCRUB_CUT_MARKER, PRE_SCRUB_TAIL_DROP_BYTES, testScrubBudgetMs } from './scrub-bounds.js'
+export { REDACTION_GUARD_ERROR_TEXT, TEXT_OUTPUT_MAX_BYTES } from './scrub-bounds.js'
 
 let bip39: Set<string> | null | undefined
 /** The BIP-39 English wordlist viem ships; null if unavailable (e.g. a test mock). */
@@ -108,6 +120,7 @@ const HTTP_REDACT_HEADER_NAMES = [
   'x-payment',
   'x-payment-response',
   'cookie',
+  'cookie2',
   'set-cookie',
 ] as const
 const HTTP_HEADER_NAME_ALT = HTTP_REDACT_HEADER_NAMES.join('|')
@@ -159,7 +172,9 @@ const SINGLE_QUOTED_SET_COOKIE_HEADER_RE = new RegExp(
   `'(${HTTP_HEADER_SET_COOKIE})'\\s*:\\s*([^\\r\\n]*)`,
   'gi'
 )
-const BEARER_RE = /\bBearer\s+[A-Za-z0-9._~+/=-]{8,}/g
+const BEARER_RE = /\bBearer\s+[A-Za-z0-9._~+/=-]{8,}/gi
+const USERINFO_AT_RE =
+  /(?:^|(?<=[\s(,;"'`]))([a-zA-Z0-9._-]{1,64}):([^@\s'"`,;]+)@([a-zA-Z0-9][a-zA-Z0-9.-]*)/g
 /** R6: JWT-shaped tokens (three base64url segments; header segment starts with eyJ). */
 const JWT_RE = /eyJ[A-Za-z0-9_-]*(?:\s*\.\s*)[A-Za-z0-9_-]+(?:\s*\.\s*)[A-Za-z0-9_-]+/g
 // Any whitespace between words (incl. NBSP), so a mnemonic split across lines still matches.
@@ -187,8 +202,30 @@ function hexHashExempt(offset: number, whole: string): boolean {
 const SET_COOKIE_ATTR = /^(?:Path|Domain|Expires|Max-Age|SameSite)$/i
 const SET_COOKIE_FLAG = /^(?:HttpOnly|Secure)$/i
 
+function splitFoldedSetCookieHeaderValue(raw: string): string[] {
+  const chunks: string[] = []
+  let start = 0
+  for (let i = 0; i < raw.length; i++) {
+    if (raw[i] !== ',') continue
+    const tail = raw.slice(i + 1).trimStart()
+    if (/^[A-Za-z0-9_-]+\s*=/.test(tail)) {
+      chunks.push(raw.slice(start, i).trim())
+      start = i + 1
+    }
+  }
+  chunks.push(raw.slice(start).trim())
+  return chunks
+}
+
 /** Mask the first cookie-pair on Set-Cookie; keep declared attributes; mask later name=value pairs. */
 function redactSetCookieHeaderValue(raw: string): string {
+  if (raw.includes(',') && /=/.test(raw)) {
+    return splitFoldedSetCookieHeaderValue(raw).map((c) => redactOneSetCookieChunk(c)).join(', ')
+  }
+  return redactOneSetCookieChunk(raw)
+}
+
+function redactOneSetCookieChunk(raw: string): string {
   const parts = raw.split(';')
   if (parts.length === 0) return '[redacted]'
   const out: string[] = []
@@ -213,6 +250,98 @@ function redactSetCookieHeaderValue(raw: string): string {
     else out.push(`${name}=[redacted]`)
   }
   return out.join('; ')
+}
+
+function redactCliSensitiveFlagsLinear(text: string): string {
+  const flags = [
+    '--access-token',
+    '--access_token',
+    '--api-key',
+    '--api_key',
+    '--client-secret',
+    '--client_secret',
+    '--password',
+    '--secret',
+    '--x-api-key',
+    '--x_api_key',
+  ] as const
+  let out = text
+  for (const flag of flags) {
+    let i = 0
+    while (i < out.length) {
+      const at = out.indexOf(flag, i)
+      if (at < 0) break
+      const before = at === 0 ? '' : out[at - 1]!
+      if (at > 0 && (/[A-Za-z0-9_-]/.test(before) || before === '-')) {
+        i = at + flag.length
+        continue
+      }
+      let valStart = at + flag.length
+      if (out[valStart] === '=') {
+        valStart++
+      } else if (out[valStart] === ' ' || out[valStart] === '\t') {
+        valStart = valStart + 1
+        while (valStart < out.length && (out[valStart] === ' ' || out[valStart] === '\t')) valStart++
+      } else {
+        i = at + flag.length
+        continue
+      }
+      let valEnd = valStart
+      while (valEnd < out.length && !/[\s"'`,]/.test(out[valEnd]!)) valEnd++
+      if (valEnd > valStart) {
+        out = out.slice(0, valStart) + '[redacted]' + out.slice(valEnd)
+        i = valStart + '[redacted]'.length
+      } else {
+        i = at + flag.length
+      }
+    }
+  }
+  return out
+}
+
+function redactJwtLinear(text: string): string {
+  if (!text.includes('eyJ') && !text.toLowerCase().includes('eyj')) return text
+  let out = ''
+  let i = 0
+  const len = text.length
+  const isSeg = (ch: string) => /[A-Za-z0-9_-]/.test(ch)
+  while (i < len) {
+    if (text.slice(i, i + 3).toLowerCase() !== 'eyj') {
+      out += text[i]
+      i++
+      continue
+    }
+    let j = i + 3
+    while (j < len && isSeg(text[j]!)) j++
+    while (j < len && text[j] === ' ') j++
+    if (j >= len || text[j] !== '.') {
+      out += text[i]
+      i++
+      continue
+    }
+    j++
+    while (j < len && text[j] === ' ') j++
+    let j2 = j
+    while (j2 < len && isSeg(text[j2]!)) j2++
+    while (j2 < len && text[j2] === ' ') j2++
+    if (j2 >= len || text[j2] !== '.') {
+      out += text[i]
+      i++
+      continue
+    }
+    j2++
+    while (j2 < len && text[j2] === ' ') j2++
+    let j3 = j2
+    while (j3 < len && isSeg(text[j3]!)) j3++
+    if (j3 > i + 10) {
+      out += '[redacted-jwt]'
+      i = j3
+    } else {
+      out += text[i]
+      i++
+    }
+  }
+  return out
 }
 
 function redactHeaderArrayBracketBody(body: string, headerName: string): string {
@@ -303,14 +432,18 @@ export function redactSecrets(
     )
     out = out.replace(
       JSON_COOKIE_HEADER_ARRAY_RE,
-      (_m, name: string, body: string) => `"${name}":${redactHeaderArrayBracketBody(body, name)}`
+      (match, name: string, body: string) =>
+        body.includes('[redacted]') ? match : `"${name}":${redactHeaderArrayBracketBody(body, name)}`
     )
     out = out.replace(
       SINGLE_QUOTED_COOKIE_HEADER_ARRAY_RE,
-      (_m, name: string, body: string) => `'${name}': ${redactHeaderArrayBracketBody(body, name)}`
+      (match, name: string, body: string) =>
+        body.includes('[redacted]') ? match : `'${name}': ${redactHeaderArrayBracketBody(body, name)}`
     )
     out = out.replace(HEADER_RE, (_m, name: string, sep: string) => `${name}${sep}[redacted]`)
+    out = out.replace(USERINFO_AT_RE, (_m, user: string, _pass: string, host: string) => `${user}:[redacted]@${host}`)
     out = out.replace(CLI_SENSITIVE_FLAG_RE, (m, val: string) => m.replace(val, '[redacted]'))
+    out = redactCliSensitiveFlagsLinear(out)
     out = out.replace(JSON_HEADER_RE, (_m, name: string, val: string) => {
       if (name.toLowerCase() === 'set-cookie') {
         return `"${name}":"${redactSetCookieHeaderValue(val)}"`
@@ -324,7 +457,7 @@ export function redactSecrets(
       (_m, name: string, val: string) => `'${name}': '${redactSetCookieHeaderValue(val)}'`
     )
     out = out.replace(BEARER_RE, 'Bearer [redacted]')
-    out = out.replace(JWT_RE, '[redacted-jwt]')
+    out = redactJwtLinear(out)
     // R4 (whitespace-split 32-byte hex and contiguous hex64)
     out = out.replace(SPLIT_HEX32_PAIR_RE, (match, offset: number, whole: string) =>
       hexHashExempt(offset, whole) ? match : '[redacted-hex64]'
@@ -376,10 +509,15 @@ let logRedactDepth = 0
 
 export type SafeTextOptions = { errorContext?: boolean }
 
+function scrubCore(text: string, opts: SafeTextOptions): string {
+  const masked = maskSensitiveTextFields(text)
+  return redactSecrets(masked, process.env, opts)
+}
+
 /** The one function every user-visible string passes through (B1 + redactSecrets). */
 export function safeText(text: string, opts: SafeTextOptions = {}): string {
-  const masked = maskSensitiveTextFields(String(text))
-  return redactSecrets(masked, process.env, opts)
+  const capped = truncateForPreScrub(String(text))
+  return runWithScrubBudget(() => scrubCore(capped, opts))
 }
 
 function utf8ByteLength(text: string): number {
@@ -391,7 +529,14 @@ function safeTextForLogImpl(text: string): string {
   logRedactDepth++
   try {
     if (logRedactDepth > 1) return LOG_REDACTION_WITHHELD
-    const out = safeText(text, { errorContext: true })
+    if (utf8ByteLength(text) > TEXT_OUTPUT_MAX_BYTES) return LOG_REDACTION_WITHHELD
+    let out: string
+    try {
+      out = safeText(text, { errorContext: true })
+    } catch (e) {
+      if (e instanceof ScrubBudgetExceededError) return LOG_REDACTION_WITHHELD
+      return LOG_REDACTION_WITHHELD
+    }
     if (utf8ByteLength(out) > TEXT_OUTPUT_MAX_BYTES) return LOG_REDACTION_WITHHELD
     return out
   } catch {
@@ -421,6 +566,11 @@ export function safeErrorText(text: string): string {
 /** MCP text content block; `textContent` in format.ts re-exports this. */
 export function toolText(text: string): { type: 'text'; text: string } {
   return { type: 'text' as const, text: safeText(text) }
+}
+
+/** Trusted operator tool block (no scrub); used when scrub budget is already exceeded. */
+export function redactionGuardToolText(): { type: 'text'; text: string } {
+  return { type: 'text' as const, text: REDACTION_GUARD_ERROR_TEXT }
 }
 
 let stdioProtocolMode = false

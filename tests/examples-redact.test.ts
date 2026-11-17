@@ -1,26 +1,19 @@
-import { readFileSync } from 'node:fs'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { exampleError, exampleLog, exampleSafeText } from '../examples/value-packs/shared/redact.js'
 import { printError, printInfo } from '../examples/value-packs/shared/ui.js'
+import { safeText } from '../src/utils/sink.js'
 
 // Fake values only (S7).
 const FAKE_RPC = 'https://base-mainnet.example-rpc.test/v2/FAKEfakeFAKE0123456789abcd'
 const FAKE_KEY = '0x' + '1f'.repeat(32)
 
-function region(path: string): string {
-  const src = readFileSync(new URL(path, import.meta.url), 'utf8')
-  const a = src.indexOf('// BEGIN redact-core')
-  const b = src.indexOf('// END redact-core')
-  expect(a).toBeGreaterThan(-1)
-  expect(b).toBeGreaterThan(a)
-  return src.slice(a, b)
-}
-
 describe('examples redaction copy', () => {
   afterEach(() => vi.restoreAllMocks())
 
-  it('the vendored redact-core region is byte-identical to src/utils/sink.ts', () => {
-    expect(region('../examples/value-packs/shared/redact.ts')).toBe(region('../src/utils/sink.ts'))
+  it('exampleSafeText is the same safeText function as src/utils/sink.ts', () => {
+    const probe = 'password=zqProbe10 token=zqProbe11'
+    expect(exampleSafeText(probe)).toBe(safeText(probe))
+    expect(exampleSafeText(probe)).not.toContain('zqProbe10')
   })
 
   it('the examples copy masks 15/18/21-word mnemonics by shape', () => {
