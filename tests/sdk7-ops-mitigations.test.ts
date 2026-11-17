@@ -557,15 +557,10 @@ describe('F4 identity #6 verified never true in 5.0.x', () => {
       },
     })
     vi.spyOn(identityIo, 'createBoundedUaidResolver').mockReturnValue(resolver as never)
-  vi.spyOn(ERC8004Client.prototype, 'lookupAgentIdentity').mockResolvedValue({
-      agentId: 42n,
-      owner: AGENT,
-      agentURI: 'ipfs://chain',
-      agentWallet: AGENT,
-      registrationFile: null,
-    } as never)
+    const lookup = vi.spyOn(ERC8004Client.prototype, 'lookupAgentIdentity')
     const trusted = JSON.parse((await handleVerifyAgentUAID({ uaid: UAID })).content[0].text)
     expect(trusted.verified).toBe(false)
+    expect(lookup).not.toHaveBeenCalled()
   })
 
   it('#6(c) non-EVM UAID never sets verified via ERC-8004', async () => {

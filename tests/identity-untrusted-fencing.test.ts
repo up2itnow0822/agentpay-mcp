@@ -366,16 +366,18 @@ describe('verify_agent_uaid fencing', () => {
     const result = await handleVerifyAgentUAID({ uaid: UAID })
     expect(result.isError).toBeUndefined()
     const summary = JSON.parse(result.content[0]!.text)
-    expect(summary).toEqual({
+    expect(summary).toMatchObject({
       uaid: UAID,
       brokerAttested: true,
       verified: false,
+      onChainVerified: false,
       protocol: 'erc8004',
       trustScore: 87,
       identity: null,
       hasError: true,
       untrustedMetadata: true,
     })
+    expect(String(summary.verificationNote)).toMatch(/on-chain/i)
     assertOnlyInsideFence(result, [getAddress(OWNER)])
     assertOnlyInsideFence(result, [INJECTION, BACKTICKS, 'TAIL_MARKER_SHOULD_BE_CUT'])
     expect(result.content[1]!.text).not.toContain('TAIL_MARKER_SHOULD_BE_CUT')

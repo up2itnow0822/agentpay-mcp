@@ -95,8 +95,17 @@ const MAX_UAID_LEN = 512
  */
 const UNTRUSTED_IDENTITY_NARRATION =
   'Registry-supplied agent metadata follows. It was written by whoever registered ' +
-  'the agent and has NOT been verified by AgentPay. Only the JSON summary above ' +
-  'is validated.'
+  'the agent and has NOT been verified on-chain by AgentPay in MCP 5.0.x. Only the ' +
+  'JSON summary above is validated.'
+
+/** Stamped on every verify_agent_uaid success path in 5.0.x (F6 / SO #6(c)). */
+export const UAID_ON_CHAIN_VERIFICATION_NOTE =
+  'On-chain ERC-8004 verification is not performed in AgentPay MCP 5.0.x; broker identity claims are untrusted.'
+
+function stampUaidOnChainPolicy(trusted: Record<string, unknown>): void {
+  trusted['onChainVerified'] = false
+  trusted['verificationNote'] = UAID_ON_CHAIN_VERIFICATION_NOTE
+}
 
 /**
  * Reduce an arbitrary (possibly hostile) value to a bounded, JSON-safe shape.
@@ -517,6 +526,7 @@ export async function handleVerifyAgentUAID(
 
     const parsed = UAIDResolver.parseUAID(input.uaid)
     if (!parsed) {
+      stampUaidOnChainPolicy(trusted)
       return buildResult(
         {
           verified: false,
@@ -532,6 +542,7 @@ export async function handleVerifyAgentUAID(
     const brokerAttested = resolution.registryVerified === true
     trusted['brokerAttested'] = brokerAttested
     trusted['verified'] = false
+    stampUaidOnChainPolicy(trusted)
 
     const result = resolution as unknown as Record<string, unknown>
     placeTyped(trusted, untrusted, 'protocol', result['protocol'] ?? resolution.protocol, (v) =>
