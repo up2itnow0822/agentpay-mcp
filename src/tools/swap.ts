@@ -1,15 +1,31 @@
 /**
  * swap.ts — swap_tokens tool.
  *
- * Route A (MCP 5.0.0): disabled — schema retained, no on-chain execution.
+ * Route A (MCP 5.0.0): the MCP handler is DISABLED — schema retained, no
+ * on-chain execution via the tool surface. Execution logic is preserved in
+ * `handleSwapTokensExecution` for tests and a future SDK 8 re-enable.
  */
 import { z } from 'zod'
+import { attachSwap, getGlobalRegistry, parseAmount } from 'agentwallet-sdk'
+import type { Address } from 'viem'
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+type AnyWallet = any
+import { getConfig, getWallet } from '../utils/client.js'
 import { textContent, formatError } from '../utils/format.js'
+import { assertConfiguredChain } from '../utils/wallet-chain.js'
 import {
+  DEFAULT_SWAP_SLIPPAGE_BPS,
   DefiniteSpendFailure,
   IDEMPOTENCY_KEY_JSON_SCHEMA,
   IdempotencyKeyZodSchema,
+  requireSettlementHash,
+  runClassifiedSpend,
+  swapTokensIntentIdentity,
+  withSpendIntent,
+  wrapDefiniteSdkReads,
 } from '../utils/spend-intent.js'
+import { withReservedSpend } from './budget.js'
+import { assertExpectedSmartWallet } from '../utils/wallet-binding.js'
 
 // ─── Schema ────────────────────────────────────────────────────────────────
 
@@ -74,8 +90,9 @@ export const swapTokensTool = {
   },
 }
 
-// ─── Handler ───────────────────────────────────────────────────────────────
+// ─── Handlers ──────────────────────────────────────────────────────────────
 
+/** MCP tool surface: route A disabled (no on-chain call). */
 export async function handleSwapTokens(
   _input: SwapTokensInput
 ): Promise<{ content: Array<{ type: 'text'; text: string }>; isError?: boolean }> {
@@ -84,6 +101,134 @@ export async function handleSwapTokens(
       'swap_tokens is disabled in AgentPay MCP 5.0.0 (route A). ' +
         'The tool keeps its schema for compatibility; no on-chain swap is performed.'
     )
+  } catch (error: unknown) {
+    return {
+      content: [textContent(formatError(error, 'swap_tokens'))],
+      isError: true,
+    }
+  }
+}
+
+/**
+ * Full swap execution path (not exposed through MCP while route A is active).
+ * Kept for regression tests and SDK 8 re-enable.
+ */
+export async function handleSwapTokensExecution(
+  input: SwapTokensInput
+): Promise<{ content: Array<{ type: 'text'; text: string }>; isError?: boolean }> {
+  try {
+    assertConfiguredChain(input.chainId, 'swap_tokens')
+    const config = getConfig()
+    const wallet = getWallet()
+    await assertExpectedSmartWallet(wallet, config, { requireBinding: true })
+    const registry = getGlobalRegistry()
+
+    const fromToken = registry.getToken(input.fromSymbol.toUpperCase(), input.chainId)
+    if (!fromToken) {
+      throw new Error(
+        `Token "${input.fromSymbol}" not found for chain ${input.chainId}. ` +
+          'Use add_custom_token to register it first.'
+      )
+    }
+
+    const toToken = registry.getToken(input.toSymbol.toUpperCase(), input.chainId)
+    if (!toToken) {
+      throw new Error(
+        `Token "${input.toSymbol}" not found for chain ${input.chainId}. ` +
+          'Use add_custom_token to register it first.'
+      )
+    }
+
+    const rawAmountIn = parseAmount(input.amount, fromToken.decimals)
+    const rawMinAmountOut = parseAmount(input.minAmountOut, toToken.decimals)
+    const slippageBps = input.slippageBps ?? DEFAULT_SWAP_SLIPPAGE_BPS
+    const intent = swapTokensIntentIdentity({
+      chainId: input.chainId,
+      fromTokenAddress: fromToken.address,
+      toTokenAddress: toToken.address,
+      rawAmountIn,
+      slippageBps,
+      rawMinAmountOut,
+      idempotencyKey: input.idempotencyKey,
+    })
+
+    const { value, replayed } = await withSpendIntent(
+      intent.key,
+      async () => {
+        const swapRecipient = wallet.address
+        if (!swapRecipient) {
+          throw new DefiniteSpendFailure(
+            'Wallet has no address; cannot verify spend policy for swap_tokens.'
+          )
+        }
+
+        return withReservedSpend(
+          {
+            merchant: swapRecipient,
+            amount: rawAmountIn,
+            decimals: fromToken.decimals,
+          },
+          async () => {
+            const swapWallet = wrapDefiniteSdkReads(attachSwap(wallet as AnyWallet))
+            const quote = await swapWallet.getQuote(
+              fromToken.address as Address,
+              toToken.address as Address,
+              rawAmountIn,
+              { slippageBps }
+            )
+            if (quote.amountOutMinimum < rawMinAmountOut) {
+              throw new DefiniteSpendFailure(
+                `swap_tokens refuses: quoted minimum output (${quote.amountOutMinimum.toString()}) ` +
+                  `is below caller minAmountOut floor (${rawMinAmountOut.toString()}).`
+              )
+            }
+
+            const result = await runClassifiedSpend(wallet.walletClient, () =>
+              swapWallet.swap(
+                fromToken.address as Address,
+                toToken.address as Address,
+                rawAmountIn,
+                { slippageBps }
+              )
+            )
+            const txHash = requireSettlementHash(result.txHash, 'swap_tokens')
+
+            return {
+              success: true as const,
+              txHash,
+              feeTxHash: result.feeTxHash ?? null,
+              approvalRequired: result.approvalRequired,
+              approvalTxHash: result.approvalTxHash ?? null,
+              fromToken: fromToken.symbol,
+              toToken: toToken.symbol,
+              amountIn: input.amount,
+              minAmountOut: input.minAmountOut,
+              rawAmountIn: rawAmountIn.toString(),
+              quote: result.quote
+                ? {
+                    amountInNet: result.quote.amountInNet?.toString(),
+                    amountOutMinimum: result.quote.amountOutMinimum?.toString(),
+                    poolFeeTier: result.quote.poolFeeTier,
+                    feeAmount: result.quote.feeAmount?.toString(),
+                    gasEstimate: result.quote.gasEstimate?.toString(),
+                  }
+                : null,
+              chainId: input.chainId,
+            }
+          }
+        )
+      },
+      {
+        durable: Boolean(input.idempotencyKey?.trim()),
+        fingerprint: intent.fingerprint,
+      }
+    )
+
+    return {
+      content: [
+        textContent(JSON.stringify(replayed ? { ...value, idempotentRetry: true } : value)),
+      ],
+    }
   } catch (error: unknown) {
     return {
       content: [textContent(formatError(error, 'swap_tokens'))],

@@ -45,7 +45,7 @@ vi.mock('../src/utils/client.js', () => {
   }
 })
 
-import { handleSwapTokens, SwapTokensSchema } from '../src/tools/swap.js'
+import { handleSwapTokensExecution, SwapTokensSchema } from '../src/tools/swap.js'
 import { handleSetSpendPolicy, _resetPolicyStore } from '../src/tools/budget.js'
 import { _resetSpendIntentStore } from '../src/utils/spend-intent.js'
 import { getWallet } from '../src/utils/client.js'
@@ -111,7 +111,7 @@ async function broadcastThenThrow(message: string): Promise<never> {
   throw new Error(message)
 }
 
-describe.skip('swap_tokens execution (disabled in MCP 5.0.0 route A)', () => {
+describe('swap_tokens execution (internal path; MCP route A disabled)', () => {
   beforeEach(() => {
     vi.clearAllMocks()
     _resetPolicyStore()
@@ -139,7 +139,7 @@ describe.skip('swap_tokens execution (disabled in MCP 5.0.0 route A)', () => {
     } as any)
     mockAttachSwap.mockReturnValue(withQuote(mockSwap) as any)
 
-    const result = await handleSwapTokens({
+    const result = await handleSwapTokensExecution({
       fromSymbol: 'USDC',
       toSymbol: 'WETH',
       amount: '100',
@@ -172,7 +172,7 @@ describe.skip('swap_tokens execution (disabled in MCP 5.0.0 route A)', () => {
     } as any)
     mockAttachSwap.mockReturnValue(withQuote(mockSwap) as any)
 
-    await handleSwapTokens({
+    await handleSwapTokensExecution({
       fromSymbol: 'USDC',
       toSymbol: 'WETH',
       amount: '50',
@@ -195,7 +195,7 @@ describe.skip('swap_tokens execution (disabled in MCP 5.0.0 route A)', () => {
     } as any)
     mockAttachSwap.mockReturnValue(withQuote(vi.fn()) as any)
 
-    const result = await handleSwapTokens({
+    const result = await handleSwapTokensExecution({
       fromSymbol: 'NOTFOUND',
       toSymbol: 'WETH',
       amount: '10',
@@ -214,7 +214,7 @@ describe.skip('swap_tokens execution (disabled in MCP 5.0.0 route A)', () => {
     } as any)
     mockAttachSwap.mockReturnValue(withQuote(vi.fn()) as any)
 
-    const result = await handleSwapTokens({
+    const result = await handleSwapTokensExecution({
       fromSymbol: 'USDC',
       toSymbol: 'NOTFOUND',
       amount: '10',
@@ -233,7 +233,7 @@ describe.skip('swap_tokens execution (disabled in MCP 5.0.0 route A)', () => {
     } as any)
     mockAttachSwap.mockReturnValue(withQuote(mockSwap) as any)
 
-    const result = await handleSwapTokens({
+    const result = await handleSwapTokensExecution({
       fromSymbol: 'USDC',
       toSymbol: 'WETH',
       amount: '10000',
@@ -266,7 +266,7 @@ describe.skip('swap_tokens execution (disabled in MCP 5.0.0 route A)', () => {
       allowedRecipients: ['0x0000000000000000000000000000000000000001'],
     })
 
-    const result = await handleSwapTokens({
+    const result = await handleSwapTokensExecution({
       fromSymbol: 'USDC',
       toSymbol: 'WETH',
       amount: '100',
@@ -301,7 +301,7 @@ describe.skip('swap_tokens execution (disabled in MCP 5.0.0 route A)', () => {
 
     await handleSetSpendPolicy({ dailyLimitEth: '50' })
 
-    const result = await handleSwapTokens({
+    const result = await handleSwapTokensExecution({
       fromSymbol: 'USDC',
       toSymbol: 'WETH',
       amount: '100',
@@ -329,7 +329,7 @@ describe.skip('swap_tokens execution (disabled in MCP 5.0.0 route A)', () => {
 
     await handleSetSpendPolicy({ dailyLimitEth: '1000' })
 
-    const result = await handleSwapTokens({
+    const result = await handleSwapTokensExecution({
       fromSymbol: 'USDC',
       toSymbol: 'WETH',
       amount: '100',
@@ -348,7 +348,7 @@ describe.skip('swap_tokens execution (disabled in MCP 5.0.0 route A)', () => {
     const mockSwap = vi.fn()
     mockAttachSwap.mockReturnValue(withQuote(mockSwap) as any)
 
-    const result = await handleSwapTokens({
+    const result = await handleSwapTokensExecution({
       fromSymbol: 'WETH',
       toSymbol: 'USDC',
       amount: '1',
@@ -380,8 +380,8 @@ describe.skip('swap_tokens execution (disabled in MCP 5.0.0 route A)', () => {
     })
     mockAttachSwap.mockReturnValue(withQuote(mockSwap) as any)
 
-    const first = await handleSwapTokens(usdcWethSwap)
-    const retry = await handleSwapTokens(usdcWethSwap)
+    const first = await handleSwapTokensExecution(usdcWethSwap)
+    const retry = await handleSwapTokensExecution(usdcWethSwap)
 
     expect(first.isError).toBeUndefined()
     expect(retry.isError).toBeUndefined()
@@ -402,8 +402,8 @@ describe.skip('swap_tokens execution (disabled in MCP 5.0.0 route A)', () => {
       .mockResolvedValueOnce({ txHash: '0x1c269cc693bf2baaeac8812a815e4b527506d05ccf1b50d0c3453cf4cc011d2a', quote: null })
     mockAttachSwap.mockReturnValue(withQuote(mockSwap) as any)
 
-    const first = await handleSwapTokens(usdcWethSwap)
-    const second = await handleSwapTokens({ ...usdcWethSwap, amount: '50' })
+    const first = await handleSwapTokensExecution(usdcWethSwap)
+    const second = await handleSwapTokensExecution({ ...usdcWethSwap, amount: '50' })
 
     expect(JSON.parse(first.content[0].text).txHash).toBe('0x6dc1ec722cd64b3a1fde946e06c2a2e4a3a537aca2ab5eb7c5458e65550b0f38')
     expect(JSON.parse(second.content[0].text).txHash).toBe('0x1c269cc693bf2baaeac8812a815e4b527506d05ccf1b50d0c3453cf4cc011d2a')
@@ -416,8 +416,8 @@ describe.skip('swap_tokens execution (disabled in MCP 5.0.0 route A)', () => {
     const mockSwap = vi.fn().mockResolvedValue({ txHash: '   ', quote: null })
     mockAttachSwap.mockReturnValue(withQuote(mockSwap) as any)
 
-    const failed = await handleSwapTokens(usdcWethSwap)
-    const retry = await handleSwapTokens(usdcWethSwap)
+    const failed = await handleSwapTokensExecution(usdcWethSwap)
+    const retry = await handleSwapTokensExecution(usdcWethSwap)
 
     expect(failed.isError).toBe(true)
     expect(failed.content[0].text).toContain('returned without a transaction hash')
@@ -431,8 +431,8 @@ describe.skip('swap_tokens execution (disabled in MCP 5.0.0 route A)', () => {
     const mockSwap = vi.fn().mockResolvedValue({ txHash: 'pending', quote: null })
     mockAttachSwap.mockReturnValue(withQuote(mockSwap) as any)
 
-    const failed = await handleSwapTokens(usdcWethSwap)
-    const retry = await handleSwapTokens(usdcWethSwap)
+    const failed = await handleSwapTokensExecution(usdcWethSwap)
+    const retry = await handleSwapTokensExecution(usdcWethSwap)
 
     expect(failed.isError).toBe(true)
     expect(failed.content[0].text).toContain('malformed transaction hash')
@@ -446,8 +446,8 @@ describe.skip('swap_tokens execution (disabled in MCP 5.0.0 route A)', () => {
     const mockSwap = vi.fn().mockImplementationOnce(() => broadcastThenThrow('rpc timeout'))
     mockAttachSwap.mockReturnValue(withQuote(mockSwap) as any)
 
-    const failed = await handleSwapTokens(usdcWethSwap)
-    const retry = await handleSwapTokens(usdcWethSwap)
+    const failed = await handleSwapTokensExecution(usdcWethSwap)
+    const retry = await handleSwapTokensExecution(usdcWethSwap)
 
     expect(failed.isError).toBe(true)
     expect(failed.content[0].text).toContain('rpc timeout')
@@ -464,9 +464,9 @@ describe.skip('swap_tokens execution (disabled in MCP 5.0.0 route A)', () => {
       const mockSwap = vi.fn().mockImplementation(() => broadcastThenThrow('rpc timeout'))
       mockAttachSwap.mockReturnValue(withQuote(mockSwap) as any)
 
-      const failed = await handleSwapTokens(usdcWethSwap)
+      const failed = await handleSwapTokensExecution(usdcWethSwap)
       vi.advanceTimersByTime(5 * 60 * 1000 + 1)
-      const retry = await handleSwapTokens(usdcWethSwap)
+      const retry = await handleSwapTokensExecution(usdcWethSwap)
 
       expect(failed.isError).toBe(true)
       expect(failed.content[0].text).toContain('rpc timeout')
@@ -494,8 +494,8 @@ describe.skip('swap_tokens execution (disabled in MCP 5.0.0 route A)', () => {
 
     await handleSetSpendPolicy({ dailyLimitEth: '50' })
 
-    const blocked = await handleSwapTokens(usdcWethSwap)
-    const retried = await handleSwapTokens(usdcWethSwap)
+    const blocked = await handleSwapTokensExecution(usdcWethSwap)
+    const retried = await handleSwapTokensExecution(usdcWethSwap)
 
     expect(blocked.isError).toBe(true)
     expect(blocked.content[0].text).toContain('Rolling spend cap exceeded')
@@ -509,8 +509,8 @@ describe.skip('swap_tokens execution (disabled in MCP 5.0.0 route A)', () => {
     const mockSwap = vi.fn().mockResolvedValue({ txHash: '0xe2ca719a6c68fddf6f0eba6672bf06c44d615d6cd6f88966d98a88354600d75e', quote: null })
     mockAttachSwap.mockReturnValue(withQuote(mockSwap) as any)
 
-    const first = await handleSwapTokens({ ...usdcWethSwap, idempotencyKey: 'invoice-1' })
-    const retry = await handleSwapTokens({ ...usdcWethSwap, idempotencyKey: 'invoice-1' })
+    const first = await handleSwapTokensExecution({ ...usdcWethSwap, idempotencyKey: 'invoice-1' })
+    const retry = await handleSwapTokensExecution({ ...usdcWethSwap, idempotencyKey: 'invoice-1' })
 
     expect(JSON.parse(first.content[0].text).idempotentRetry).toBeUndefined()
     expect(JSON.parse(retry.content[0].text).txHash).toBe('0xe2ca719a6c68fddf6f0eba6672bf06c44d615d6cd6f88966d98a88354600d75e')
@@ -523,8 +523,8 @@ describe.skip('swap_tokens execution (disabled in MCP 5.0.0 route A)', () => {
     const mockSwap = vi.fn().mockResolvedValue({ txHash: '0x81dfd97e2d5187c186e08a70a91d7ddab140f7869f39b4cef3ec2b7b0e122cee', quote: null })
     mockAttachSwap.mockReturnValue(withQuote(mockSwap) as any)
 
-    const first = await handleSwapTokens(usdcWethSwap)
-    const retry = await handleSwapTokens({ ...usdcWethSwap, slippageBps: 50 })
+    const first = await handleSwapTokensExecution(usdcWethSwap)
+    const retry = await handleSwapTokensExecution({ ...usdcWethSwap, slippageBps: 50 })
 
     expect(JSON.parse(first.content[0].text).txHash).toBe('0x81dfd97e2d5187c186e08a70a91d7ddab140f7869f39b4cef3ec2b7b0e122cee')
     expect(JSON.parse(retry.content[0].text).idempotentRetry).toBe(true)
@@ -545,13 +545,13 @@ describe.skip('swap_tokens execution (disabled in MCP 5.0.0 route A)', () => {
       const mockSwap = vi.fn().mockResolvedValue({ txHash: '0xd2d28d84ab5a533299dc2dabb137843756f6c6eb8d1e8eb37d1a63f9133de737', quote: null })
       mockAttachSwap.mockReturnValue(withQuote(mockSwap) as any)
 
-      const first = await handleSwapTokens({
+      const first = await handleSwapTokensExecution({
         ...usdcWethSwap,
         idempotencyKey: 'invoice-1',
       minAmountOut: '0',
       })
       vi.advanceTimersByTime(5 * 60 * 1000 + 1)
-      const retry = await handleSwapTokens({
+      const retry = await handleSwapTokensExecution({
         ...usdcWethSwap,
         idempotencyKey: 'invoice-1',
       minAmountOut: '0',
@@ -570,12 +570,12 @@ describe.skip('swap_tokens execution (disabled in MCP 5.0.0 route A)', () => {
     const mockSwap = vi.fn().mockResolvedValue({ txHash: '0xe2ca719a6c68fddf6f0eba6672bf06c44d615d6cd6f88966d98a88354600d75e', quote: null })
     mockAttachSwap.mockReturnValue(withQuote(mockSwap) as any)
 
-    const first = await handleSwapTokens({
+    const first = await handleSwapTokensExecution({
       ...usdcWethSwap,
       idempotencyKey: 'invoice-1',
       minAmountOut: '0',
     })
-    const conflict = await handleSwapTokens({
+    const conflict = await handleSwapTokensExecution({
       ...usdcWethSwap,
       amount: '50',
       idempotencyKey: 'invoice-1',
@@ -593,12 +593,12 @@ describe.skip('swap_tokens execution (disabled in MCP 5.0.0 route A)', () => {
     const mockSwap = vi.fn().mockResolvedValue({ txHash: '0x523be71122b194c4248560f162f00eabdb43f8e1a68fb84c87c04eea265da335', quote: null })
     mockAttachSwap.mockReturnValue(withQuote(mockSwap) as any)
 
-    const first = await handleSwapTokens({
+    const first = await handleSwapTokensExecution({
       ...usdcWethSwap,
       idempotencyKey: 'invoice-1',
       minAmountOut: '0',
     })
-    const retry = await handleSwapTokens({
+    const retry = await handleSwapTokensExecution({
       ...usdcWethSwap,
       slippageBps: 50,
       idempotencyKey: 'invoice-1',
@@ -625,8 +625,8 @@ describe.skip('swap_tokens execution (disabled in MCP 5.0.0 route A)', () => {
     const mockSwap = vi.fn().mockResolvedValue({ txHash: '0xd8e4908941b66c7b471093f86142a2468739573208f613a7e3650d13c153d3af', quote: null })
     mockAttachSwap.mockReturnValue(withQuote(mockSwap, getQuote) as any)
 
-    const failed = await handleSwapTokens(usdcWethSwap)
-    const retried = await handleSwapTokens(usdcWethSwap)
+    const failed = await handleSwapTokensExecution(usdcWethSwap)
+    const retried = await handleSwapTokensExecution(usdcWethSwap)
 
     expect(failed.isError).toBe(true)
     expect(failed.content[0].text).toContain('quote rpc timeout')
@@ -663,8 +663,8 @@ describe.skip('swap_tokens execution (disabled in MCP 5.0.0 route A)', () => {
 
     await handleSetSpendPolicy({ dailyLimitEth: '150' })
 
-    const failed = await handleSwapTokens(usdcWethSwap)
-    const retried = await handleSwapTokens(usdcWethSwap)
+    const failed = await handleSwapTokensExecution(usdcWethSwap)
+    const retried = await handleSwapTokensExecution(usdcWethSwap)
 
     expect(failed.isError).toBe(true)
     expect(failed.content[0].text).toContain('quote rpc timeout')
@@ -694,7 +694,7 @@ describe.skip('swap_tokens execution (disabled in MCP 5.0.0 route A)', () => {
     mockAttachSwap.mockReturnValue(
       withQuote(mockSwap, vi.fn().mockResolvedValue({ amountOutMinimum: 1n })) as any
     )
-    const result = await handleSwapTokens({ ...usdcWethSwap, minAmountOut: '100' })
+    const result = await handleSwapTokensExecution({ ...usdcWethSwap, minAmountOut: '100' })
     expect(result.isError).toBe(true)
     expect(result.content[0].text).toContain('below caller minAmountOut')
     expect(mockSwap).not.toHaveBeenCalled()
