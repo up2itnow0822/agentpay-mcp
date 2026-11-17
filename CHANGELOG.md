@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [Unreleased] — 5.0.x on agentwallet-sdk 7.0.0
+
+### Security
+- **SEC-20261105-02:** Single redacting output sink (`src/utils/sink.ts`). All MCP tool
+  text, `formatError` / `formatUntrustedBody`, error causes, operator stderr, and the
+  index.ts dispatcher pass through `safeText` / `toolText` before leaving the process.
+  AST + behavioral tests enforce no bypass (SO S1–S6).
+
 ## [5.0.0] - 2026-10-25
 
 Security release. Repairs all 18 findings (4 high, 13 medium, 1 low) of the
