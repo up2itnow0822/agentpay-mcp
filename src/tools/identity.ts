@@ -32,6 +32,7 @@
  */
 import { z } from 'zod'
 import { ERC8004Client, ReputationClient, UAIDResolver } from 'agentwallet-sdk'
+import { createBoundedUaidResolver } from '../utils/identity-io-guard.js'
 import { getAddress, isAddress, type Address } from 'viem'
 import { getConfig } from '../utils/client.js'
 import {
@@ -94,8 +95,17 @@ const MAX_UAID_LEN = 512
  */
 const UNTRUSTED_IDENTITY_NARRATION =
   'Registry-supplied agent metadata follows. It was written by whoever registered ' +
-  'the agent and has NOT been verified by AgentPay. Only the JSON summary above ' +
-  'is validated.'
+  'the agent and has NOT been verified on-chain by AgentPay in MCP 5.0.x. Only the ' +
+  'JSON summary above is validated.'
+
+/** Stamped on every verify_agent_uaid success path in 5.0.x (F6 / SO #6(c)). */
+export const UAID_ON_CHAIN_VERIFICATION_NOTE =
+  'On-chain ERC-8004 verification is not performed in AgentPay MCP 5.0.x; broker identity claims are untrusted.'
+
+function stampUaidOnChainPolicy(trusted: Record<string, unknown>): void {
+  trusted['onChainVerified'] = false
+  trusted['verificationNote'] = UAID_ON_CHAIN_VERIFICATION_NOTE
+}
 
 /**
  * Reduce an arbitrary (possibly hostile) value to a bounded, JSON-safe shape.
@@ -482,9 +492,9 @@ export const verifyAgentUAIDTool = {
   description:
     'Verify an agent\'s identity using a Universal Agent Identifier (UAID). ' +
     'Works across all chains — EVM (ERC-8004), Hedera, Solana, and off-chain agents. ' +
-    'content[0] is a validated JSON summary (verified, protocol, trustScore, EVM ' +
-    'owner/payment addresses); broker-supplied free text (agentURI, non-EVM ids, ' +
-    'error strings) follows in a nonce-fenced untrusted block.',
+    'In 5.0.x content[0] reports brokerAttested and verified (always false); on-chain ' +
+    'ERC-8004 proof is deferred to 8.0.0. Broker identity claims follow in a ' +
+    'nonce-fenced untrusted block.',
   inputSchema: {
     type: 'object' as const,
     properties: {
@@ -516,6 +526,7 @@ export async function handleVerifyAgentUAID(
 
     const parsed = UAIDResolver.parseUAID(input.uaid)
     if (!parsed) {
+      stampUaidOnChainPolicy(trusted)
       return buildResult(
         {
           verified: false,
@@ -526,36 +537,29 @@ export async function handleVerifyAgentUAID(
       )
     }
 
-    const resolver = new UAIDResolver()
-    const result = (await resolver.verify(input.uaid)) as unknown as Record<string, unknown>
+    const resolver = createBoundedUaidResolver()
+    const resolution = await resolver.resolve(input.uaid)
+    const brokerAttested = resolution.registryVerified === true
+    trusted['brokerAttested'] = brokerAttested
+    trusted['verified'] = false
+    stampUaidOnChainPolicy(trusted)
 
-    trusted['verified'] = result['verified'] === true
-    placeTyped(trusted, untrusted, 'protocol', result['protocol'], (v) =>
+    const result = resolution as unknown as Record<string, unknown>
+    placeTyped(trusted, untrusted, 'protocol', result['protocol'] ?? resolution.protocol, (v) =>
       typeof v === 'string' && KNOWN_UAID_PROTOCOLS.has(v) ? v : undefined
     )
-    placeTyped(trusted, untrusted, 'trustScore', result['trustScore'], (v) => {
+    placeTyped(trusted, untrusted, 'trustScore', result['trustScore'] ?? resolution.trustScore, (v) => {
       const n = trustedFiniteNumber(v)
       return n !== undefined && n >= 0 && n <= 100 ? n : undefined
     })
 
-    const id = result['identity']
-    if (id && typeof id === 'object') {
-      const rawId = id as Record<string, unknown>
-      const trustedId: Record<string, unknown> = {}
-      const untrustedId: Record<string, unknown> = {}
-      placeTyped(trustedId, untrustedId, 'agentId', rawId['agentId'], trustedDecimalId)
-      // Non-EVM owners / payment addresses (Hedera accounts, Solana keys) are
-      // not validated here and so only appear inside the fence.
-      placeTyped(trustedId, untrustedId, 'owner', rawId['owner'], trustedAddress)
-      placeTyped(trustedId, untrustedId, 'paymentAddress', rawId['paymentAddress'], trustedAddress)
-      placeTyped(trustedId, untrustedId, 'chain', rawId['chain'], (v) =>
-        typeof v === 'string' && EIP155_CHAIN.test(v) ? v : undefined
-      )
-      untrustedId['agentURI'] = rawId['agentURI'] ?? null
-      trusted['identity'] = trustedId
-      untrusted['identity'] = untrustedId
-    } else {
-      trusted['identity'] = null
+    const id = result['identity'] ?? resolution.identity
+    trusted['identity'] = null
+    if (id !== undefined && id !== null) {
+      untrusted['identity'] = boundUntrustedValue(id)
+    }
+    if (typeof resolution.chain === 'string') {
+      untrusted['brokerChain'] = resolution.chain
     }
 
     // Broker/SDK error strings are remote-controlled free text.

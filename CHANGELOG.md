@@ -7,6 +7,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [Unreleased] — 5.0.x on agentwallet-sdk 7.0.0
+
+### Notes for installers
+- npm may print a **deprecation notice** for `agentwallet-sdk@7.0.0` when installing
+  `agentpay-mcp@5.0.0`. The SDK line in use is deprecated; **agentwallet-sdk 8.x**
+  is the planned next coordinated adoption with **agentpay-mcp 8.0.0**.
+- **5.0.0 remains on SDK 7.0.0** on purpose: wrapper mitigations in this package
+  enforce factory wallet binding, x402 term binding, queued-transfer detection, and
+  bounded identity broker I/O without requiring an SDK major bump.
+- Upgrading from **4.3.0**: reinstall, set deployment identity env
+  (`AGENT_WALLET_CODE_HASH` or factory binding), expect `swap_tokens` and
+  `bridge_usdc` disabled on the MCP surface (route A), and review x402 pay-to /
+  cap binding requirements on paid tools.
+
+### STOP (requires agentwallet-sdk 8.x — not in this release)
+- Native SDK 8 deployment identity inside `createWallet` (factory binding at SDK layer).
+- SDK 8 structured `agentTransferToken` return values (`executed` / `queued` objects without receipt parsing).
+- SwapModule AgentAccount execution path with SDK-enforced output floors (SDK 8).
+
+### Breaking
+- **Breaking:** `swap_tokens` and `bridge_usdc` are **disabled on the MCP tool
+  surface** (route A) in 5.0.x: handlers return a disabled error with schema
+  retained; no on-chain swap or CCTP execution. Internal execution paths remain
+  for regression tests and a future SDK 8 re-enable. `AGENTPAY_ENABLE_EOA_BRIDGE`
+  is removed (bridge is not env-gated).
+
+### Security (SDK 7 wrappers)
+- ERC-20 `Transfer` receipt matching uses the canonical viem `encodeEventTopics`
+  topic; bounded 402 JSON depth uses an iterative walk (no stack blow-up at depth 10k).
+- Wallet binding env (`AGENT_WALLET_FACTORY`, `AGENT_WALLET_TOKEN_CONTRACT`,
+  `AGENT_WALLET_TOKEN_ID`) is enforced before `send_payment`, `send_token`,
+  and x402 writes (`requireBinding` on value-moving handlers).
+- When swaps are re-enabled, `minAmountOut` is required on the execution path;
+  while route A is disabled the MCP schema keeps `minAmountOut` optional.
+- Token transfers classify queued owner-approval outcomes from receipts instead
+  of reporting "Payment Sent" when nothing moved.
+- Internal bridge execution paths keep attestation guards for regression tests;
+  the MCP `bridge_usdc` tool remains disabled on route A.
+- UAID resolution uses bounded timeout and cache TTL from operator env.
+- `verify_agent_uaid` never sets `verified: true` on 5.0.x; broker attestation and
+  raw broker claims only (on-chain ERC-8004 verification deferred to 8.0.0).
+
+---
+
 ## [5.0.0] - 2026-10-25
 
 Security release. Repairs all 18 findings (4 high, 13 medium, 1 low) of the

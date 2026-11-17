@@ -6,6 +6,7 @@ import { createWalletClient, http, type Address, type Chain } from 'viem';
 import { privateKeyToAccount } from 'viem/accounts';
 import { base, baseSepolia } from 'viem/chains';
 import { createWallet } from 'agentwallet-sdk';
+import { _resetWalletStartupGate } from './wallet-preflight.js';
 
 // ─── Supported chains ──────────────────────────────────────────────────────
 
@@ -176,4 +177,5 @@ export function getWallet(): AgentWalletInstance {
 export function _resetSingletons(): void {
   _config = null;
   _wallet = null;
+  _resetWalletStartupGate();
 }

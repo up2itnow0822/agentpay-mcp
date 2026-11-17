@@ -544,6 +544,46 @@ export class DurableIdentityCapacityError extends DefiniteSpendFailure {
  * Canonical form is lowercase `0x` plus 64 hex chars. The SDK helper accepts
  * `0X`; that prefix is rejected here so cached hashes stay 0x-prefixed.
  */
+/**
+ * Over-limit / owner-approval queue: broadcast happened but funds did not move yet.
+ */
+export class QueuedSpendError extends Error {
+  readonly retryable = false
+  readonly txHash: string | undefined
+  readonly pendingTxId: string | undefined
+  constructor(label: string, txHash: unknown, pendingTxId: unknown) {
+    const id =
+      typeof pendingTxId === 'bigint' || typeof pendingTxId === 'number' ? String(pendingTxId) : undefined
+    const hash = typeof txHash === 'string' ? txHash : undefined
+    super(
+      `${label} was QUEUED for owner approval, not paid` +
+        `${id !== undefined ? ` (pendingTxId=${id})` : ''}${hash ? ` (txHash=${hash})` : ''}. ` +
+        'No funds moved yet; use queue_approval to inspect pending transactions.'
+    )
+    this.name = 'QueuedSpendError'
+    this.txHash = hash
+    this.pendingTxId = id
+  }
+}
+
+export function requireExecutedTransfer(result: unknown, label: string): string {
+  const r = result as { status?: unknown; txHash?: unknown; pendingTxId?: unknown } | null
+  if (r && typeof r === 'object' && r.status === 'executed') return r.txHash as string
+  if (r && typeof r === 'object' && r.status === 'queued') {
+    throw new QueuedSpendError(label, r.txHash, r.pendingTxId)
+  }
+  throw new Error(`${label} returned an unclassified transfer result.`)
+}
+
+export function requireExecutedCall(result: unknown, label: string): string {
+  const r = result as { executed?: unknown; txHash?: unknown; pendingTxId?: unknown } | null
+  if (r && typeof r === 'object' && r.executed === true) return r.txHash as string
+  if (r && typeof r === 'object' && r.executed === false) {
+    throw new QueuedSpendError(label, r.txHash, r.pendingTxId)
+  }
+  throw new Error(`${label} returned an unclassified execution result.`)
+}
+
 export function requireSettlementHash(hash: unknown, label: string): string {
   if (typeof hash !== 'string' || hash.trim().length === 0) {
     throw new Error(
@@ -629,6 +669,7 @@ export function swapTokensIntentIdentity(input: {
   toTokenAddress: string
   rawAmountIn: bigint
   slippageBps?: number
+  rawMinAmountOut: bigint
   idempotencyKey?: string
 }): SpendIntentIdentity {
   const fingerprint = [
@@ -638,6 +679,7 @@ export function swapTokensIntentIdentity(input: {
     input.toTokenAddress.toLowerCase(),
     input.rawAmountIn.toString(),
     String(input.slippageBps ?? DEFAULT_SWAP_SLIPPAGE_BPS),
+    input.rawMinAmountOut.toString(),
   ].join(':')
   return spendIntentIdentity('swap_tokens', fingerprint, input.idempotencyKey)
 }
@@ -648,6 +690,7 @@ export function swapTokensIntentKey(input: {
   toTokenAddress: string
   rawAmountIn: bigint
   slippageBps?: number
+  rawMinAmountOut: bigint
   idempotencyKey?: string
 }): string {
   return swapTokensIntentIdentity(input).key
@@ -1756,6 +1799,55 @@ type SpendIntentOptions<T> = {
    * post-settlement failure installs the lock.
    */
   lockScope?: readonly string[]
+}
+
+/**
+ * Run a resume step for a spend intent that is already locked after a partial
+ * value move (e.g. CCTP burn with attestation timeout). Clears the lock on
+ * success and settles like a normal completion.
+ */
+export async function runLockedSpendResume<T>(
+  key: string,
+  fingerprint: string,
+  run: () => Promise<T>,
+  options?: Pick<SpendIntentOptions<T>, 'durable' | 'shouldSettle'>
+): Promise<{ value: T; replayed: false }> {
+  ensureJournalLoaded()
+  const locked = unresolved.get(key)
+  if (!locked) {
+    throw new UnresolvedSpendIntentError(
+      'No locked spend intent to resume; reconcile or clear the prior attempt first.'
+    )
+  }
+  assertFingerprint(locked.fingerprint, fingerprint)
+  try {
+    const value = await run()
+    if (options?.shouldSettle && !options.shouldSettle(value)) {
+      journal({ op: 'definite', key })
+      return { value, replayed: false }
+    }
+    const entry: SettledIntent<T> = {
+      settledAt: Date.now(),
+      value,
+      durable: Boolean(options?.durable),
+      fingerprint,
+    }
+    if (entry.durable) {
+      rememberDurable(key, entry)
+    } else {
+      settledEphemeral.set(key, entry)
+    }
+    unresolved.delete(key)
+    journal({ op: 'settle', key, fp: fingerprint, durable: entry.durable })
+    return { value, replayed: false }
+  } catch (error: unknown) {
+    if (error instanceof DefiniteSpendFailure) {
+      journal({ op: 'definite', key })
+      unresolved.delete(key)
+      throw error
+    }
+    throw error
+  }
 }
 
 export async function withSpendIntent<T>(
