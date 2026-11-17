@@ -9,6 +9,7 @@
 import { format } from 'node:util'
 import * as viemAccounts from 'viem/accounts'
 import { maskSensitiveTextFields } from './sink-sensitive-text.js'
+import { TEXT_OUTPUT_MAX_BYTES } from './tool-guard.js'
 
 let bip39: Set<string> | null | undefined
 /** The BIP-39 English wordlist viem ships; null if unavailable (e.g. a test mock). */
@@ -373,12 +374,18 @@ export function safeText(text: string, opts: SafeTextOptions = {}): string {
   return redactSecrets(masked, process.env, opts)
 }
 
-/** stderr / console shim: fail-closed and non-reentrant. */
-export function safeTextForLog(text: string): string {
+function utf8ByteLength(text: string): number {
+  return new TextEncoder().encode(text).length
+}
+
+/** stderr / console shim: fail-closed, non-reentrant, per-block size cap (same as tool guard). */
+function safeTextForLogImpl(text: string): string {
   logRedactDepth++
   try {
     if (logRedactDepth > 1) return LOG_REDACTION_WITHHELD
-    return safeText(text, { errorContext: true })
+    const out = safeText(text, { errorContext: true })
+    if (utf8ByteLength(out) > TEXT_OUTPUT_MAX_BYTES) return LOG_REDACTION_WITHHELD
+    return out
   } catch {
     return LOG_REDACTION_WITHHELD
   } finally {
@@ -386,9 +393,13 @@ export function safeTextForLog(text: string): string {
   }
 }
 
+export function safeTextForLog(text: string): string {
+  return REDACTION_LOG_ENTRY.redact(text)
+}
+
 /** Shared log-path redaction entry (stderr + console shim); tests spy this for F13. */
 export const REDACTION_LOG_ENTRY = {
-  redact: (text: string): string => safeTextForLog(text),
+  redact: (text: string): string => safeTextForLogImpl(text),
 }
 
 /**

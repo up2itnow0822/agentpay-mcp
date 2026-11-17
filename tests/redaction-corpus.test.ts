@@ -4,7 +4,7 @@
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { guardRequest, guardToolCall } from '../src/utils/tool-guard.js'
+import { guardRequest, guardToolCall, TEXT_OUTPUT_MAX_BYTES } from '../src/utils/tool-guard.js'
 import {
   _resetStdioConsoleSinkForTests,
   _resetStdioProtocolModeForTests,
@@ -49,7 +49,7 @@ function assertSecretAbsent(out: string, needle: string, row: CorpusRow, path: O
 }
 
 function assertBenignPresent(out: string, needle: string, row: CorpusRow, path: OutputPath): void {
-  if (path === 'stderr' || path === 'cli' || path === 'console_shim') {
+  if (path === 'stderr' || path === 'console_shim') {
     if (row.log_overredaction_ok && !out.includes(needle)) {
       // eslint-disable-next-line no-console
       console.info(`[corpus over-redaction ok] ${row.id} ${path}: ${row.note ?? ''}`)
@@ -174,7 +174,9 @@ describe('F13 safeText family identity', () => {
       _resetStdioConsoleSinkForTests()
       _resetStdioProtocolModeForTests()
     }
-    expect(spy.mock.calls.length).toBeGreaterThanOrEqual(2)
+    expect(spy).toHaveBeenCalledTimes(2)
+    expect(spy.mock.calls[0]![0]).toBe('probe-token-abc')
+    expect(spy.mock.calls[1]![0]).toBe('probe-token-xyz')
   })
 })
 
@@ -185,18 +187,25 @@ describe('stdio console shim reentrancy', () => {
     vi.restoreAllMocks()
   })
 
-  it('does not recurse or hang when console runs during redaction', async () => {
+  it('withholds on nested log path instead of recursing when console runs during redaction', () => {
     installStdioConsoleSink()
     enterStdioProtocolMode()
-    const original = sinkModule.safeText
-    vi.spyOn(sinkModule, 'safeText').mockImplementation((text: string) => {
-      console.info('nested-during-redact')
-      return original(text)
+    const originalMask = sinkSensitive.maskSensitiveTextFields
+    let emitNestedLog = false
+    vi.spyOn(sinkSensitive, 'maskSensitiveTextFields').mockImplementation((text) => {
+      if (!emitNestedLog) {
+        emitNestedLog = true
+        console.error('reentry-probe-line')
+      }
+      return originalMask(text)
     })
     const err = vi.spyOn(process.stderr, 'write').mockImplementation(() => true)
     const t = Date.now()
-    console.info('outer-line-secret-q7q')
-    expect(Date.now() - t).toBeLessThan(5000)
+    console.info('api_key=outer-line-secret-q7q')
+    expect(Date.now() - t).toBeLessThan(2000)
+    const written = err.mock.calls.map((c) => String(c[0])).join('')
+    expect(written).toContain('[log withheld by redaction guard]')
+    expect(written).not.toContain('outer-line-secret-q7q')
     err.mockRestore()
     vi.restoreAllMocks()
   })
@@ -219,6 +228,7 @@ describe('log path fail-closed', () => {
     logErr(RAW)
     const written = err.mock.calls.map((c) => String(c[0])).join('')
     expect(written).toBe(`${sinkModule.LOG_REDACTION_WITHHELD}\n`)
+    expect(written).toBe('[log withheld by redaction guard]\n')
     expect(written).not.toContain(RAW)
     err.mockRestore()
   })
@@ -233,7 +243,38 @@ describe('log path fail-closed', () => {
     console.info(RAW)
     const written = err.mock.calls.map((c) => String(c[0])).join('')
     expect(written).toBe(`${sinkModule.LOG_REDACTION_WITHHELD}\n`)
+    expect(written).toBe('[log withheld by redaction guard]\n')
     expect(written).not.toContain(RAW)
+    err.mockRestore()
+  })
+})
+
+describe('log path size cap', () => {
+  afterEach(() => {
+    _resetStdioConsoleSinkForTests()
+    _resetStdioProtocolModeForTests()
+    vi.restoreAllMocks()
+  })
+
+  it('logErr withholds a block just over the tool-guard size cap', () => {
+    const huge = 'x'.repeat(TEXT_OUTPUT_MAX_BYTES + 1)
+    const err = vi.spyOn(process.stderr, 'write').mockImplementation(() => true)
+    logErr(huge)
+    const written = err.mock.calls.map((c) => String(c[0])).join('')
+    expect(written).toBe('[log withheld by redaction guard]\n')
+    expect(written).not.toContain(huge)
+    err.mockRestore()
+  })
+
+  it('console shim withholds a block just over the tool-guard size cap', () => {
+    installStdioConsoleSink()
+    enterStdioProtocolMode()
+    const huge = 'x'.repeat(TEXT_OUTPUT_MAX_BYTES + 1)
+    const err = vi.spyOn(process.stderr, 'write').mockImplementation(() => true)
+    console.info(huge)
+    const written = err.mock.calls.map((c) => String(c[0])).join('')
+    expect(written).toBe('[log withheld by redaction guard]\n')
+    expect(written).not.toContain(huge)
     err.mockRestore()
   })
 })

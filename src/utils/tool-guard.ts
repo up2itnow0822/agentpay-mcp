@@ -16,7 +16,7 @@ export const REQUEST_ERROR_WITHHELD = 'request error withheld'
 export const REDACTION_GUARD_ERROR_TEXT =
   'Result withheld by redaction guard. Check status before retrying; a payment may have executed.'
 
-const TEXT_OUTPUT_MAX_BYTES = 4 * 1024 * 1024
+export const TEXT_OUTPUT_MAX_BYTES = 4 * 1024 * 1024
 
 function withholdToolResult(reason: string): ToolResult {
   logErr(`[tool-guard:withhold:${reason}]`)
