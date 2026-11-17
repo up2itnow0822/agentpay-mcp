@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] — 5.0.x on agentwallet-sdk 7.0.0
 
+### Security
+- **SEC-20261105-02:** Single redacting output sink (`src/utils/sink.ts`). All MCP tool
+  text, `formatError` / `formatUntrustedBody`, error causes, operator stderr, and the
+  index.ts dispatcher pass through `safeText` / `toolText` before leaving the process.
+  AST + behavioral tests enforce no bypass (SO S1–S6).
+
 ### Notes for installers
 - npm may print a **deprecation notice** for `agentwallet-sdk@7.0.0` when installing
   `agentpay-mcp@5.0.0`. That upstream advisory reflects issues addressed in

@@ -17,6 +17,7 @@
  * `id:` handle and an escaped, informational rendering of its key; `resolve`
  * takes the handle (or a key made only of shell-inert characters).
  */
+import { logErr, logOut } from '../utils/sink.js';
 import {
   displaySpendIntentKey,
   ensureJournalLoaded,
@@ -43,8 +44,8 @@ function message(error: unknown): string {
 
 export function runSpendIntentsCli(
   args: string[],
-  out: (_line: string) => void = (line) => process.stdout.write(line + '\n'),
-  err: (_line: string) => void = (line) => process.stderr.write(line + '\n')
+  out: (_line: string) => void = (line) => logOut(line),
+  err: (_line: string) => void = (line) => logErr(line)
 ): number {
   const path = spendJournalPath()
   if (!path) {

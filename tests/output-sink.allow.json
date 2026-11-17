@@ -1,0 +1,27 @@
+[
+  {
+    "file": "examples/x402-clean-demo/server.mjs",
+    "sha256": "54eec3d94e2aaf4f1a4ed907f8cbd3c4d605ab925033073c748402e530ac3a69",
+    "reason": "operator-set public demo URL, no secrets"
+  },
+  {
+    "file": "examples/x402-clean-demo/server.mjs",
+    "sha256": "4835a6d405d42bb152092fc9cd49025d90593aaa601b7558ada43f19cebffe25",
+    "reason": "public demo resource URL, no secrets"
+  },
+  {
+    "file": "examples/value-packs/shared/ui.ts",
+    "sha256": "395632600573b97e5acf94b6f2447351aca285d52254a4f750aac7fe356ace07",
+    "reason": "readline prompt stream; prompts are fixed strings"
+  },
+  {
+    "file": "src/utils/sink.ts",
+    "sha256": "8eba6a358c32dffad9cef96d3eb59ce7439bef240f5cfe22c3031ea2926c4661",
+    "reason": "stdio console shim; routes dependency console.* through safeErrorText to stderr in MCP stdio mode"
+  },
+  {
+    "file": "src/index.ts",
+    "sha256": "5f2509a508215db60e214e553bf88ee55b6ceef0c94a5b89947fbd118df319d2",
+    "reason": "imports console-bootstrap before tool modules; the import line matches the console regex but performs no I/O"
+  }
+]

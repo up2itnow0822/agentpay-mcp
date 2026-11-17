@@ -483,6 +483,22 @@ describe('formatError', () => {
     expect(out.endsWith(UNTRUSTED_BODY_END)).toBe(true);
   });
 
+  it('does not leak a partial private key when the message straddles MAX_ERROR_MESSAGE_LEN', () => {
+    const FAKE_KEY = '0x' + 'cd'.repeat(32)
+    const prev = process.env.AGENT_PRIVATE_KEY
+    process.env.AGENT_PRIVATE_KEY = FAKE_KEY
+    try {
+      const pad = 'p'.repeat(480)
+      const out = formatError(new Error(pad + FAKE_KEY), 'x402_pay')
+      expect(out).not.toContain(FAKE_KEY)
+      expect(out).not.toContain(FAKE_KEY.slice(2))
+      expect(out).not.toMatch(/0x[0-9a-fA-F]{8,63}(?![0-9a-fA-F])/)
+    } finally {
+      if (prev === undefined) delete process.env.AGENT_PRIVATE_KEY
+      else process.env.AGENT_PRIVATE_KEY = prev
+    }
+  })
+
   it('caps a flood-length message', () => {
     const out = formatError(new Error('z'.repeat(10_000)), 'x402_pay');
     // 512-char cap plus the fixed narration and envelope. The envelope is a

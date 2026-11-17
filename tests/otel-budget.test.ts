@@ -48,7 +48,9 @@ function routeTransportThroughMocks(): void {
 }
 
 describe('OTel Budget Circuit-Breaker', () => {
-  let consoleError: ReturnType<typeof vi.spyOn>
+  let stderrWrite: ReturnType<typeof vi.spyOn>
+
+  const stderrLogged = (): string => stderrWrite.mock.calls.map((call) => String(call[0])).join('')
 
   beforeEach(() => {
     _resetOTelBudgetState()
@@ -56,7 +58,7 @@ describe('OTel Budget Circuit-Breaker', () => {
     dnsLookup.mockResolvedValue([{ address: '93.184.216.34', family: 4 }])
     routeTransportThroughMocks()
     delete process.env[KILL_CALLBACK_ALLOWLIST_ENV]
-    consoleError = vi.spyOn(console, 'error').mockImplementation(() => {})
+    stderrWrite = vi.spyOn(process.stderr, 'write').mockImplementation(() => true)
   })
 
   afterEach(() => {
@@ -767,9 +769,7 @@ describe('OTel Budget Circuit-Breaker', () => {
       expect(result).toMatchObject({ attempted: false, ok: false })
       expect(result?.error).toBe(KILL_CALLBACK_GENERIC_FAILURE)
       // The detail an operator needs goes to the server log, not the caller.
-      expect(consoleError).toHaveBeenCalledWith(
-        expect.stringContaining('could not be resolved')
-      )
+      expect(stderrLogged()).toContain('could not be resolved')
     })
 
     it('fails closed when the callback host resolves to no addresses', async () => {
@@ -785,9 +785,7 @@ describe('OTel Budget Circuit-Breaker', () => {
       expect(fetchMock).not.toHaveBeenCalled()
       expect(result).toMatchObject({ attempted: false, ok: false })
       expect(result?.error).toBe(KILL_CALLBACK_GENERIC_FAILURE)
-      expect(consoleError).toHaveBeenCalledWith(
-        expect.stringContaining('no addresses')
-      )
+      expect(stderrLogged()).toContain('no addresses')
     })
 
     it('fetches a name that resolves entirely into public space', async () => {
@@ -826,7 +824,7 @@ describe('OTel Budget Circuit-Breaker', () => {
     const logsFor = async (arrange: () => void): Promise<string> => {
       arrange()
       await invokeKillCallback(killPolicy(secretUrl), killDecision)
-      const logged = consoleError.mock.calls.map((call) => String(call[0])).join('\n')
+      const logged = stderrLogged()
       expect(logged).not.toBe('')
       return logged
     }
@@ -898,9 +896,7 @@ describe('OTel Budget Circuit-Breaker', () => {
       })
       // The caller gets the same generic string as every other DNS refusal;
       // the operator's log is where the deadline shows up.
-      expect(consoleError).toHaveBeenCalledWith(
-        expect.stringContaining('kill-callback deadline')
-      )
+      expect(stderrLogged()).toContain('kill-callback deadline')
     })
 
     it('spends one deadline across the whole path, not one per leg', async () => {
@@ -1015,7 +1011,7 @@ describe('OTel Budget Circuit-Breaker', () => {
         error: KILL_CALLBACK_GENERIC_FAILURE,
       })
       // The timeout detail reaches the operator's log, not the caller.
-      expect(consoleError).toHaveBeenCalledWith(expect.stringContaining('timeout'))
+      expect(stderrLogged()).toContain('timeout')
     })
 
     it('keeps the breaker decision intact when the callback is refused outright', async () => {
