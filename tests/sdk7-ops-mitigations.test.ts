@@ -2,19 +2,7 @@
  * Ops/SO mitigation map — one named test per finding id (SDK 7.0.0, offline).
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import {
-  createWalletClient,
-  custom,
-  encodeEventTopics,
-  encodeAbiParameters,
-  getAddress,
-  pad,
-  toEventHash,
-  type Address,
-  type Hex,
-} from 'viem'
-import { base } from 'viem/chains'
-import { privateKeyToAccount } from 'viem/accounts'
+import { encodeEventTopics, parseAbiItem, type Address, type Hex } from 'viem'
 import * as agentwalletSdk from 'agentwallet-sdk'
 import { attachSwap, createBridge, ERC8004Client } from 'agentwallet-sdk'
 import { handleSwapTokens } from '../src/tools/swap.js'
@@ -44,6 +32,8 @@ import { readBrokerResponseWithCap } from '../src/utils/identity-broker-fetch.js
 import { MESSAGE_TRANSMITTER_V2 } from 'agentwallet-sdk'
 import { _resetSpendIntentStore } from '../src/utils/spend-intent.js'
 import { _resetPolicyStore, handleSetSpendPolicy } from '../src/tools/budget.js'
+import { ERC20_TRANSFER_TOPIC } from './helpers/erc20-logs.js'
+import { receiptTimeoutMs } from '../src/utils/agent-transfer-outcome.js'
 
 vi.mock('../src/utils/wallet-binding.js', () => ({
   assertExpectedSmartWallet: vi.fn().mockResolvedValue(undefined),
@@ -322,6 +312,18 @@ describe('x402 #25 bounded 402 payload', () => {
     expect(() => assertBoundedX402PaymentRequired(payload)).toThrow(/depth/)
   })
 
+  it('x402 #25 depth-10000 nested chain fails closed without stack overflow', () => {
+    let nested: Record<string, unknown> = {}
+    let cursor = nested
+    for (let i = 0; i < 10_000; i++) {
+      const next: Record<string, unknown> = {}
+      cursor.n = next
+      cursor = next
+    }
+    const payload = { ...baseReq, nested }
+    expect(() => assertBoundedX402PaymentRequired(payload)).toThrow(/depth/)
+  })
+
   it('x402 #25 refuses more than 16 accepts options', () => {
     const accepts = Array.from({ length: X402_MAX_402_ACCEPTS + 1 }, () => baseReq.accepts[0])
     expect(() =>
@@ -443,5 +445,31 @@ describe('F4 identity #6 on-chain verification gates', () => {
     expect(trusted.verified).toBe(false)
     expect(trusted.brokerAttested).toBe(true)
     expect(lookup).not.toHaveBeenCalled()
+  })
+})
+
+describe('B1 Transfer topic and receipt timeout env', () => {
+  const savedTimeout = process.env.AGENTPAY_RECEIPT_TIMEOUT_MS
+
+  afterEach(() => {
+    if (savedTimeout === undefined) delete process.env.AGENTPAY_RECEIPT_TIMEOUT_MS
+    else process.env.AGENTPAY_RECEIPT_TIMEOUT_MS = savedTimeout
+  })
+
+  it('B1 ERC-20 Transfer topic matches encodeEventTopics(erc20Abi)', () => {
+    const topics = encodeEventTopics({
+      abi: [parseAbiItem('event Transfer(address indexed from, address indexed to, uint256 value)')],
+      eventName: 'Transfer',
+    })
+    expect(topics[0]).toBe(ERC20_TRANSFER_TOPIC)
+  })
+
+  it('B1 rejects non-integer and sub-1000 AGENTPAY_RECEIPT_TIMEOUT_MS values', () => {
+    process.env.AGENTPAY_RECEIPT_TIMEOUT_MS = 'not-a-number'
+    expect(receiptTimeoutMs()).toBe(120_000)
+    process.env.AGENTPAY_RECEIPT_TIMEOUT_MS = '500'
+    expect(receiptTimeoutMs()).toBe(120_000)
+    process.env.AGENTPAY_RECEIPT_TIMEOUT_MS = '0'
+    expect(receiptTimeoutMs()).toBe(120_000)
   })
 })

@@ -96,6 +96,20 @@ describe('bridge_usdc MCP surface (route A disabled)', () => {
     expect(result.content[0].text).toMatch(/disabled in AgentPay MCP 5\.0\.0 \(route A\)/)
     expect(mockCreateBridge).not.toHaveBeenCalled()
   })
+
+  it('route A: legacy AGENTPAY_ENABLE_EOA_BRIDGE=1 does not re-enable MCP bridge', async () => {
+    const prev = process.env.AGENTPAY_ENABLE_EOA_BRIDGE
+    process.env.AGENTPAY_ENABLE_EOA_BRIDGE = '1'
+    try {
+      const result = await handleBridgeUsdc({ fromChain: 'base', toChain: 'polygon', amount: '1' })
+      expect(result.isError).toBe(true)
+      expect(result.content[0].text).toMatch(/disabled in AgentPay MCP 5\.0\.0 \(route A\)/)
+      expect(mockCreateBridge).not.toHaveBeenCalled()
+    } finally {
+      if (prev === undefined) delete process.env.AGENTPAY_ENABLE_EOA_BRIDGE
+      else process.env.AGENTPAY_ENABLE_EOA_BRIDGE = prev
+    }
+  })
 })
 
 describe('bridge_usdc execution (internal path; MCP route A disabled)', () => {

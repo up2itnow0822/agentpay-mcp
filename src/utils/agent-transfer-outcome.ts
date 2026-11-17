@@ -1,11 +1,21 @@
 /**
  * SDK 7 wrapper #13: classify agentTransferToken receipts (queued vs sent vs unverified).
  */
-import { getAddress, parseEventLogs, type Hash, type TransactionReceipt } from 'viem'
+import {
+  encodeEventTopics,
+  getAddress,
+  parseAbiItem,
+  parseEventLogs,
+  type Hash,
+  type TransactionReceipt,
+} from 'viem'
 import { AgentAccountV2Abi, agentTransferToken } from 'agentwallet-sdk'
 import type { AgentWalletInstance } from './client.js'
 
-const TRANSFER_TOPIC = '0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3efa'
+const [TRANSFER_TOPIC] = encodeEventTopics({
+  abi: [parseAbiItem('event Transfer(address indexed from, address indexed to, uint256 value)')],
+  eventName: 'Transfer',
+})
 const DEFAULT_RECEIPT_TIMEOUT_MS = 120_000
 
 export class UnverifiedSpendError extends Error {

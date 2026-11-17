@@ -18,17 +18,29 @@ export class X402MalformedPaymentRequiredError extends DefiniteSpendFailure {
   }
 }
 
+/** Iterative depth walk — avoids stack overflow on hostile deeply nested 402 JSON (F25). */
 function jsonDepth(value: unknown, depth = 0): number {
   if (value === null || typeof value !== 'object') return depth
   let max = depth + 1
-  if (Array.isArray(value)) {
-    for (const item of value) {
-      max = Math.max(max, jsonDepth(item, depth + 1))
+  const stack: Array<{ node: unknown; at: number }> = []
+  const pushChildren = (node: object, at: number) => {
+    if (Array.isArray(node)) {
+      for (const item of node) stack.push({ node: item, at: at + 1 })
+      return
     }
-    return max
+    for (const child of Object.values(node as Record<string, unknown>)) {
+      stack.push({ node: child, at: at + 1 })
+    }
   }
-  for (const v of Object.values(value as Record<string, unknown>)) {
-    max = Math.max(max, jsonDepth(v, depth + 1))
+  pushChildren(value, depth)
+  while (stack.length > 0) {
+    const { node, at } = stack.pop()!
+    if (node === null || typeof node !== 'object') {
+      max = Math.max(max, at)
+      continue
+    }
+    max = Math.max(max, at + 1)
+    pushChildren(node, at)
   }
   return max
 }

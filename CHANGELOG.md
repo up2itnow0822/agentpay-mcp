@@ -33,6 +33,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   is removed (bridge is not env-gated).
 
 ### Security (SDK 7 wrappers)
+- ERC-20 `Transfer` receipt matching uses the canonical viem `encodeEventTopics`
+  topic; bounded 402 JSON depth uses an iterative walk (no stack blow-up at depth 10k).
 - Wallet binding env (`AGENT_WALLET_FACTORY`, `AGENT_WALLET_TOKEN_CONTRACT`,
   `AGENT_WALLET_TOKEN_ID`) is enforced before `send_payment`, `send_token`,
   and x402 writes (`requireBinding` on value-moving handlers).

@@ -3,15 +3,21 @@
  */
 import {
   encodeAbiParameters,
+  encodeEventTopics,
   getAddress,
   pad,
+  parseAbiItem,
   toEventHash,
   type Address,
   type Hex,
 } from 'viem'
 
-export const ERC20_TRANSFER_TOPIC =
-  '0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3efa' as Hex
+const _transferTopics = encodeEventTopics({
+  abi: [parseAbiItem('event Transfer(address indexed from, address indexed to, uint256 value)')],
+  eventName: 'Transfer',
+})
+
+export const ERC20_TRANSFER_TOPIC = _transferTopics[0]! as Hex
 
 export function erc20TransferLog(token: Address, from: Address, to: Address, amount: bigint) {
   return {
