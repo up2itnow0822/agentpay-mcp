@@ -126,6 +126,11 @@ describe('A4: prose must not exempt private keys', () => {
     expect(out).not.toContain(hex)
     expect(out).toContain('[redacted]')
   })
+  it('SO A4 masks transaction signing failed for key 0x<64hex> without env match', () => {
+    const out = redactSecrets(`transaction signing failed for key 0x${hex}`, {})
+    expect(out).not.toContain(hex)
+    expect(out).toContain('[redacted-hex64]')
+  })
   it('masks similar prose with hash wording but no label', () => {
     const out = redactSecrets(`could not verify hash material 0x${hex}`, {})
     expect(out).toBe('could not verify hash material [redacted-hex64]')
@@ -224,6 +229,9 @@ describe('R6: auth headers and bearer tokens', () => {
   })
   it('masks api-key header', () => {
     expect(redactSecrets('api-key: FAKEapiKeyHeader9', {})).not.toContain('FAKEapiKeyHeader9')
+  })
+  it('SO A3 masks Authorization header value with double quotes', () => {
+    expect(redactSecrets('"authorization": "FAKEheaderSecret"', {})).not.toContain('FAKEheaderSecret')
   })
   it('masks credentials query parameter URL', () => {
     const out = redactSecrets('https://api.example.com/x?credentials=FAKEcred99', {})
