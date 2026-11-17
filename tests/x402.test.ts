@@ -4,6 +4,10 @@
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
+vi.mock('../src/utils/wallet-binding.js', () => ({
+  assertExpectedSmartWallet: vi.fn().mockResolvedValue(undefined),
+}))
+
 // ─── Mock agentwallet-sdk ──────────────────────────────────────────────────
 
 const mockX402Fetch = vi.fn();

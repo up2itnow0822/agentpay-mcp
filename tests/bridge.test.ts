@@ -3,6 +3,21 @@
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 
+vi.mock('../src/utils/wallet-binding.js', () => ({
+  assertExpectedSmartWallet: vi.fn().mockResolvedValue(undefined),
+}))
+
+vi.mock('../src/utils/bridge-attestation-guard.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/utils/bridge-attestation-guard.js')>()
+  return {
+    ...actual,
+    bridgeUsdcWithAttestationGuard: vi.fn(
+      async (bridge: { bridge: (a: bigint, b: string) => unknown }, amount: bigint, toChain: string) =>
+        bridge.bridge(amount, toChain)
+    ),
+  }
+})
+
 // ─── Mock agentwallet-sdk ──────────────────────────────────────────────────
 
 vi.mock('agentwallet-sdk', async (importOriginal) => {

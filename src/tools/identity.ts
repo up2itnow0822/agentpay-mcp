@@ -32,6 +32,7 @@
  */
 import { z } from 'zod'
 import { ERC8004Client, ReputationClient, UAIDResolver } from 'agentwallet-sdk'
+import { createBoundedUaidResolver } from '../utils/identity-io-guard.js'
 import { getAddress, isAddress, type Address } from 'viem'
 import { getConfig } from '../utils/client.js'
 import {
@@ -526,7 +527,7 @@ export async function handleVerifyAgentUAID(
       )
     }
 
-    const resolver = new UAIDResolver()
+    const resolver = createBoundedUaidResolver()
     const result = (await resolver.verify(input.uaid)) as unknown as Record<string, unknown>
 
     trusted['verified'] = result['verified'] === true

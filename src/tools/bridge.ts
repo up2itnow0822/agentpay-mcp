@@ -7,7 +7,7 @@ import { z } from 'zod'
 import { createBridge } from 'agentwallet-sdk'
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type AnyWalletClient = any
-import { getWallet } from '../utils/client.js'
+import { getConfig, getWallet } from '../utils/client.js'
 import { textContent, formatError } from '../utils/format.js'
 import { assertConfiguredBridgeSource } from '../utils/wallet-chain.js'
 import {
@@ -23,6 +23,8 @@ import {
 } from '../utils/spend-intent.js'
 import { withReservedSpend } from './budget.js'
 import { parseAmountStrict } from '../utils/amount.js'
+import { bridgeUsdcWithAttestationGuard } from '../utils/bridge-attestation-guard.js'
+import { assertExpectedSmartWallet } from '../utils/wallet-binding.js'
 
 // Supported CCTP V2 chain names
 const SUPPORTED_CHAINS = [
@@ -99,6 +101,7 @@ export async function handleBridgeUsdc(
 ): Promise<{ content: Array<{ type: 'text'; text: string }>; isError?: boolean }> {
   try {
     const wallet = getWallet()
+    const config = getConfig()
 
     if (input.fromChain === input.toChain) {
       throw new Error('fromChain and toChain must be different')
@@ -144,8 +147,15 @@ export async function handleBridgeUsdc(
           createBridge(wallet.walletClient as AnyWalletClient, input.fromChain as SupportedChain)
         )
       )
+      await assertExpectedSmartWallet(wallet, config, { requireBinding: true })
       const result = await runClassifiedSpend(wallet.walletClient, () =>
-        bridge.bridge(rawAmount, input.toChain as SupportedChain)
+        bridgeUsdcWithAttestationGuard(
+          bridge,
+          rawAmount,
+          input.toChain as SupportedChain,
+          {},
+          input.fromChain as SupportedChain
+        )
       )
       const burnTxHash = requireSettlementHash(result.burnTxHash, 'bridge_usdc burn')
       const mintTxHash = requireSettlementHash(result.mintTxHash, 'bridge_usdc mint')
