@@ -44,6 +44,46 @@ const baseReq = {
   ],
 }
 
+describe('x402 #27 payment proof replay', () => {
+  it('#27 refuses replaying a captured payment proof on a second request URL', async () => {
+    const settle = vi.fn(async () => new Response('ok', { status: 200 }))
+    vi.spyOn(agentwalletSdk, 'createX402Client').mockReturnValue({
+      settle402AndRetry: settle,
+    } as never)
+    const PAYEE = '0x1111111111111111111111111111111111111111'
+    const payReq = {
+      x402Version: 1,
+      resource: { url: 'https://shop.example.com/first' },
+      accepts: [
+        {
+          scheme: 'exact',
+          network: 'base:8453',
+          asset: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913',
+          amount: '1000',
+          payTo: PAYEE,
+          maxTimeoutSeconds: 60,
+        },
+      ],
+    }
+    const transport = async (url: string) => {
+      return new Response(JSON.stringify({ ...payReq, resource: { url } }), {
+        status: 402,
+        headers: { 'Content-Type': 'application/json' },
+      })
+    }
+    const { client } = createAgentPayX402Client(walletFixture(), {
+      chainId: 8453,
+      maxPaymentEth: '1',
+      approved: { payTo: PAYEE },
+      transport,
+    })
+    await client.fetch('https://shop.example.com/first')
+    await client.fetch('https://shop.example.com/second')
+    expect(settle).toHaveBeenCalledTimes(2)
+    vi.restoreAllMocks()
+  })
+})
+
 describe('x402 SO #23 resource.url binding via client.fetch', () => {
   it('SO #23 refuses when resource.url ?item=b but request was ?item=a (no payment)', async () => {
     const settle = vi.fn().mockRejectedValue(new Error('payment should not run'))

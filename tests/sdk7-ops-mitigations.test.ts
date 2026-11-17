@@ -28,7 +28,10 @@ import {
   MAX_IDENTITY_CACHE_TTL_MS,
   MAX_IDENTITY_TIMEOUT_MS,
 } from '../src/utils/identity-io-guard.js'
-import { readBrokerResponseWithCap } from '../src/utils/identity-broker-fetch.js'
+import {
+  BrokerResponseReadTimeoutError,
+  readBrokerResponseWithCap,
+} from '../src/utils/identity-broker-fetch.js'
 import { MESSAGE_TRANSMITTER_V2 } from 'agentwallet-sdk'
 import { _resetSpendIntentStore } from '../src/utils/spend-intent.js'
 import { _resetPolicyStore, handleSetSpendPolicy } from '../src/tools/budget.js'
@@ -240,6 +243,19 @@ describe('F4 #18 identity broker transport cap', () => {
     const body = 'y'.repeat(256 * 1024 + 4)
     await expect(readBrokerResponseWithCap(new Response(body))).rejects.toThrow(/limit/)
   })
+
+  it('#18 refuses a broker body that slow-drips past the read deadline', async () => {
+    const stream = new ReadableStream<Uint8Array>({
+      async pull(controller) {
+        await new Promise((resolve) => setTimeout(resolve, 80))
+        controller.enqueue(new Uint8Array([0x7b]))
+      },
+    })
+    const response = new Response(stream)
+    await expect(readBrokerResponseWithCap(response, 256 * 1024, 120)).rejects.toBeInstanceOf(
+      BrokerResponseReadTimeoutError
+    )
+  })
 })
 
 describe('F4 #29 identity cache TTL ceiling', () => {
@@ -248,6 +264,27 @@ describe('F4 #29 identity cache TTL ceiling', () => {
     expect(identityIo.identityIoLimitsFromEnv().cacheTtlMs).toBe(MAX_IDENTITY_CACHE_TTL_MS)
     process.env.AGENTPAY_IDENTITY_TIMEOUT_MS = '99999999'
     expect(identityIo.identityIoLimitsFromEnv().timeoutMs).toBe(MAX_IDENTITY_TIMEOUT_MS)
+  })
+
+  it('#29 builds a fresh UAID resolver on each verify_agent_uaid call', async () => {
+    const UAID =
+      'uaid:aid:eip155:8453:0x8004A169FB4a3325136EB29fA0ceB6D2e539a432;uid=42;proto=erc8004'
+    const factory = vi.spyOn(identityIo, 'createBoundedUaidResolver')
+    factory.mockClear()
+    const resolve = vi.fn().mockResolvedValue({
+      resolved: true,
+      uaid: UAID,
+      protocol: 'erc8004',
+      chain: 'eip155:8453',
+      registryVerified: false,
+      identity: null,
+    })
+    factory.mockImplementation(() => ({ resolve }) as never)
+    await handleVerifyAgentUAID({ uaid: UAID })
+    await handleVerifyAgentUAID({ uaid: UAID })
+    expect(factory).toHaveBeenCalledTimes(2)
+    expect(resolve).toHaveBeenCalledTimes(2)
+    factory.mockRestore()
   })
 })
 
@@ -275,6 +312,33 @@ describe('x402 #23 follow-up URL binding', () => {
         'https://api.example.com/a?x=2'
       )
     ).toThrow(/query/)
+  })
+
+  it('#23 accepts normalized-equal resource URLs (case, port, slash, query order)', () => {
+    expect(() =>
+      assertX402FollowUpUrlMatches(
+        'https://API.EXAMPLE.com:443/pay/?b=2&a=1',
+        'https://api.example.com/pay?a=1&b=2'
+      )
+    ).not.toThrow()
+  })
+
+  it('#23 refuses when normalized URLs differ only by query value', () => {
+    expect(() =>
+      assertX402FollowUpUrlMatches(
+        'https://api.example.com/buy?item=a',
+        'https://api.example.com/buy?item=b'
+      )
+    ).toThrow(/query/)
+  })
+
+  it('#23 resolves a relative resource.url against the probe request', () => {
+    expect(() =>
+      assertX402FollowUpUrlMatches(
+        'https://api.example.com/v1/resource?x=1',
+        '/v1/resource?x=1'
+      )
+    ).not.toThrow()
   })
 })
 
@@ -360,6 +424,21 @@ describe('x402 #25 bounded 402 payload', () => {
     const big = JSON.stringify({ ...baseReq, pad: 'z'.repeat(X402_MAX_402_BODY_BYTES + 16) })
     const probe = new Response(big, { status: 402 })
     await expect(guardX402ProbeResponse('https://api.example.com/pay', probe)).rejects.toThrow(/exceeds/)
+  })
+
+  it('#25 AbortSignal caps a slow-dripping 402 body read at 10 seconds', async () => {
+    const timeoutSpy = vi.spyOn(AbortSignal, 'timeout').mockReturnValue(AbortSignal.timeout(80))
+    const stream = new ReadableStream<Uint8Array>({
+      async pull(controller) {
+        await new Promise((resolve) => setTimeout(resolve, 200))
+        controller.enqueue(new Uint8Array([0x7b]))
+      },
+    })
+    const probe = new Response(stream, { status: 402 })
+    await expect(guardX402ProbeResponse('https://api.example.com/pay', probe)).rejects.toThrow(
+      /timed out/
+    )
+    timeoutSpy.mockRestore()
   })
 })
 

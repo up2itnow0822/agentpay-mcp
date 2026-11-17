@@ -44,7 +44,29 @@ describe('x402 #27 fee-inclusive cap and #28 integer amounts', () => {
 })
 
 describe('PaymentIntent and SpendingPolicy SDK surface', () => {
-  it('accepts plain PaymentIntent objects for SpendingPolicy.reserve', async () => {
+  function walkSrcFiles(): string[] {
+    const root = new URL('../src', import.meta.url).pathname
+    const walk = (dir: string): string[] => {
+      const out: string[] = []
+      for (const ent of readdirSync(dir)) {
+        const p = join(dir, ent)
+        if (statSync(p).isDirectory()) out.push(...walk(p))
+        else if (p.endsWith('.ts') || p.endsWith('.tsx')) out.push(p)
+      }
+      return out
+    }
+    return walk(root)
+  }
+
+  it('#2 src never imports PaymentIntent', () => {
+    const offenders = walkSrcFiles().filter((file) => {
+      const text = readFileSync(file, 'utf8')
+      return /\bPaymentIntent\b/.test(text)
+    })
+    expect(offenders).toEqual([])
+  })
+
+  it('#2 SpendingPolicy.reserve receives plain data only', async () => {
     const intent: PaymentIntent = {
       merchant: '0x1111111111111111111111111111111111111111',
       amount: 1_000_000n,
@@ -52,6 +74,7 @@ describe('PaymentIntent and SpendingPolicy SDK surface', () => {
     const policy = new SpendingPolicy({ merchantAllowlist: [intent.merchant] })
     const out = await policy.reserve(intent)
     expect(['approved', 'rejected', 'draft']).toContain(out.status)
+    expect(out).not.toHaveProperty('type')
   })
 })
 

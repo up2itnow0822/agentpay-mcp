@@ -69,6 +69,31 @@ export function assertBoundedX402PaymentRequired(value: unknown): void {
   }
 }
 
+function read402ChunkWithDeadline(
+  reader: ReadableStreamDefaultReader<Uint8Array>,
+  timeout: AbortSignal
+): Promise<Awaited<ReturnType<typeof reader.read>>> {
+  if (timeout.aborted) {
+    return Promise.reject(new X402MalformedPaymentRequiredError('x402 response body read timed out.'))
+  }
+  return new Promise((resolve, reject) => {
+    const onAbort = () => {
+      reject(new X402MalformedPaymentRequiredError('x402 response body read timed out.'))
+    }
+    timeout.addEventListener('abort', onAbort, { once: true })
+    reader
+      .read()
+      .then((result) => {
+        timeout.removeEventListener('abort', onAbort)
+        resolve(result)
+      })
+      .catch((err) => {
+        timeout.removeEventListener('abort', onAbort)
+        reject(err)
+      })
+  })
+}
+
 async function readBounded402BodyBytes(response: Response): Promise<Uint8Array> {
   const clone = response.clone()
   const stream = clone.body
@@ -79,10 +104,7 @@ async function readBounded402BodyBytes(response: Response): Promise<Uint8Array> 
   let total = 0
   try {
     while (true) {
-      if (timeout.aborted) {
-        throw new X402MalformedPaymentRequiredError('x402 response body read timed out.')
-      }
-      const { done, value } = await reader.read()
+      const { done, value } = await read402ChunkWithDeadline(reader, timeout)
       if (done) break
       total += value.byteLength
       if (total > X402_MAX_402_BODY_BYTES) {
@@ -132,35 +154,74 @@ export function assertBounded402Header(headerValue: string | null): void {
   }
 }
 
-/**
- * Paid retry must target the same origin, pathname, and query as the probe (F23).
- */
-export function assertX402FollowUpUrlMatches(requestUrl: string, responseUrl: string): void {
-  let requested: URL
-  let responded: URL
+/** Normalize x402 URLs for binding (scheme/host case, default port, trailing slash, sorted query). */
+export function normalizeX402ComparableUrl(raw: string, base?: string): string {
+  let parsed: URL
   try {
-    requested = new URL(requestUrl)
-    responded = new URL(responseUrl)
+    parsed = new URL(raw, base)
   } catch {
     throw new X402MalformedPaymentRequiredError('x402 URL binding check failed: invalid URL.')
   }
-  requested.hash = ''
-  responded.hash = ''
-  if (requested.origin !== responded.origin) {
+  parsed.hash = ''
+  parsed.protocol = parsed.protocol.toLowerCase()
+  parsed.hostname = parsed.hostname.toLowerCase()
+  if (
+    (parsed.protocol === 'https:' && parsed.port === '443') ||
+    (parsed.protocol === 'http:' && parsed.port === '80') ||
+    parsed.port === ''
+  ) {
+    parsed.port = ''
+  }
+  let path = parsed.pathname
+  if (path.length > 1 && path.endsWith('/')) {
+    path = path.slice(0, -1)
+  }
+  const sorted = new URLSearchParams()
+  for (const key of [...parsed.searchParams.keys()].sort()) {
+    for (const value of parsed.searchParams.getAll(key)) {
+      sorted.append(key, value)
+    }
+  }
+  const query = sorted.toString()
+  return `${parsed.protocol}//${parsed.host}${path}${query ? `?${query}` : ''}`
+}
+
+/**
+ * Paid retry must target the same origin, pathname, and query as the probe (F23).
+ */
+function normalizedOrigin(url: string, base?: string): string {
+  const parsed = new URL(url, base)
+  parsed.protocol = parsed.protocol.toLowerCase()
+  parsed.hostname = parsed.hostname.toLowerCase()
+  if (
+    (parsed.protocol === 'https:' && parsed.port === '443') ||
+    (parsed.protocol === 'http:' && parsed.port === '80') ||
+    parsed.port === ''
+  ) {
+    parsed.port = ''
+  }
+  return parsed.origin
+}
+
+export function assertX402FollowUpUrlMatches(requestUrl: string, responseUrl: string): void {
+  const requested = normalizeX402ComparableUrl(requestUrl)
+  const responded = normalizeX402ComparableUrl(responseUrl, requestUrl)
+  if (requested === responded) {
+    return
+  }
+  if (normalizedOrigin(requestUrl) !== normalizedOrigin(responseUrl, requestUrl)) {
     throw new X402MalformedPaymentRequiredError(
       'x402 follow-up origin does not match the original request; refusing auto-pay.'
     )
   }
-  if (requested.pathname !== responded.pathname) {
+  if (requested.split('?')[0] !== responded.split('?')[0]) {
     throw new X402MalformedPaymentRequiredError(
       'x402 follow-up path does not match the original request; refusing auto-pay.'
     )
   }
-  if (requested.search !== responded.search) {
-    throw new X402MalformedPaymentRequiredError(
-      'x402 follow-up query does not match the original request; refusing auto-pay.'
-    )
-  }
+  throw new X402MalformedPaymentRequiredError(
+    'x402 follow-up query does not match the original request; refusing auto-pay.'
+  )
 }
 
 /** Run F23 + F25 checks on an already-received 402 probe. */
