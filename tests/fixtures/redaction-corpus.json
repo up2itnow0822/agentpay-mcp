@@ -325,5 +325,13 @@
 {"id":"c324","source_receipt":"SO-probes-20261117/advdash.cjs","input":"env AGENT-SECRET=zqd9","kind":"secret_absent","needle":"zqd9","note":"hyphen key; status at 7f8f060 not recorded"},
 {"id":"c325","source_receipt":"SO-probes-20261117/advdash.cjs","input":"pre-apiKey=zqd11","kind":"secret_absent","needle":"zqd11","note":"hyphen key; status at 7f8f060 not recorded"},
 {"id":"c326","source_receipt":"SO-probes-20261117/advdash.cjs","input":"{\"x-password\":\"zqd14\"}","kind":"secret_absent","needle":"zqd14","note":"hyphen JSON key; status at 7f8f060 not recorded"},
-{"id":"c327","source_receipt":"SO-probes-20261117/advdash.cjs","input":"auth-token=zqd15","kind":"secret_absent","needle":"zqd15","note":"hyphen key; status at 7f8f060 not recorded"}
+{"id":"c327","source_receipt":"SO-probes-20261117/advdash.cjs","input":"auth-token=zqd15","kind":"secret_absent","needle":"zqd15","note":"hyphen key; status at 7f8f060 not recorded"},
+{"id":"c328","source_receipt":"SO109-bce3383","input":"Cookie: a=1; theme=\"dark\"; session=zqQ1","kind":"secret_absent","needle":"zqQ1","note":"F17 quoted cookie value RFC6265"},
+{"id":"c329","source_receipt":"SO109-bce3383","input":"cookie: pref=\"x y\"; sid=zqQ2","kind":"secret_absent","needle":"zqQ2","note":"F17 quoted cookie pair"},
+{"id":"c330","source_receipt":"SO109-bce3383","input":"x Cookie: a=1 \" zqQ3","kind":"secret_absent","needle":"zqQ3","note":"F17 cookie after non-hyphen prefix"},
+{"id":"c331","source_receipt":"SO109-bce3383","input":"GET / HTTP/1.1\r\nCookie: a=\"1\"; sid=zqQ4\r\nHost: x","kind":"secret_absent","needle":"zqQ4","note":"F17 CRLF header block session"},
+{"id":"c332","source_receipt":"SO109-bce3383","input":"GET / HTTP/1.1\r\nCookie: a=\"1\"; sid=zqQ4\r\nHost: x","kind":"benign_intact","needle":"Host: x","note":"F17 CRLF block Host survives"},
+{"id":"c333","source_receipt":"SO109-bce3383","input":"{\"cookie\":\"a=\\\"1\\\"; sid=zqQ5\"}","kind":"secret_absent","needle":"zqQ5","note":"F17 JSON cookie string value"},
+{"id":"c334","source_receipt":"SO109-bce3383","input":"a\nCookie: x=1\nTX Hash: 0xabc123\nend","kind":"benign_intact","needle":"TX Hash: 0xabc123","note":"F17 multiline cookie must not swallow TX Hash"},
+{"id":"c335","source_receipt":"SO109-bce3383","input":"Authorization: Basic \"x\" zqQ6","kind":"secret_absent","needle":"zqQ6","note":"F18 Authorization must mask to EOL past quotes"}
 ]
