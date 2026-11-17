@@ -1,7 +1,7 @@
 /**
  * Operator reconciliation CLI for journaled spend-intent locks (F14).
  */
-import { describe, it, expect, beforeEach, afterEach } from 'vitest'
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -55,6 +55,34 @@ describe('agentpay-mcp spend-intents', () => {
     await expect(
       withSpendIntent('send_payment:8453:0x0:0xabc:1', async () => 'ok')
     ).resolves.toEqual({ value: 'ok', replayed: false })
+  })
+
+  it('default CLI writers redact RPC_URL quoted in operator error text', async () => {
+    const FAKE_RPC = 'https://rpc.fake.test/v2/FAKEcliOperatorRpcKey'
+    const prev = process.env.RPC_URL
+    process.env.RPC_URL = FAKE_RPC
+    const spendIntent = await import('../src/utils/spend-intent.js')
+    const spy = vi.spyOn(spendIntent, 'ensureJournalLoaded').mockImplementation(() => {
+      throw new Error(`HTTP request failed.\n\nURL: ${FAKE_RPC}\nDetails: boom`)
+    })
+  const errLines: string[] = []
+    const errSpy = vi.spyOn(process.stderr, 'write').mockImplementation((chunk) => {
+      errLines.push(String(chunk))
+      return true
+    })
+    try {
+      const code = runSpendIntentsCli(['list'])
+      const err = errLines.join('')
+      expect(code).toBe(1)
+      expect(err).not.toContain('FAKEcliOperatorRpcKey')
+      expect(err).not.toContain(FAKE_RPC)
+      expect(err).toContain('[redacted]')
+    } finally {
+      spy.mockRestore()
+      errSpy.mockRestore()
+      if (prev === undefined) delete process.env.RPC_URL
+      else process.env.RPC_URL = prev
+    }
   })
 
   it('a lock is still enforced if nobody reconciles it', async () => {
