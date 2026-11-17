@@ -81,6 +81,8 @@ const HASH_LABEL = /(tx|hash|transaction|block)/i
 // The optional quote after the name covers serialized JSON (`"Authorization":"Basic …"`).
 const HEADER_RE = /\b(authorization|proxy-authorization|x-payment-response|x-payment|cookie|set-cookie)("?\s*[:=]\s*)("?)[^\r\n"]+\3/gi
 const BEARER_RE = /\bBearer\s+[A-Za-z0-9._~+/=-]{8,}/g
+/** R6: JWT-shaped tokens (three base64url segments; header segment starts with eyJ). */
+const JWT_RE = /eyJ[A-Za-z0-9_-]*\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/g
 // Any whitespace between words, so a mnemonic split across lines still matches.
 const WORD_RUN_RE = /\b[a-z]{3,8}(?:[ \t\r\n]+[a-z]{3,8}){11,23}\b/g
 
@@ -109,7 +111,7 @@ function redactMnemonics(text: string): string {
  *  R3 credential-bearing URLs reduced to scheme://host:port (S3)
  *  R4 bare 32-byte hex unless labelled as a tx/block hash
  *  R5 BIP-39 mnemonics
- *  R6 Authorization / X-PAYMENT / cookie headers and bearer tokens
+ *  R6 Authorization / X-PAYMENT / cookie headers, bearer tokens, and JWTs
  *  R7 idempotent, total (never throws), linear-time patterns
  * Public addresses, tx hashes and the deployment identity are not secrets.
  */
@@ -123,6 +125,10 @@ export function redactSecrets(
     // R1 (S2: unconditional, before the R4 tx-hash exemption)
     for (const v of secretValues(env)) {
       out = out.replace(new RegExp(escapeRegExp(v), 'gi'), '[redacted]')
+      const encoded = encodeURIComponent(v)
+      if (encoded !== v) {
+        out = out.replace(new RegExp(escapeRegExp(encoded), 'gi'), '[redacted]')
+      }
     }
     // R2: viem's transport errors print `URL: <endpoint>` right after
     // "... request failed." or right before "Request body:".
@@ -135,6 +141,7 @@ export function redactSecrets(
     // R6
     out = out.replace(HEADER_RE, (_m, name: string, sep: string, q: string) => `${name}${sep}${q}[redacted]${q}`)
     out = out.replace(BEARER_RE, 'Bearer [redacted]')
+    out = out.replace(JWT_RE, '[redacted-jwt]')
     // R4
     out = out.replace(HEX64_RE, (match, _p, offset: number, whole: string) => {
       const before = whole.slice(Math.max(0, offset - 16), offset)

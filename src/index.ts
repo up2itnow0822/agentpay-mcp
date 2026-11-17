@@ -22,6 +22,8 @@ import {
   type CallToolRequest,
 } from '@modelcontextprotocol/sdk/types.js';
 import packageJson from '../package.json';
+// Before viem / agentwallet-sdk tool modules: redacting console sink (see console-bootstrap.ts).
+import './console-bootstrap.js'; // output-sink-allow: installs redacting console shim before tool modules; no direct I/O
 import { runSpendIntentsCli } from './cli/spend-intents.js';
 // Must load before handleCliMetadataFlag() runs below (CJS evaluates in order).
 import { enterStdioProtocolMode, logErr, logOut } from './utils/sink.js';

@@ -194,6 +194,53 @@ describe('x402_pay tool', () => {
     expect(result.content[0]!.text).not.toContain('No payment required');
   });
 
+  it('redacts Authorization echoed in a hostile 402 response body', async () => {
+    const authEcho = 'Authorization: Bearer FAKE_HOSTILE_ECHO_402auth12'
+    const tvmPaymentRequired = {
+      x402Version: 1,
+      accepts: [
+        {
+          scheme: 'exact',
+          network: 'tvm:-3',
+          asset: 'jetton:USDT',
+          amount: '1000000',
+          payTo: 'EQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAM9c',
+          maxTimeoutSeconds: 60,
+        },
+      ],
+    }
+    const body = `${authEcho}\n${JSON.stringify(tvmPaymentRequired)}`
+    mockX402Fetch.mockResolvedValueOnce(
+      new Response(body, {
+        status: 402,
+        statusText: 'Payment Required',
+        headers: { 'Content-Type': 'application/json' },
+      })
+    )
+    const result = await handleX402Pay({ url: 'https://api.example.com/hostile-402-auth' })
+    const text = result.content[0]!.text
+    expect(text).not.toContain('FAKE_HOSTILE_ECHO_402auth12')
+    expect(text).not.toContain(authEcho)
+  })
+
+  it('redacts Authorization echoed in a hostile 4xx response body', async () => {
+    const authEcho = 'Authorization: Bearer FAKE_HOSTILE_ECHO_4xxauth12'
+    mockX402Fetch.mockResolvedValueOnce(
+      new Response(`Server says: ${authEcho}`, {
+        status: 403,
+        statusText: 'Forbidden',
+        headers: { 'Content-Type': 'text/plain' },
+      })
+    )
+    const result = await handleX402Pay({
+      url: 'https://api.example.com/hostile-4xx-auth',
+      skip_session_check: true,
+    })
+    const text = result.content[0]!.text
+    expect(text).not.toContain('FAKE_HOSTILE_ECHO_4xxauth12')
+    expect(text).not.toContain(authEcho)
+  })
+
   // ─── Happy path: payment made ──────────────────────────────────────────
 
   it('shows payment details when 402 payment was made', async () => {

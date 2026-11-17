@@ -6,6 +6,7 @@
  * tests/output-sink.test.ts fails the build if any file in src/ or examples/
  * writes output without going through this module.
  */
+import { format } from 'node:util'
 import * as viemAccounts from 'viem/accounts'
 
 let bip39: Set<string> | null | undefined
@@ -86,6 +87,8 @@ const HASH_LABEL = /(tx|hash|transaction|block)/i
 // The optional quote after the name covers serialized JSON (`"Authorization":"Basic …"`).
 const HEADER_RE = /\b(authorization|proxy-authorization|x-payment-response|x-payment|cookie|set-cookie)("?\s*[:=]\s*)("?)[^\r\n"]+\3/gi
 const BEARER_RE = /\bBearer\s+[A-Za-z0-9._~+/=-]{8,}/g
+/** R6: JWT-shaped tokens (three base64url segments; header segment starts with eyJ). */
+const JWT_RE = /eyJ[A-Za-z0-9_-]*\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/g
 // Any whitespace between words, so a mnemonic split across lines still matches.
 const WORD_RUN_RE = /\b[a-z]{3,8}(?:[ \t\r\n]+[a-z]{3,8}){11,23}\b/g
 
@@ -114,7 +117,7 @@ function redactMnemonics(text: string): string {
  *  R3 credential-bearing URLs reduced to scheme://host:port (S3)
  *  R4 bare 32-byte hex unless labelled as a tx/block hash
  *  R5 BIP-39 mnemonics
- *  R6 Authorization / X-PAYMENT / cookie headers and bearer tokens
+ *  R6 Authorization / X-PAYMENT / cookie headers, bearer tokens, and JWTs
  *  R7 idempotent, total (never throws), linear-time patterns
  * Public addresses, tx hashes and the deployment identity are not secrets.
  */
@@ -128,6 +131,10 @@ export function redactSecrets(
     // R1 (S2: unconditional, before the R4 tx-hash exemption)
     for (const v of secretValues(env)) {
       out = out.replace(new RegExp(escapeRegExp(v), 'gi'), '[redacted]')
+      const encoded = encodeURIComponent(v)
+      if (encoded !== v) {
+        out = out.replace(new RegExp(escapeRegExp(encoded), 'gi'), '[redacted]')
+      }
     }
     // R2: viem's transport errors print `URL: <endpoint>` right after
     // "... request failed." or right before "Request body:".
@@ -140,6 +147,7 @@ export function redactSecrets(
     // R6
     out = out.replace(HEADER_RE, (_m, name: string, sep: string, q: string) => `${name}${sep}${q}[redacted]${q}`)
     out = out.replace(BEARER_RE, 'Bearer [redacted]')
+    out = out.replace(JWT_RE, '[redacted-jwt]')
     // R4
     out = out.replace(HEX64_RE, (match, _p, offset: number, whole: string) => {
       const before = whole.slice(Math.max(0, offset - 16), offset)
@@ -194,8 +202,54 @@ export function isStdioProtocolMode(): boolean {
 
 /** Redacted line to stderr. */
 export function logErr(line: string): void {
-  // console.error writes to stderr; kept so existing log spies keep working.
-  console.error(safeErrorText(line))
+  process.stderr.write(safeErrorText(line) + '\n')
+}
+
+type ConsoleLevel = 'log' | 'info' | 'debug' | 'warn' | 'error'
+
+const nativeConsole: Record<ConsoleLevel, (...args: unknown[]) => void> = {
+  log: console.log.bind(console),
+  info: console.info.bind(console),
+  debug: console.debug.bind(console),
+  warn: console.warn.bind(console),
+  error: console.error.bind(console),
+}
+
+let stdioConsoleSinkInstalled = false
+
+/**
+ * Route SDK / dependency `console.*` through the redacting sink. In MCP stdio
+ * protocol mode every level goes to stderr via {@link safeErrorText}; otherwise
+ * warn/error stay on stderr and log/info/debug on stdout (still redacted).
+ */
+export function installStdioConsoleSink(): void {
+  if (stdioConsoleSinkInstalled) return
+  stdioConsoleSinkInstalled = true
+  const forward = (level: ConsoleLevel, args: unknown[]): void => {
+    const line = format(...args)
+    if (stdioProtocolMode) {
+      process.stderr.write(safeErrorText(line) + '\n') // output-sink-allow: stdio console shim; same rules as logErr
+      return
+    }
+    const redacted = safeText(line) + '\n'
+    if (level === 'error' || level === 'warn') {
+      process.stderr.write(redacted)
+    } else {
+      process.stdout.write(redacted)
+    }
+  }
+  for (const level of ['log', 'info', 'debug', 'warn', 'error'] as const) {
+    console[level] = (...args: unknown[]) => forward(level, args)
+  }
+}
+
+/** Test hook: restore Node's console and allow reinstall. */
+export function _resetStdioConsoleSinkForTests(): void {
+  if (!stdioConsoleSinkInstalled) return
+  for (const level of ['log', 'info', 'debug', 'warn', 'error'] as const) {
+    console[level] = nativeConsole[level]
+  }
+  stdioConsoleSinkInstalled = false
 }
 
 /**

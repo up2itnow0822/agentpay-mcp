@@ -10,6 +10,18 @@ const FAKE_KEY = '0x' + '1f'.repeat(32)
 const FAKE_RPC = 'https://base-mainnet.example-rpc.test/v2/FAKEfakeFAKE0123456789abcd'
 const ENV = { RPC_URL: FAKE_RPC, AGENT_PRIVATE_KEY: FAKE_KEY, SOME_API_KEY: 'fake-api-key-value-123', OTEL_AUTH: 'fake-auth-0987654' }
 
+describe('R1: URL-encoded secret env values', () => {
+  it('masks encodeURIComponent(RPC_URL) when it differs from the raw value', () => {
+    const rpc = 'https://rpc.fake.test/v2/key=a/b'
+    const encoded = encodeURIComponent(rpc)
+    expect(encoded).not.toBe(rpc)
+    const out = redactSecrets(`probe ?u=${encoded}`, { RPC_URL: rpc })
+    expect(out).not.toContain('a/b')
+    expect(out).not.toContain(encoded)
+    expect(out).toContain('[redacted]')
+  })
+})
+
 describe('R1: configured secret values verbatim', () => {
   it.each([
     ['RPC_URL', FAKE_RPC],
@@ -94,6 +106,21 @@ describe('R5: BIP-39 mnemonics', () => {
   })
 })
 
+describe('R6: JWT-shaped tokens', () => {
+  const jwt =
+    'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJmYWtlIn0.FAKEsigFAKEsigFAKEsigFAKEsigFAKEsig00'
+  it('masks a bare JWT', () => {
+    const out = redactSecrets(`token ${jwt} end`, {})
+    expect(out).not.toContain(jwt)
+    expect(out).toContain('[redacted-jwt]')
+  })
+  it('masks a JWT inside JSON', () => {
+    const out = redactSecrets(`{"access_token":"${jwt}"}`, {})
+    expect(out).not.toContain(jwt)
+    expect(out).toContain('[redacted-jwt]')
+  })
+})
+
 describe('R6: auth headers and bearer tokens', () => {
   it.each([
     ['Authorization: Bearer FAKEtoken123456', 'FAKEtoken123456'],
@@ -108,7 +135,9 @@ describe('R6: auth headers and bearer tokens', () => {
 
 describe('R7: idempotent, total, bounded', () => {
   it('is idempotent on mixed input', () => {
-    const x = `${FAKE_RPC} tx hash: ${FAKE_KEY} URL: https://u:p@h.test/x?key=1 Authorization: Bearer FAKEtoken123456`
+    const jwt =
+      'eyJhbGciOiJIUzI1NiJ9.eyJmYWtlIjp0cnVlfQ.FAKEjwtFAKEjwtFAKEjwtFAKEjwtFAKEjwt00'
+    const x = `${FAKE_RPC} tx hash: ${FAKE_KEY} URL: https://u:p@h.test/x?key=1 Authorization: Bearer FAKEtoken123456 ${jwt}`
     const once = redactSecrets(x, ENV)
     expect(redactSecrets(once, ENV)).toBe(once)
   })
