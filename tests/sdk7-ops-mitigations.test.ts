@@ -103,6 +103,17 @@ describe('F4 #11 swap_tokens disabled (route A)', () => {
     expect(result.content[0].text).toMatch(/disabled in AgentPay MCP 5\.0\.0 \(route A\)/)
     expect(swapSpy).not.toHaveBeenCalled()
   })
+
+  it('F4 #11 accepts swap_tokens without minAmountOut while route A is disabled', async () => {
+    const result = await handleSwapTokens({
+      fromSymbol: 'USDC',
+      toSymbol: 'WETH',
+      amount: '1',
+      chainId: 8453,
+    })
+    expect(result.isError).toBe(true)
+    expect(result.content[0].text).toMatch(/disabled in AgentPay MCP 5\.0\.0 \(route A\)/)
+  })
 })
 
 describe('F4 #12 bounded CCTP attestation poll', () => {
@@ -338,8 +349,28 @@ describe('x402 #25 bounded 402 payload', () => {
 
   it('x402 #25 slow body still fails closed when it exceeds the byte cap', async () => {
     const big = JSON.stringify({ ...baseReq, pad: 'z'.repeat(X402_MAX_402_BODY_BYTES + 10) })
-  const response = new Response(big)
+    const response = new Response(big)
     await expect(readBounded402JsonBody(response)).rejects.toThrow(/exceeds/)
+  })
+
+  it('x402 #25 guard refuses 200 KiB invalid JSON without swallowing the error', async () => {
+    const junk = 'not-json'.padEnd(200 * 1024, 'x')
+    const probe = new Response(junk, { status: 402 })
+    await expect(guardX402ProbeResponse('https://api.example.com/pay', probe)).rejects.toThrow(
+      /exceeds|not valid JSON/
+    )
+  })
+
+  it('x402 #25 guard refuses invalid UTF-8 bodies', async () => {
+    const bad = new Uint8Array([0xff, 0xfe, 0xfd])
+    const probe = new Response(bad, { status: 402 })
+    await expect(guardX402ProbeResponse('https://api.example.com/pay', probe)).rejects.toThrow()
+  })
+
+  it('x402 #25 guard refuses oversize valid JSON before structural checks', async () => {
+    const big = JSON.stringify({ ...baseReq, pad: 'z'.repeat(X402_MAX_402_BODY_BYTES + 16) })
+    const probe = new Response(big, { status: 402 })
+    await expect(guardX402ProbeResponse('https://api.example.com/pay', probe)).rejects.toThrow(/exceeds/)
   })
 })
 
@@ -402,8 +433,8 @@ describe('F4 identity #6 on-chain verification gates', () => {
     } as never)
     const trusted = JSON.parse((await handleVerifyAgentUAID({ uaid: UAID })).content[0].text)
     expect(trusted.brokerAttested).toBe(true)
-    expect(trusted.verified).toBe(true)
-    expect(trusted.identity.owner).toBe(OTHER_OWNER)
+    expect(trusted.verified).toBe(false)
+    expect(trusted.identity.owner).toBe(AGENT)
   })
 
   it('#6(b) verified false when ERC-8004 lookup rejects agentId', async () => {
@@ -421,6 +452,56 @@ describe('F4 identity #6 on-chain verification gates', () => {
     const trusted = JSON.parse((await handleVerifyAgentUAID({ uaid: UAID })).content[0].text)
     expect(trusted.verified).toBe(false)
     expect(trusted.brokerAttested).toBe(true)
+  })
+
+  it('#6(d) verified false when broker agentId disagrees with UAID uid', async () => {
+    const resolver = identityIo.createBoundedUaidResolver()
+    vi.spyOn(resolver, 'resolve').mockResolvedValue({
+      resolved: true,
+      uaid: UAID,
+      protocol: 'erc8004',
+      chain: 'eip155:8453',
+      registryVerified: true,
+      identity: {
+        agentId: '99',
+        owner: AGENT,
+        chain: 'eip155:8453',
+        protocol: 'erc8004',
+      },
+    })
+    vi.spyOn(identityIo, 'createBoundedUaidResolver').mockReturnValue(resolver as never)
+    const lookup = vi.spyOn(ERC8004Client.prototype, 'lookupAgentIdentity').mockClear()
+    lookup.mockReset()
+    const trusted = JSON.parse((await handleVerifyAgentUAID({ uaid: UAID })).content[0].text)
+    expect(trusted.verified).toBe(false)
+    expect(lookup).not.toHaveBeenCalled()
+  })
+
+  it('#6(e) verified false when broker chain disagrees with UAID chain', async () => {
+    const resolver = identityIo.createBoundedUaidResolver()
+    vi.spyOn(resolver, 'resolve').mockResolvedValue({
+      resolved: true,
+      uaid: UAID,
+      protocol: 'erc8004',
+      chain: 'eip155:84532',
+      registryVerified: true,
+      identity: {
+        agentId: '42',
+        owner: AGENT,
+        chain: 'eip155:84532',
+        protocol: 'erc8004',
+      },
+    })
+    vi.spyOn(identityIo, 'createBoundedUaidResolver').mockReturnValue(resolver as never)
+  vi.spyOn(ERC8004Client.prototype, 'lookupAgentIdentity').mockResolvedValue({
+      agentId: 42n,
+      owner: AGENT,
+      agentURI: 'ipfs://chain',
+      agentWallet: AGENT,
+      registrationFile: null,
+    } as never)
+    const trusted = JSON.parse((await handleVerifyAgentUAID({ uaid: UAID })).content[0].text)
+    expect(trusted.verified).toBe(false)
   })
 
   it('#6(c) non-EVM UAID never sets verified via ERC-8004', async () => {

@@ -136,10 +136,10 @@ async function readOnChainBinding(
 export async function assertExpectedSmartWallet(
   wallet: AgentWalletInstance,
   config: AgentPayConfig,
-  options: { requireBinding?: boolean } = {}
+  options: { requireBinding?: boolean } = { requireBinding: true }
 ): Promise<void> {
   rejectUnverifiedWalletOptOut()
-  if (options.requireBinding) {
+  if (options.requireBinding !== false) {
     await ensureWalletStartupVerified(wallet, config)
     return
   }

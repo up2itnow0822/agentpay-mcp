@@ -126,6 +126,13 @@ export function assertX402FollowUpUrlMatches(requestUrl: string, responseUrl: st
 }
 
 /** Run F23 + F25 checks on an already-received 402 probe. */
+function assertX402ResourceUrlMatches(requestUrl: string, payload: unknown): void {
+  if (!payload || typeof payload !== 'object') return
+  const resourceUrl = (payload as { resource?: { url?: unknown } }).resource?.url
+  if (typeof resourceUrl !== 'string' || resourceUrl.length === 0) return
+  assertX402FollowUpUrlMatches(requestUrl, resourceUrl)
+}
+
 export async function guardX402ProbeResponse(requestUrl: string, probe: Response): Promise<void> {
   const header =
     probe.headers.get('payment-required') ?? probe.headers.get('x-payment-required')
@@ -137,6 +144,7 @@ export async function guardX402ProbeResponse(requestUrl: string, probe: Response
     try {
       const decoded = decodeX402PaymentHeader(header)
       assertBoundedX402PaymentRequired(decoded)
+      assertX402ResourceUrlMatches(requestUrl, decoded)
     } catch (error: unknown) {
       if (error instanceof X402MalformedPaymentRequiredError) throw error
       throw new X402MalformedPaymentRequiredError('x402 PAYMENT-REQUIRED header is not valid.')
@@ -147,16 +155,18 @@ export async function guardX402ProbeResponse(requestUrl: string, probe: Response
   if (bodyBytes.byteLength === 0) {
     return
   }
-  try {
-    const body = JSON.parse(new TextDecoder('utf-8').decode(bodyBytes))
-    if (bodyBytes.byteLength > X402_MAX_402_BODY_BYTES) {
-      throw new X402MalformedPaymentRequiredError(
-        `x402 response body exceeds ${X402_MAX_402_BODY_BYTES} bytes.`
-      )
-    }
-    assertBoundedX402PaymentRequired(body)
-  } catch (error: unknown) {
-    if (error instanceof X402MalformedPaymentRequiredError) throw error
-    return
+  if (bodyBytes.byteLength > X402_MAX_402_BODY_BYTES) {
+    throw new X402MalformedPaymentRequiredError(
+      `x402 response body exceeds ${X402_MAX_402_BODY_BYTES} bytes.`
+    )
   }
+  const text = new TextDecoder('utf-8', { fatal: true }).decode(bodyBytes)
+  let body: unknown
+  try {
+    body = JSON.parse(text)
+  } catch {
+    throw new X402MalformedPaymentRequiredError('x402 response body is not valid JSON.')
+  }
+  assertBoundedX402PaymentRequired(body)
+  assertX402ResourceUrlMatches(requestUrl, body)
 }

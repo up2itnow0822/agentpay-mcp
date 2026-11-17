@@ -11,19 +11,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Notes for installers
 - npm may print a **deprecation notice** for `agentwallet-sdk@7.0.0` when installing
-  `agentpay-mcp@5.0.0`. That upstream advisory reflects issues addressed in
-  **agentwallet-sdk 8.0.0**, not an instruction to stop using this MCP release today.
+  `agentpay-mcp@5.0.0`. The SDK line in use is deprecated; **agentwallet-sdk 8.x**
+  is the planned next coordinated adoption with **agentpay-mcp 8.0.0**.
 - **5.0.0 remains on SDK 7.0.0** on purpose: wrapper mitigations in this package
-  enforce factory wallet binding, x402 term binding, swap output floors, queued-
-  transfer detection, bounded bridge attestation polling, and bounded identity
-  broker I/O without requiring an SDK major bump.
-- Plan to adopt **agentpay-mcp 8.0.0** with **agentwallet-sdk 8.x** as the next
-  coordinated release once operator migration material is ready.
+  enforce factory wallet binding, x402 term binding, queued-transfer detection, and
+  bounded identity broker I/O without requiring an SDK major bump.
+- Upgrading from **4.3.0**: reinstall, set deployment identity env
+  (`AGENT_WALLET_CODE_HASH` or factory binding), expect `swap_tokens` and
+  `bridge_usdc` disabled on the MCP surface (route A), and review x402 pay-to /
+  cap binding requirements on paid tools.
 
 ### STOP (requires agentwallet-sdk 8.x — not in this release)
 - Native SDK 8 deployment identity inside `createWallet` (factory binding at SDK layer).
 - SDK 8 structured `agentTransferToken` return values (`executed` / `queued` objects without receipt parsing).
-- SwapModule AgentAccount execution path with SDK-enforced output floors (this release uses `minAmountOut` + quote pre-check on SDK 7).
+- SwapModule AgentAccount execution path with SDK-enforced output floors (SDK 8).
 
 ### Breaking
 - **Breaking:** `swap_tokens` and `bridge_usdc` are **disabled on the MCP tool
@@ -39,11 +40,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `AGENT_WALLET_TOKEN_ID`) is enforced before `send_payment`, `send_token`,
   and x402 writes (`requireBinding` on value-moving handlers).
 - When swaps are re-enabled, `minAmountOut` is required on the execution path;
-  the MCP schema keeps `minAmountOut` optional while route A is disabled.
+  while route A is disabled the MCP schema keeps `minAmountOut` optional.
 - Token transfers classify queued owner-approval outcomes from receipts instead
   of reporting "Payment Sent" when nothing moved.
-- `bridge_usdc` caps Circle attestation polls and refuses attestations whose
-  message does not match the local burn.
+- Internal bridge execution paths keep attestation guards for regression tests;
+  the MCP `bridge_usdc` tool remains disabled on route A.
 - UAID resolution uses bounded timeout and cache TTL from operator env.
 
 ---

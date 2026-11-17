@@ -233,6 +233,43 @@ const KNOWN_UAID_PROTOCOLS = new Set([
 /** CAIP-2 EVM chain reference, e.g. eip155:8453. */
 const EIP155_CHAIN = /^eip155:\d{1,12}$/
 
+const ERC8004_UAID_RE =
+  /^uaid:aid:(eip155:\d{1,12}):(0x[0-9a-fA-F]{40});uid=(\d{1,20});proto=erc8004$/i
+
+export type Erc8004UaidRefs = {
+  chain: string
+  chainId: number
+  registry: Address
+  uid: string
+}
+
+/** Chain, registry contract, and agent uid are taken only from the caller-supplied UAID string. */
+export function parseErc8004UaidFromInput(uaid: string): Erc8004UaidRefs | null {
+  const m = uaid.match(ERC8004_UAID_RE)
+  if (!m) return null
+  const registry = trustedAddress(m[2])
+  if (!registry) return null
+  const chain = m[1].toLowerCase()
+  const chainId = Number(chain.slice('eip155:'.length))
+  if (!Number.isSafeInteger(chainId) || chainId <= 0) return null
+  return { chain, chainId, registry, uid: m[3] }
+}
+
+function sameAddress(a: Address, b: Address): boolean {
+  return a.toLowerCase() === b.toLowerCase()
+}
+
+function ownerClaimMatchesOnChain(
+  onChainOwner: Address,
+  onChainWallet: Address | undefined,
+  brokerOwner: unknown
+): boolean {
+  const claimed = trustedAddress(brokerOwner)
+  if (!claimed) return false
+  if (sameAddress(claimed, onChainOwner)) return true
+  return onChainWallet !== undefined && sameAddress(claimed, onChainWallet)
+}
+
 /**
  * A UAID that may be echoed in the trusted summary: a restricted charset with
  * no whitespace, so it cannot carry a sentence of instructions.
@@ -527,29 +564,67 @@ export async function handleVerifyAgentUAID(
       )
     }
 
+    const config = getConfig()
     const resolver = createBoundedUaidResolver()
     const resolution = await resolver.resolve(input.uaid)
     const brokerAttested = resolution.registryVerified === true
     trusted['brokerAttested'] = brokerAttested
     trusted['verified'] = false
 
-    if (parsed.protocol === 'erc8004') {
-      const chainRef = resolution.chain ?? (resolution.identity as { chain?: string } | null)?.chain
-      const chainIdMatch =
-        typeof chainRef === 'string' ? chainRef.match(/^eip155:(\d{1,12})$/) : null
-      const agentIdRaw = resolution.identity?.agentId
-      const agentId = trustedDecimalId(agentIdRaw)
-      if (chainIdMatch && agentId) {
-        const chainId = Number(chainIdMatch[1])
-        const chainName = CHAIN_ID_TO_NAME[chainId]
-        if (chainName) {
-          try {
-            const identityClient = new ERC8004Client({ chain: chainName })
-            await identityClient.lookupAgentIdentity(BigInt(agentId))
-            trusted['verified'] = true
-          } catch {
-            trusted['verified'] = false
+    const uaidRefs = parseErc8004UaidFromInput(input.uaid)
+    const brokerIdentity = resolution.identity as Record<string, unknown> | null | undefined
+    const brokerChain =
+      typeof resolution.chain === 'string'
+        ? resolution.chain
+        : typeof brokerIdentity?.chain === 'string'
+          ? (brokerIdentity.chain as string)
+          : undefined
+    const brokerAgentId = trustedDecimalId(brokerIdentity?.agentId)
+    const brokerRegistry = trustedAddress(brokerIdentity?.registry)
+
+    if (parsed.protocol === 'erc8004' && resolution.protocol === 'erc8004' && uaidRefs) {
+      const chainName = CHAIN_ID_TO_NAME[uaidRefs.chainId]
+      const chainMatchesConfig = uaidRefs.chainId === config.chainId
+      const chainMatchesBroker =
+        brokerChain === undefined || brokerChain.toLowerCase() === uaidRefs.chain
+      const agentIdMatchesBroker =
+        brokerAgentId === undefined || brokerAgentId === uaidRefs.uid
+      const registryMatchesBroker =
+        brokerRegistry === undefined || sameAddress(brokerRegistry, uaidRefs.registry)
+
+      if (
+        chainName &&
+        chainMatchesConfig &&
+        chainMatchesBroker &&
+        agentIdMatchesBroker &&
+        registryMatchesBroker
+      ) {
+        try {
+          const identityClient = new ERC8004Client({ chain: chainName })
+          const onChain = await identityClient.lookupAgentIdentity(BigInt(uaidRefs.uid))
+          const onChainOwner = trustedAddress(onChain.owner)
+          const onChainWallet = trustedAddress(onChain.agentWallet)
+          if (onChainOwner) {
+            trusted['verified'] = ownerClaimMatchesOnChain(
+              onChainOwner,
+              onChainWallet,
+              brokerIdentity?.owner
+            )
+            const trustedId: Record<string, unknown> = {}
+            const untrustedId: Record<string, unknown> = {}
+            placeTyped(trustedId, untrustedId, 'agentId', String(onChain.agentId), trustedDecimalId)
+            placeTyped(trustedId, untrustedId, 'owner', onChainOwner, trustedAddress)
+            placeTyped(trustedId, untrustedId, 'paymentAddress', onChainWallet, trustedAddress)
+            placeTyped(trustedId, untrustedId, 'chain', uaidRefs.chain, (v) =>
+              typeof v === 'string' && EIP155_CHAIN.test(v) ? v : undefined
+            )
+            trusted['identity'] = trustedId
+            if (brokerIdentity) {
+              untrusted['identity'] = brokerIdentity
+            }
           }
+        } catch {
+          trusted['verified'] = false
         }
       }
     }
@@ -564,23 +639,23 @@ export async function handleVerifyAgentUAID(
     })
 
     const id = result['identity'] ?? resolution.identity
-    if (id && typeof id === 'object') {
-      const rawId = id as Record<string, unknown>
-      const trustedId: Record<string, unknown> = {}
-      const untrustedId: Record<string, unknown> = {}
-      placeTyped(trustedId, untrustedId, 'agentId', rawId['agentId'], trustedDecimalId)
-      // Non-EVM owners / payment addresses (Hedera accounts, Solana keys) are
-      // not validated here and so only appear inside the fence.
-      placeTyped(trustedId, untrustedId, 'owner', rawId['owner'], trustedAddress)
-      placeTyped(trustedId, untrustedId, 'paymentAddress', rawId['paymentAddress'], trustedAddress)
-      placeTyped(trustedId, untrustedId, 'chain', rawId['chain'], (v) =>
-        typeof v === 'string' && EIP155_CHAIN.test(v) ? v : undefined
-      )
-      untrustedId['agentURI'] = rawId['agentURI'] ?? null
-      trusted['identity'] = trustedId
-      untrusted['identity'] = untrustedId
-    } else {
-      trusted['identity'] = null
+    if (trusted['identity'] === undefined) {
+      if (id && typeof id === 'object') {
+        const rawId = id as Record<string, unknown>
+        const trustedId: Record<string, unknown> = {}
+        const untrustedId: Record<string, unknown> = {}
+        placeTyped(trustedId, untrustedId, 'agentId', rawId['agentId'], trustedDecimalId)
+        placeTyped(trustedId, untrustedId, 'owner', rawId['owner'], trustedAddress)
+        placeTyped(trustedId, untrustedId, 'paymentAddress', rawId['paymentAddress'], trustedAddress)
+        placeTyped(trustedId, untrustedId, 'chain', rawId['chain'], (v) =>
+          typeof v === 'string' && EIP155_CHAIN.test(v) ? v : undefined
+        )
+        untrustedId['agentURI'] = rawId['agentURI'] ?? null
+        trusted['identity'] = trustedId
+        untrusted['identity'] = untrustedId
+      } else {
+        trusted['identity'] = null
+      }
     }
 
     // Broker/SDK error strings are remote-controlled free text.

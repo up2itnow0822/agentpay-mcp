@@ -137,6 +137,31 @@ describe('#3 startup gate (a)-(f)', () => {
     await expect(ensureWalletStartupVerified(wallet, config)).rejects.toThrow(/EIP-7702/)
   })
 
+  it('(d1) refuses keccak256(code) that does not match AGENT_WALLET_CODE_HASH', async () => {
+    const code = ('0x' + '60'.repeat(20)) as Hex
+    const hash = keccak256(code)
+    Object.assign(process.env, {
+      AGENT_PRIVATE_KEY: AGENT_KEY,
+      AGENT_WALLET_ADDRESS: ACCOUNT,
+      AGENT_WALLET_CODE_HASH: ('0x' + '11'.repeat(32)) as Hex,
+      CHAIN_ID: '8453',
+    })
+    delete process.env.AGENT_WALLET_FACTORY
+    delete process.env.AGENT_WALLET_TOKEN_CONTRACT
+    delete process.env.AGENT_WALLET_TOKEN_ID
+    const wallet = makeWallet()
+    vi.spyOn(wallet.publicClient, 'getChainId').mockResolvedValue(8453)
+    vi.spyOn(wallet.publicClient, 'getCode').mockResolvedValue(code)
+    Object.defineProperty(wallet.contract, 'read', {
+      value: { isOperatorActive: vi.fn().mockResolvedValue(true) },
+      configurable: true,
+    })
+    _resetWalletStartupGate()
+    const config = loadConfig()
+    await expect(ensureWalletStartupVerified(wallet, config)).rejects.toThrow(/does not match/)
+    expect(hash).toBeDefined()
+  })
+
   it('(d) accepts keccak256(code) matching AGENT_WALLET_CODE_HASH', async () => {
     const code = ('0x' + '60'.repeat(20)) as Hex
     const hash = keccak256(code)

@@ -1,7 +1,8 @@
 /**
  * B3 — SDK x402 / policy import surface (#2, #27, #28) and client wiring guards.
  */
-import { readFileSync } from 'node:fs'
+import { readdirSync, readFileSync, statSync } from 'node:fs'
+import { join } from 'node:path'
 import { describe, expect, it, vi } from 'vitest'
 import * as agentwalletSdk from 'agentwallet-sdk'
 import { createX402Client, SpendingPolicy, wrapWithX402, type PaymentIntent } from 'agentwallet-sdk'
@@ -54,7 +55,25 @@ describe('PaymentIntent and SpendingPolicy SDK surface', () => {
   })
 })
 
-describe('wrapWithX402 import surface', () => {
+describe('x402 #28 wrapWithX402 import surface', () => {
+  function walkTsFiles(dir: string): string[] {
+    const out: string[] = []
+    for (const ent of readdirSync(dir)) {
+      const p = join(dir, ent)
+      if (statSync(p).isDirectory()) out.push(...walkTsFiles(p))
+      else if (p.endsWith('.ts') || p.endsWith('.tsx')) out.push(p)
+    }
+    return out
+  }
+
+  it('#28 fails when any file under src imports wrapWithX402', () => {
+    const root = new URL('../src', import.meta.url).pathname
+    const offenders = walkTsFiles(root).filter((file) => {
+      const text = readFileSync(file, 'utf8')
+      return /\bimport\b[^;]*wrapWithX402/.test(text) || /\bfrom\s+['"][^'"]+['"][^;]*wrapWithX402/.test(text)
+    })
+    expect(offenders).toEqual([])
+  })
   it('wrapWithX402 is exported and callable without autoPay', () => {
     expect(typeof wrapWithX402).toBe('function')
     const wallet = createWallet({
@@ -76,6 +95,50 @@ describe('wrapWithX402 import surface', () => {
 })
 
 describe('x402 #23 handler follow-up URL binding', () => {
+  it('refuses when payment-required resource.url does not match the probe request', async () => {
+    const wallet = createWallet({
+      accountAddress: '0x9999999999999999999999999999999999999999',
+      chain: 'base',
+      walletClient: createWalletClient({
+        account: privateKeyToAccount(('0x' + '11'.repeat(32)) as `0x${string}`),
+        chain: base,
+        transport: custom({ request: async () => null }),
+      }),
+    })
+    const paymentRequired = {
+      x402Version: 1,
+      resource: { url: 'https://shop.example.com/other?item=b' },
+      accepts: [
+        {
+          scheme: 'exact',
+          network: 'base:8453',
+          asset: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913',
+          amount: '1000',
+          payTo: '0x1111111111111111111111111111111111111111',
+          maxTimeoutSeconds: 60,
+        },
+      ],
+    }
+    const transport = async () => {
+      const probe = new Response(JSON.stringify(paymentRequired), {
+        status: 402,
+        headers: { 'Content-Type': 'application/json' },
+      })
+      Object.defineProperty(probe, 'url', {
+        value: 'https://shop.example.com/buy?item=a',
+        configurable: true,
+      })
+      return probe
+    }
+    const { client } = createAgentPayX402Client(wallet, {
+      chainId: 8453,
+      maxPaymentEth: '1',
+      approved: { payTo: '0x1111111111111111111111111111111111111111' },
+      transport,
+    })
+    await expect(client.fetch('https://shop.example.com/buy?item=a')).rejects.toThrow(/path|query/)
+  })
+
   it('refuses when probe URL is /resource/b but request was /buy?item=a', async () => {
     const wallet = createWallet({
       accountAddress: '0x9999999999999999999999999999999999999999',

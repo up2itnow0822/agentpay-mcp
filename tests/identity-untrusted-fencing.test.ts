@@ -375,7 +375,7 @@ describe('verify_agent_uaid fencing', () => {
       identity: {
         agentId: '7',
         owner: getAddress(OWNER),
-        paymentAddress: null,
+        paymentAddress: getAddress(WALLET),
         chain: 'eip155:8453',
       },
       hasError: true,

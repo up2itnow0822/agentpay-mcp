@@ -165,6 +165,30 @@ describe('bridge and identity bounds (#12/#14, #6/#18/#29)', () => {
     expect(() => loadWalletBindingIdentity()).toThrow(/Wallet binding is incomplete/)
   })
 
+  it('requireBinding defaults to true and runs the deployment identity startup gate', async () => {
+    Object.assign(process.env, {
+      AGENT_PRIVATE_KEY: AGENT_KEY,
+      AGENT_WALLET_ADDRESS: ACCOUNT,
+      CHAIN_ID: '8453',
+    })
+    _resetSingletons()
+    const startup = vi
+      .spyOn(walletPreflight, 'ensureWalletStartupVerified')
+      .mockRejectedValue(new Error('deployment identity missing'))
+    const wallet = createWallet({
+      accountAddress: ACCOUNT,
+      chain: 'base',
+      walletClient: createWalletClient({
+        account: privateKeyToAccount(AGENT_KEY),
+        chain: base,
+        transport: custom({ request: async () => null }),
+      }),
+    })
+    const config = loadConfig()
+    await expect(assertExpectedSmartWallet(wallet, config)).rejects.toThrow(/deployment identity missing/)
+    expect(startup).toHaveBeenCalled()
+  })
+
   it('requireBinding=true always runs deployment identity startup gate', async () => {
     Object.assign(process.env, {
       AGENT_PRIVATE_KEY: AGENT_KEY,
