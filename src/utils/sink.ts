@@ -118,7 +118,11 @@ const HTTP_HEADER_NON_COOKIE_ALT = HTTP_REDACT_HEADER_NAMES.filter(
   (n) => n !== 'cookie' && n !== 'set-cookie'
 ).join('|')
 const COOKIE_HEADER_LINE_RE = new RegExp(
-  `(?<!set-)(?<![a-zA-Z0-9])(${HTTP_HEADER_COOKIE_ONLY})(\\s*[:=]\\s*)((?:[^\\r\\n"\\\\]|\\\\.)*)`,
+  `(?<!set-)(?<![a-zA-Z0-9])(${HTTP_HEADER_COOKIE_ONLY})(\\s*[:=]\\s*)([^\\r\\n]*)`,
+  'gi'
+)
+const JSON_EMBEDDED_COOKIE_LINE_RE = new RegExp(
+  `(?:\\\\r\\\\n|\\\\n)\\s*(${HTTP_HEADER_COOKIE_ONLY})(\\s*[:=]\\s*)((?:[^"\\\\]|\\\\.)*)`,
   'gi'
 )
 const SET_COOKIE_HEADER_LINE_RE = new RegExp(
@@ -126,7 +130,7 @@ const SET_COOKIE_HEADER_LINE_RE = new RegExp(
   'gi'
 )
 const HEADER_RE = new RegExp(
-  `\\b(${HTTP_HEADER_NON_COOKIE_ALT})(\\s*[:=]\\s*)(['"]?)[^\\r\\n'"]*\\3`,
+  `\\b(${HTTP_HEADER_NON_COOKIE_ALT})(\\s*[:=]\\s*)([^\\r\\n]*)`,
   'gi'
 )
 const JSON_COOKIE_HEADER_ARRAY_RE = new RegExp(
@@ -286,8 +290,12 @@ export function redactSecrets(
       (_m, name: string, sep: string, val: string) => `${name}${sep}${redactSetCookieHeaderValue(val)}`
     )
     out = out.replace(
-      /(?:\\r\\n|\\n|[\r\n]+)\s*(cookie)\s*:\s*(?:[^"\\]|\\.)*/gi,
-      (m) => m.replace(/(\s*)(cookie)(\s*:\s*)(?:[^"\\]|\\.)*/i, '$1$2$3[redacted]')
+      JSON_EMBEDDED_COOKIE_LINE_RE,
+      (_m, name: string, sep: string) => `${name}${sep}[redacted]`
+    )
+    out = out.replace(
+      /(?:\r\n|\n|\r)\s*(cookie)\s*:\s*[^\r\n]*/gi,
+      (m) => m.replace(/(cookie\s*:\s*)[^\r\n]*/i, '$1[redacted]')
     )
     out = out.replace(
       COOKIE_HEADER_LINE_RE,
@@ -301,7 +309,7 @@ export function redactSecrets(
       SINGLE_QUOTED_COOKIE_HEADER_ARRAY_RE,
       (_m, name: string, body: string) => `'${name}': ${redactHeaderArrayBracketBody(body, name)}`
     )
-    out = out.replace(HEADER_RE, (_m, name: string, sep: string, q: string) => `${name}${sep}${q}[redacted]${q}`)
+    out = out.replace(HEADER_RE, (_m, name: string, sep: string) => `${name}${sep}[redacted]`)
     out = out.replace(CLI_SENSITIVE_FLAG_RE, (m, val: string) => m.replace(val, '[redacted]'))
     out = out.replace(JSON_HEADER_RE, (_m, name: string, val: string) => {
       if (name.toLowerCase() === 'set-cookie') {
