@@ -3,6 +3,19 @@ import http from "node:http";
 const host = process.env.HOST || "127.0.0.1";
 const port = Number(process.env.PORT || 8787);
 const publicBaseUrl = process.env.PUBLIC_BASE_URL || `http://${host}:${port}`;
+{
+  // The startup lines below print this URL unredacted, so refuse anything that
+  // could carry a credential (userinfo, query or fragment) instead of echoing it.
+  let parsed;
+  try {
+    parsed = new URL(publicBaseUrl);
+  } catch {
+    throw new Error("PUBLIC_BASE_URL is not a valid URL");
+  }
+  if (parsed.username || parsed.password || parsed.search || parsed.hash) {
+    throw new Error("PUBLIC_BASE_URL must not contain credentials, a query or a fragment");
+  }
+}
 const demoResource = `${publicBaseUrl}/api/x402/demo`;
 
 function writeJson(response, statusCode, headers, body) {
@@ -62,6 +75,6 @@ const server = http.createServer((request, response) => {
 });
 
 server.listen(port, host, () => {
-  console.log(`AgentPay MCP x402 scanner demo listening on ${publicBaseUrl}`);
-  console.log(`Verify: curl -si ${demoResource}`);
+  console.log(`AgentPay MCP x402 scanner demo listening on ${publicBaseUrl}`); // output-sink-allow: operator-set public demo URL, no secrets
+  console.log(`Verify: curl -si ${demoResource}`); // output-sink-allow: public demo resource URL, no secrets
 });
