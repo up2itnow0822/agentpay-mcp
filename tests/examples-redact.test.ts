@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { exampleError, exampleLog, exampleSafeText } from '../examples/value-packs/shared/redact.js'
+import { exampleError, exampleLog, exampleSafeText, safeText as exampleSafeTextExport } from '../examples/value-packs/shared/redact.js'
 import { printError, printInfo } from '../examples/value-packs/shared/ui.js'
 import { safeText } from '../src/utils/sink.js'
 
@@ -10,7 +10,8 @@ const FAKE_KEY = '0x' + '1f'.repeat(32)
 describe('examples redaction copy', () => {
   afterEach(() => vi.restoreAllMocks())
 
-  it('exampleSafeText is the same safeText function as src/utils/sink.ts', () => {
+  it('examples re-export the same safeText function as src/utils/sink.ts', () => {
+    expect(exampleSafeTextExport).toBe(safeText)
     const probe = 'password=zqProbe10 token=zqProbe11'
     expect(exampleSafeText(probe)).toBe(safeText(probe))
     expect(exampleSafeText(probe)).not.toContain('zqProbe10')

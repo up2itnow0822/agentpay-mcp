@@ -454,7 +454,8 @@ export function redactSecrets(
     out = out.replace(SINGLE_QUOTED_COOKIE_HEADER_RE, (_m, name: string) => `'${name}': '[redacted]'`)
     out = out.replace(
       SINGLE_QUOTED_SET_COOKIE_HEADER_RE,
-      (_m, name: string, val: string) => `'${name}': '${redactSetCookieHeaderValue(val)}'`
+      (match, name: string, val: string) =>
+        val.includes('[redacted]') ? match : `'${name}': '${redactSetCookieHeaderValue(val)}'`
     )
     out = out.replace(BEARER_RE, 'Bearer [redacted]')
     out = redactJwtLinear(out)

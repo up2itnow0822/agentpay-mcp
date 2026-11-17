@@ -111,9 +111,6 @@ export const B1_TOKEN_FIELD_SURVIVORS = ['tokenAddress', 'tokenId', 'tokenAmount
 
 const JSON_STRING_FIELD_RE = /"((?:\\.|[^"\\])*)"\s*:\s*"((?:\\.|[^"\\])*)"/g
 
-const KV_EOL_FIELD_RE =
-  /\b([A-Za-z][A-Za-z0-9_.\-%]*)\s*[:=]\s*([^\r\n]+)/g
-
 function isWordChar(ch: string): boolean {
   return /[A-Za-z0-9_]/.test(ch)
 }
@@ -134,7 +131,7 @@ function skipWs(text: string, i: number): number {
 }
 
 function maskJsonStringFields(text: string): string {
-  if (!text.includes('"') || !text.includes('":')) return text
+  if (!text.includes('"') || !/"\s*:/.test(text)) return text
   // Hostile escaped-quote runs (corpus timing): no JSON keys, skip regex pass.
   if (text.length > 100_000 && !/"[A-Za-z]/.test(text)) return text
   return text.replace(JSON_STRING_FIELD_RE, (match, rawKey: string, rawVal: string) => {
@@ -300,16 +297,6 @@ function maskSensitiveLines(text: string): string {
 export function maskSensitiveTextFields(text: string): string {
   if (!text) return text
   let out = maskJsonStringFields(text)
-  out = out.replace(KV_EOL_FIELD_RE, (match, rawKey: string) => {
-    if (isR6SetCookieHeaderKey(rawKey)) return match
-    const norm = normalizeSensitiveKeyName(decodeWireKeyName(rawKey))
-    if (norm === 'seed' && /random\s$/i.test(match.slice(0, match.indexOf(rawKey)))) return match
-    if (!SENSITIVE_KV_TO_EOL.has(norm)) return match
-    const sepEnd = match.search(/[:=]\s*/)
-    if (sepEnd < 0) return match
-    const sepThrough = match.slice(sepEnd).match(/^[:=]\s*/)?.[0]?.length ?? 1
-    return `${rawKey}${match.slice(rawKey.length, sepEnd + sepThrough)}[redacted]`
-  })
   out = maskKvFieldsLinear(out)
   out = maskSensitiveLines(out)
   return out
