@@ -104,7 +104,7 @@ describe('F4 #11 swap_tokens disabled (route A)', () => {
     expect(swapSpy).not.toHaveBeenCalled()
   })
 
-  it('F4 #11 accepts swap_tokens without minAmountOut while route A is disabled', async () => {
+  it('B4 accepts swap_tokens without minAmountOut while route A is disabled', async () => {
     const result = await handleSwapTokens({
       fromSymbol: 'USDC',
       toSymbol: 'WETH',
@@ -393,7 +393,7 @@ describe('F4 identity #6 verified never true in 5.0.x', () => {
     'uaid:aid:eip155:8453:0x8004A169FB4a3325136EB29fA0ceB6D2e539a432;uid=42;proto=erc8004'
   const OTHER_OWNER = '0x2222222222222222222222222222222222222222' as Address
 
-  it('#6(a) broker owner mismatch still leaves verified false', async () => {
+  it('#6(a) verified stays false when broker owner mismatches UAID claims', async () => {
     const resolver = identityIo.createBoundedUaidResolver()
     vi.spyOn(resolver, 'resolve').mockResolvedValue({
       resolved: true,
@@ -528,6 +528,12 @@ describe('B1 Transfer topic and receipt timeout env', () => {
       eventName: 'Transfer',
     })
     expect(topics[0]).toBe(ERC20_TRANSFER_TOPIC)
+  })
+
+  it('B1 pins canonical Transfer topic literal 0xddf252ad…', () => {
+    expect(ERC20_TRANSFER_TOPIC).toBe(
+      '0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef'
+    )
   })
 
   it('B1 rejects non-integer and sub-1000 AGENTPAY_RECEIPT_TIMEOUT_MS values', () => {

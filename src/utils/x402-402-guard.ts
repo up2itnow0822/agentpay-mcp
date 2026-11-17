@@ -10,6 +10,8 @@ export const X402_MAX_402_BODY_BYTES = 64 * 1024
 export const X402_MAX_402_JSON_DEPTH = 32
 /** Max `accepts[]` entries (F25). */
 export const X402_MAX_402_ACCEPTS = 16
+/** Max time to stream-read a 402 body before refusal (F25). */
+export const X402_READ_BODY_TIMEOUT_MS = 10_000
 
 export class X402MalformedPaymentRequiredError extends DefiniteSpendFailure {
   constructor(message: string) {
@@ -67,14 +69,50 @@ export function assertBoundedX402PaymentRequired(value: unknown): void {
   }
 }
 
-/** Read a 402 JSON body with a byte cap (uses a cloned response). */
-export async function readBounded402JsonBody(response: Response): Promise<unknown> {
+async function readBounded402BodyBytes(response: Response): Promise<Uint8Array> {
   const clone = response.clone()
-  const buf = await clone.arrayBuffer()
-  if (buf.byteLength > X402_MAX_402_BODY_BYTES) {
-    throw new X402MalformedPaymentRequiredError(
-      `x402 response body exceeds ${X402_MAX_402_BODY_BYTES} bytes.`
-    )
+  const stream = clone.body
+  if (!stream) return new Uint8Array(0)
+  const timeout = AbortSignal.timeout(X402_READ_BODY_TIMEOUT_MS)
+  const reader = stream.getReader()
+  const parts: Uint8Array[] = []
+  let total = 0
+  try {
+    while (true) {
+      if (timeout.aborted) {
+        throw new X402MalformedPaymentRequiredError('x402 response body read timed out.')
+      }
+      const { done, value } = await reader.read()
+      if (done) break
+      total += value.byteLength
+      if (total > X402_MAX_402_BODY_BYTES) {
+        throw new X402MalformedPaymentRequiredError(
+          `x402 response body exceeds ${X402_MAX_402_BODY_BYTES} bytes.`
+        )
+      }
+      parts.push(value)
+    }
+  } finally {
+    try {
+      reader.releaseLock()
+    } catch {
+      /* already released */
+    }
+  }
+  const out = new Uint8Array(total)
+  let offset = 0
+  for (const part of parts) {
+    out.set(part, offset)
+    offset += part.byteLength
+  }
+  return out
+}
+
+/** Read a 402 JSON body with streamed byte cap (uses a cloned response). */
+export async function readBounded402JsonBody(response: Response): Promise<unknown> {
+  const buf = await readBounded402BodyBytes(response)
+  if (buf.byteLength === 0) {
+    throw new X402MalformedPaymentRequiredError('x402 response body is empty.')
   }
   const text = new TextDecoder('utf-8', { fatal: true }).decode(buf)
   try {
@@ -151,14 +189,9 @@ export async function guardX402ProbeResponse(requestUrl: string, probe: Response
     }
     return
   }
-  const bodyBytes = await probe.clone().arrayBuffer()
+  const bodyBytes = await readBounded402BodyBytes(probe)
   if (bodyBytes.byteLength === 0) {
     return
-  }
-  if (bodyBytes.byteLength > X402_MAX_402_BODY_BYTES) {
-    throw new X402MalformedPaymentRequiredError(
-      `x402 response body exceeds ${X402_MAX_402_BODY_BYTES} bytes.`
-    )
   }
   const text = new TextDecoder('utf-8', { fatal: true }).decode(bodyBytes)
   let body: unknown
