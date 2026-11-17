@@ -131,9 +131,7 @@ These boundaries matter more than the feature list:
   DNS resolved once with the
   socket pinned to the validated address, no automatic redirects, and
   response bodies capped at 2 MiB (1 MiB rendered).
-- `send_payment`, `send_token`, `create_escrow`,
-  `swap_tokens` and `bridge_usdc` (registered for schema compatibility but
-  **disabled in MCP 5.0.0 route A** — no on-chain swap or CCTP via the tool),
+- `send_payment`, `send_token`, `swap_tokens`, `bridge_usdc`, `create_escrow`,
   `x402_pay`, and `x402_session_start` run inside a spend intent. Identical retries replay;
   `idempotencyKey` distinguishes equal payments; an unclear post-broadcast
   outcome locks the intent with no timer. Locks are process-local unless

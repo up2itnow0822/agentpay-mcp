@@ -31,19 +31,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - SDK 8 structured `agentTransferToken` return values (`executed` / `queued` objects without receipt parsing).
 - SwapModule AgentAccount execution path with SDK-enforced output floors (this release uses `minAmountOut` + quote pre-check on SDK 7).
 
-### Breaking
-- **Breaking:** `swap_tokens` and `bridge_usdc` are **disabled on the MCP tool
-  surface** (route A) in 5.0.x: handlers return a disabled error with schema
-  retained; no on-chain swap or CCTP execution. Internal execution paths remain
-  for regression tests and a future SDK 8 re-enable. `AGENTPAY_ENABLE_EOA_BRIDGE`
-  is removed (bridge is not env-gated).
-
 ### Security (SDK 7 wrappers)
 - Wallet binding env (`AGENT_WALLET_FACTORY`, `AGENT_WALLET_TOKEN_CONTRACT`,
   `AGENT_WALLET_TOKEN_ID`) is enforced before `send_payment`, `send_token`,
-  and x402 writes (`requireBinding` on value-moving handlers).
-- When swaps are re-enabled, `minAmountOut` is required on the execution path;
-  the MCP schema keeps `minAmountOut` optional while route A is disabled.
+  `swap_tokens`, `bridge_usdc`, and x402 writes.
+- **Breaking:** `swap_tokens` requires `minAmountOut` (caller output floor) in addition
+  to `slippageBps`; swaps refuse when the quoted minimum is below that floor.
 - Token transfers classify queued owner-approval outcomes from receipts instead
   of reporting "Payment Sent" when nothing moved.
 - `bridge_usdc` caps Circle attestation polls and refuses attestations whose

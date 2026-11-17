@@ -676,7 +676,7 @@ describe('swap_tokens execution (internal path; MCP route A disabled)', () => {
     expect(getQuote).toHaveBeenCalledTimes(3)
   })
 
-  it('allows omitting minAmountOut on the MCP schema while route A is disabled (finding #11)', () => {
+  it('requires minAmountOut in the tool schema (finding #11)', () => {
     expect(
       SwapTokensSchema.safeParse({
         fromSymbol: 'USDC',
@@ -684,7 +684,7 @@ describe('swap_tokens execution (internal path; MCP route A disabled)', () => {
         amount: '1',
         chainId: 8453,
       }).success
-    ).toBe(true)
+    ).toBe(false)
     expect(SwapTokensSchema.safeParse(usdcWethSwap).success).toBe(true)
   })
 
