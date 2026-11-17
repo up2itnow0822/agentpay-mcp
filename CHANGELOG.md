@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [Unreleased]
+
+### Security
+- **SEC-20261105-02:** Single redacting output sink (`src/utils/sink.ts`). MCP tool
+  results, `formatError` / `formatUntrustedBody`, CLI/operator stderr, and stdio
+  console output pass through `safeText` / `toolText` before leaving the process.
+  Tool dispatch is wrapped in `guardToolCall`; examples vendor the same redact core.
+  Proved by `tests/output-sink.test.ts`, `tests/redact.test.ts`, `tests/tool-guard.test.ts`,
+  and `tests/stdio-protocol-mode.test.ts`.
+
+------
+
 ## [5.0.0] - 2026-10-25
 
 Security release. Repairs all 18 findings (4 high, 13 medium, 1 low) of the

@@ -4,6 +4,10 @@
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
+vi.mock('../src/utils/wallet-binding.js', () => ({
+  assertExpectedSmartWallet: vi.fn().mockResolvedValue(undefined),
+}))
+
 // ─── Mock agentwallet-sdk ──────────────────────────────────────────────────
 
 const mockX402Fetch = vi.fn();
@@ -193,6 +197,53 @@ describe('x402_pay tool', () => {
     expect(result.content[0]!.text).toContain('TVM/TON exact-payment requirements are currently watch-only');
     expect(result.content[0]!.text).not.toContain('No payment required');
   });
+
+  it('redacts Authorization echoed in a hostile 402 response body', async () => {
+    const authEcho = 'Authorization: Bearer FAKE_HOSTILE_ECHO_402auth12'
+    const tvmPaymentRequired = {
+      x402Version: 1,
+      accepts: [
+        {
+          scheme: 'exact',
+          network: 'tvm:-3',
+          asset: 'jetton:USDT',
+          amount: '1000000',
+          payTo: 'EQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAM9c',
+          maxTimeoutSeconds: 60,
+        },
+      ],
+    }
+    const body = `${authEcho}\n${JSON.stringify(tvmPaymentRequired)}`
+    mockX402Fetch.mockResolvedValueOnce(
+      new Response(body, {
+        status: 402,
+        statusText: 'Payment Required',
+        headers: { 'Content-Type': 'application/json' },
+      })
+    )
+    const result = await handleX402Pay({ url: 'https://api.example.com/hostile-402-auth' })
+    const text = result.content[0]!.text
+    expect(text).not.toContain('FAKE_HOSTILE_ECHO_402auth12')
+    expect(text).not.toContain(authEcho)
+  })
+
+  it('redacts Authorization echoed in a hostile 4xx response body', async () => {
+    const authEcho = 'Authorization: Bearer FAKE_HOSTILE_ECHO_4xxauth12'
+    mockX402Fetch.mockResolvedValueOnce(
+      new Response(`Server says: ${authEcho}`, {
+        status: 403,
+        statusText: 'Forbidden',
+        headers: { 'Content-Type': 'text/plain' },
+      })
+    )
+    const result = await handleX402Pay({
+      url: 'https://api.example.com/hostile-4xx-auth',
+      skip_session_check: true,
+    })
+    const text = result.content[0]!.text
+    expect(text).not.toContain('FAKE_HOSTILE_ECHO_4xxauth12')
+    expect(text).not.toContain(authEcho)
+  })
 
   // ─── Happy path: payment made ──────────────────────────────────────────
 
@@ -2017,5 +2068,26 @@ describe('get_transaction_history tool', () => {
     expect(text).toContain(UNTRUSTED_BODY_END);
     expect(text).toContain(hostile);
     expect(text).not.toContain('Reason:');
+  });
+
+  it('S1/R2: an RPC failure quoting the node URL is redacted while one x402 receipt still shows', async () => {
+    const fakeRpcSecret = 'FAKErpcPATHsecret';
+    recordX402Settlement({
+      intentKey: 'x402_pay#redact-rpc',
+      url: 'https://api.example.com/a',
+      method: 'GET',
+      amount: '1',
+      token: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913',
+      recipient: '0xfeedfacefeedfacefeedfacefeedfacefeedface',
+      txHash: '0xc480941a588f513a6f4ecbcee0826ea66147b0f68488131572522830b4ac60fb',
+    });
+    mockGetActivityHistory.mockRejectedValueOnce(
+      new Error(`HTTP request failed.\n\nURL: https://rpc.example.test/v2/${fakeRpcSecret}\nDetails: boom`)
+    );
+    const result = await handleGetTransactionHistory({});
+    const text = result.content[0]!.text;
+    expect(text).toContain('**x402 Payment**');
+    expect(text).not.toContain(fakeRpcSecret);
+    expect(text).toContain('URL: [redacted]');
   });
 });

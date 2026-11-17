@@ -6,6 +6,10 @@ import { randomBytes } from 'node:crypto';
 import type { Address, Hash } from 'viem';
 import { formatEther, formatUnits } from 'viem';
 import { z } from 'zod';
+import { PRE_SCRUB_CUT_MARKER } from './scrub-bounds.js';
+import { REDACTION_GUARD_ERROR_TEXT } from './tool-guard.js';
+import { safeErrorText, safeText, ScrubBudgetExceededError, toolText } from './sink.js';
+export { redactSecrets } from './sink.js';
 
 // ─── ETH / token formatting ────────────────────────────────────────────────
 
@@ -136,7 +140,7 @@ export function explorerAddressUrl(address: Address, chainId: number): string {
  * Create a standard MCP text content block.
  */
 export function textContent(text: string): { type: 'text'; text: string } {
-  return { type: 'text' as const, text };
+  return toolText(text);
 }
 
 /**
@@ -171,7 +175,7 @@ export function textContent(text: string): { type: 'text'; text: string } {
  * literals and closes the gap for anyone who forgets.
  */
 export function formatError(error: unknown, context: string): string {
-  const msg = error instanceof Error ? error.message : coerceToText(error);
+  const msg = safeErrorText(error instanceof Error ? error.message : coerceToText(error));
   return (
     `❌ ${sanitizeUntrustedInline(context, MAX_ERROR_CONTEXT_LEN)} failed. ` +
     `AgentPay did not complete the operation.\n` +
@@ -566,8 +570,19 @@ export function describeFinalUrl(
  */
 export function formatUntrustedBody(body: string, maxLen: number): string {
   const nonce = markerNonce();
-  const truncated =
-    body.length > maxLen ? body.slice(0, maxLen) + '\n\n... [response truncated]' : body;
+  let redacted: string
+  try {
+    redacted = safeText(body)
+  } catch (e) {
+    if (e instanceof ScrubBudgetExceededError) redacted = REDACTION_GUARD_ERROR_TEXT
+    else throw e
+  }
+  const hadPreScrubCut = redacted.includes(PRE_SCRUB_CUT_MARKER)
+  let truncated =
+    redacted.length > maxLen ? redacted.slice(0, maxLen) + '\n\n... [response truncated]' : redacted
+  if (hadPreScrubCut && !truncated.includes(PRE_SCRUB_CUT_MARKER)) {
+    truncated += PRE_SCRUB_CUT_MARKER
+  }
 
   // Never grows the body: forged delimiters and over-long backtick runs are
   // both replaced by strictly shorter text.
