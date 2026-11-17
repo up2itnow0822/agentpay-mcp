@@ -22,7 +22,7 @@ import {
   withSpendIntent,
 } from '../utils/spend-intent.js'
 import { assertExpectedSmartWallet } from '../utils/wallet-binding.js'
-import { agentTransferTokenWithOutcome } from '../utils/agent-transfer-outcome.js'
+import { UnverifiedSpendError, agentTransferTokenWithOutcome } from '../utils/agent-transfer-outcome.js'
 import { withReservedSpend } from './budget.js'
 
 // ─── send_token ────────────────────────────────────────────────────────────
@@ -149,6 +149,12 @@ export async function handleSendToken(
     if (error instanceof QueuedSpendError) {
       return {
         content: [textContent(JSON.stringify({ success: false, queued: true, message: error.message }))],
+        isError: true,
+      }
+    }
+    if (error instanceof UnverifiedSpendError) {
+      return {
+        content: [textContent(JSON.stringify({ success: false, sentUnverified: true, message: error.message }))],
         isError: true,
       }
     }

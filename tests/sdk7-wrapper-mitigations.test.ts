@@ -2,7 +2,17 @@
  * SDK 7.0.0 wrapper mitigations — real SDK paths, offline / in-process RPC.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { createWalletClient, custom, getAddress, type Address } from 'viem'
+import {
+  createWalletClient,
+  custom,
+  encodeAbiParameters,
+  encodeEventTopics,
+  getAddress,
+  pad,
+  toEventHash,
+  type Address,
+  type Hex,
+} from 'viem'
 import { base } from 'viem/chains'
 import { privateKeyToAccount } from 'viem/accounts'
 import * as agentwalletSdk from 'agentwallet-sdk'
@@ -26,6 +36,7 @@ import { resolveTokenDecimals } from '../src/tools/payments.js'
 import { loadConfig, _resetSingletons } from '../src/utils/client.js'
 import { attestationPollCap } from '../src/utils/bridge-attestation-guard.js'
 import { createBoundedUaidResolver } from '../src/utils/identity-io-guard.js'
+import * as walletPreflight from '../src/utils/wallet-preflight.js'
 
 const FACTORY = '0x7777777777777777777777777777777777777777' as Address
 const NFT = '0x8888888888888888888888888888888888888888' as Address
@@ -62,7 +73,12 @@ afterEach(() => {
 })
 
 describe('finding #3 wallet factory binding (SDK 7)', () => {
+  beforeEach(() => {
+    vi.spyOn(walletPreflight, 'ensureWalletStartupVerified').mockResolvedValue(undefined)
+  })
+
   it('refuses a mismatched AGENT_WALLET_ADDRESS against factory prediction', async () => {
+    vi.spyOn(walletPreflight, 'ensureWalletStartupVerified').mockRestore()
     vi.spyOn(agentwalletSdk, 'getWalletAddress').mockResolvedValue(ACCOUNT)
     Object.assign(process.env, {
       AGENT_PRIVATE_KEY: AGENT_KEY,
@@ -82,14 +98,20 @@ describe('finding #3 wallet factory binding (SDK 7)', () => {
         transport: custom({ request: async () => null }),
       }),
     })
+    vi.spyOn(wallet.publicClient, 'getChainId').mockResolvedValue(8453)
+    vi.spyOn(wallet.publicClient, 'getCode').mockResolvedValue(('0x' + '60'.repeat(8)) as `0x${string}`)
+    wallet.contract.read.isOperatorActive = vi.fn().mockResolvedValue(true)
+    wallet.contract.read.tokenContract = vi.fn().mockResolvedValue(NFT)
+    wallet.contract.read.tokenId = vi.fn().mockResolvedValue(1n)
     const config = loadConfig()
     await expect(assertExpectedSmartWallet(wallet, config, { requireBinding: true })).rejects.toThrow(
-      /does not match the factory-predicted/
+      /does not match factory prediction/
     )
   })
 
   it('classifies agentTransferToken via receipt (real SDK 7, no mocked hash return)', async () => {
     const txHash = ('0x' + 'aa'.repeat(32)) as `0x${string}`
+    const to = '0x1111111111111111111111111111111111111111' as Address
     const transferSpy = vi.spyOn(agentwalletSdk, 'agentTransferToken').mockResolvedValue(txHash)
     const wallet = createWallet({
       accountAddress: ACCOUNT,
@@ -100,17 +122,56 @@ describe('finding #3 wallet factory binding (SDK 7)', () => {
         transport: custom({ request: async () => null }),
       }),
     })
-    const wait = vi.fn().mockResolvedValue({ status: 'success', logs: [] })
+    const walletAddr = getAddress(wallet.address)
+    const executedLog = {
+      address: walletAddr,
+      topics: [
+        toEventHash({
+          type: 'event',
+          name: 'TransactionExecuted',
+          inputs: [
+            { name: 'target', type: 'address', indexed: true },
+            { name: 'value', type: 'uint256', indexed: false },
+            { name: 'data', type: 'bytes', indexed: false },
+            { name: 'executor', type: 'address', indexed: true },
+          ],
+        }),
+        pad(to, { size: 32 }),
+        pad(walletAddr, { size: 32 }),
+      ] as [Hex, Hex, Hex],
+      data: encodeAbiParameters(
+        [
+          { name: 'value', type: 'uint256' },
+          { name: 'data', type: 'bytes' },
+        ],
+        [1n, '0x']
+      ),
+    }
+    const wait = vi.fn().mockResolvedValue({
+      status: 'success',
+      logs: [
+        executedLog,
+        {
+          address: USDC_BASE,
+          topics: [
+            '0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3efa' as Hex,
+            pad(walletAddr, { size: 32 }),
+            pad(to, { size: 32 }),
+          ],
+          data: pad('0x1', { size: 32 }),
+        },
+      ],
+    })
     ;(wallet as { publicClient: { waitForTransactionReceipt: typeof wait } }).publicClient = {
       waitForTransactionReceipt: wait,
     } as never
     const outcome = await agentTransferTokenWithOutcome(wallet, {
       token: USDC_BASE as Address,
-      to: '0x1111111111111111111111111111111111111111',
+      to,
       amount: 1n,
     })
     expect(transferSpy).toHaveBeenCalled()
-    expect(wait).toHaveBeenCalledWith({ hash: txHash })
+    expect(wait).toHaveBeenCalled()
     expect(outcome.status).toBe('executed')
     expect(outcome.txHash).toBe(txHash)
   })

@@ -182,6 +182,10 @@ v5.0.0 is a breaking security release. Before upgrading:
   `AGENTPAY_ALLOWED_PRIVATE_HOSTS` (production) or
   `AGENTPAY_ALLOW_PRIVATE_NETWORK=1` (development only).
 - Set `AGENTPAY_STATE_DIR` on long-lived servers.
+- Configure wallet deployment identity before the first value-moving write (no opt-out):
+  `AGENT_WALLET_CODE_HASH` **or** (`AGENT_WALLET_FACTORY`, `AGENT_WALLET_TOKEN_CONTRACT`,
+  `AGENT_WALLET_TOKEN_ID`). Placeholders in `.env.example`.
+  Optional `AGENTPAY_RECEIPT_TIMEOUT_MS` caps receipt polling for sends (default 120s).
 
 [`docs/security-remediation-2026-10.md`](docs/security-remediation-2026-10.md)
 maps every finding to its fix and test.

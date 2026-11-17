@@ -4,7 +4,8 @@
  */
 import { z } from 'zod';
 import { getAddress, isAddress, zeroAddress, type Address } from 'viem';
-import { agentExecute, getGlobalRegistry } from 'agentwallet-sdk';
+import { getGlobalRegistry } from 'agentwallet-sdk';
+import { agentExecuteWithOutcome } from '../utils/agent-execute-outcome.js';
 import { getWallet, getConfig, type AgentWalletInstance } from '../utils/client.js';
 import {
   textContent,
@@ -26,7 +27,7 @@ import {
   withSpendIntent,
 } from '../utils/spend-intent.js';
 import { assertExpectedSmartWallet } from '../utils/wallet-binding.js';
-import { agentTransferTokenWithOutcome } from '../utils/agent-transfer-outcome.js';
+import { UnverifiedSpendError, agentTransferTokenWithOutcome } from '../utils/agent-transfer-outcome.js';
 
 const NATIVE_TOKEN = zeroAddress;
 
@@ -176,7 +177,7 @@ export async function handleSendPayment(
           return requireSettlementHash(
             await runClassifiedSpend(wallet.walletClient, async () => {
               if (isNativeEth) {
-                const result = await agentExecute(wallet, { to: toAddress, value: amountWei });
+                const result = await agentExecuteWithOutcome(wallet, { to: toAddress, value: amountWei }, 'send_payment');
                 return requireExecutedCall(result, 'send_payment');
               }
               const outcome = await agentTransferTokenWithOutcome(wallet, {
@@ -226,6 +227,12 @@ export async function handleSendPayment(
               'Funds have not left the wallet yet.'
           ),
         ],
+        isError: true,
+      }
+    }
+    if (error instanceof UnverifiedSpendError) {
+      return {
+        content: [textContent(`⚠️ ${error.message}`)],
         isError: true,
       }
     }

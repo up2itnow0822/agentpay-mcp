@@ -2,16 +2,22 @@
  * SDK 7 CCTP wrapper: bound attestation polling and bind attestation to the
  * messageBytes from this burn (not an unrelated Circle response).
  */
-import type { BridgeModule, BridgeOptions, BridgeResult } from 'agentwallet-sdk'
+import type { BridgeChain, BridgeModule, BridgeOptions, BridgeResult } from 'agentwallet-sdk'
+
+type EvmBridgeChain = Exclude<BridgeChain, 'solana'>
+import { MESSAGE_TRANSMITTER_V2 } from 'agentwallet-sdk'
 import type { Address, Hash, Hex } from 'viem'
+import { getAddress } from 'viem'
 import { DefiniteSpendFailure } from './spend-intent.js'
+import {
+  assertAttestedMessageMatchesBurn,
+  extractMessageSentFromTransmitter,
+} from './cctp-message-guard.js'
 
 const MAX_POLLS_ENV = 'AGENTPAY_BRIDGE_ATTESTATION_MAX_POLLS'
 const DEFAULT_MAX_POLLS = 24
 const ATTESTATION_POLL_INTERVAL_MS = 5000
 const MAX_ATTESTATION_POLLS = 60
-
-type EVMBridgeChain = Parameters<BridgeModule['burn']>[1]
 
 export function attestationPollCap(): number {
   const raw = process.env[MAX_POLLS_ENV]?.trim()
@@ -61,20 +67,47 @@ async function pollAttestationForBurn(
 export async function bridgeUsdcWithAttestationGuard(
   bridge: BridgeModule,
   amount: bigint,
-  toChain: EVMBridgeChain,
+  toChain: EvmBridgeChain,
   options: BridgeOptions = {},
-  fromChain: EVMBridgeChain
+  fromChain: EvmBridgeChain
 ): Promise<BridgeResult> {
   const startMs = Date.now()
   const maxPolls = attestationPollCap()
   const burn = await bridge.burn(amount, toChain, options)
+  const bridgeRecord = bridge as unknown as {
+    publicClient: { getTransactionReceipt: (args: { hash: Hash }) => Promise<{ logs: readonly unknown[] }> }
+    fromChain: EvmBridgeChain
+    walletClient: { account?: { address: Address } }
+  }
+  const receipt = await bridgeRecord.publicClient.getTransactionReceipt({ hash: burn.burnTxHash })
+  const transmitter = MESSAGE_TRANSMITTER_V2[bridgeRecord.fromChain]
+  const boundBytes = extractMessageSentFromTransmitter(
+    { logs: receipt.logs as never },
+    transmitter
+  ).messageBytes
+  if (boundBytes.toLowerCase() !== burn.messageBytes.toLowerCase()) {
+    throw new DefiniteSpendFailure(
+      'Burn messageBytes from SDK does not match MessageSent emitted by MESSAGE_TRANSMITTER_V2.'
+    )
+  }
+  const mintRecipient = getAddress(
+    (options.destinationAddress ?? bridgeRecord.walletClient.account?.address) as Address
+  )
   const attested = await pollAttestationForBurn(
     bridge,
     burn.burnTxHash,
-    burn.messageBytes,
+    boundBytes,
     options.attestationApiUrl,
     maxPolls
   )
+  assertAttestedMessageMatchesBurn(attested.message, {
+    sourceDomain: burn.sourceDomain,
+    destinationDomain: burn.destinationDomain,
+    amount,
+    mintRecipient,
+    fromChain: bridgeRecord.fromChain,
+    toChain: toChain as EvmBridgeChain,
+  })
   const mintTxHash = await bridge.mint(attested.message, attested.attestation, toChain, options.destinationRpcUrl)
   const account = (bridge as unknown as { walletClient: { account?: { address: Address } } }).walletClient.account
   const recipient = options.destinationAddress ?? account?.address

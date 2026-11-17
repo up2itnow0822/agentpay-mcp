@@ -12,6 +12,13 @@ vi.mock('../src/utils/wallet-binding.js', () => ({
   assertExpectedSmartWallet: vi.fn().mockResolvedValue(undefined),
 }))
 
+vi.mock('../src/utils/agent-execute-outcome.js', () => ({
+  agentExecuteWithOutcome: vi.fn(async (wallet: unknown, params: unknown) => {
+    const { agentExecute } = await import('agentwallet-sdk')
+    return agentExecute(wallet as never, params as never)
+  }),
+}))
+
 vi.mock('../src/utils/client.js', () => ({
   getConfig: vi.fn(() => ({ chainId: 8453, walletAddress: '0x1234567890123456789012345678901234567890' })),
   getWallet: vi.fn(() => ({
@@ -22,9 +29,10 @@ vi.mock('../src/utils/client.js', () => ({
   _resetSingletons: vi.fn(),
 }))
 
-vi.mock('../src/utils/agent-transfer-outcome.js', () => ({
-  agentTransferTokenWithOutcome,
-}))
+vi.mock('../src/utils/agent-transfer-outcome.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/utils/agent-transfer-outcome.js')>()
+  return { ...actual, agentTransferTokenWithOutcome }
+})
 
 vi.mock('agentwallet-sdk', async (importOriginal) => {
   const actual = await importOriginal<typeof import('agentwallet-sdk')>()

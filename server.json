@@ -150,6 +150,20 @@
           "name": "AGENT_WALLET_TOKEN_ID"
         },
         {
+          "description": "Expected keccak256(runtime bytecode) for AGENT_WALLET_ADDRESS (deployment identity alternative to factory binding)",
+          "isRequired": false,
+          "format": "string",
+          "isSecret": false,
+          "name": "AGENT_WALLET_CODE_HASH"
+        },
+        {
+          "description": "Milliseconds to wait for transaction receipts on token/native sends (default 120000, max 600000)",
+          "isRequired": false,
+          "format": "string",
+          "isSecret": false,
+          "name": "AGENTPAY_RECEIPT_TIMEOUT_MS"
+        },
+        {
           "description": "Max Circle CCTP attestation polls for bridge_usdc (capped at SDK default)",
           "isRequired": false,
           "format": "string",

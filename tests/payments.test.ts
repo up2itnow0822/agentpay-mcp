@@ -8,11 +8,22 @@ vi.mock('../src/utils/wallet-binding.js', () => ({
   assertExpectedSmartWallet: vi.fn().mockResolvedValue(undefined),
 }))
 
-vi.mock('../src/utils/agent-transfer-outcome.js', () => ({
-  agentTransferTokenWithOutcome: vi.fn(async (wallet: unknown, params: unknown) => {
-    const { agentTransferToken } = await import('agentwallet-sdk')
-    const txHash = await agentTransferToken(wallet as never, params as never)
-    return { status: 'executed', txHash: txHash as `0x${string}` }
+vi.mock('../src/utils/agent-transfer-outcome.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/utils/agent-transfer-outcome.js')>()
+  return {
+    ...actual,
+    agentTransferTokenWithOutcome: vi.fn(async (wallet: unknown, params: unknown) => {
+      const { agentTransferToken } = await import('agentwallet-sdk')
+      const txHash = await agentTransferToken(wallet as never, params as never)
+      return { status: 'executed', txHash: txHash as `0x${string}` }
+    }),
+  }
+})
+
+vi.mock('../src/utils/agent-execute-outcome.js', () => ({
+  agentExecuteWithOutcome: vi.fn(async (wallet: unknown, params: unknown) => {
+    const { agentExecute } = await import('agentwallet-sdk')
+    return agentExecute(wallet as never, params as never)
   }),
 }))
 

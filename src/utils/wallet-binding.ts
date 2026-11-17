@@ -6,6 +6,7 @@ import { getAddress, type Address } from 'viem'
 import { getWalletAddress } from 'agentwallet-sdk'
 import type { AgentPayConfig, AgentWalletInstance } from './client.js'
 import { DefiniteSpendFailure } from './spend-intent.js'
+import { ensureWalletStartupVerified } from './wallet-preflight.js'
 
 export const WALLET_BINDING_ENV = [
   'AGENT_WALLET_FACTORY',
@@ -138,13 +139,12 @@ export async function assertExpectedSmartWallet(
   options: { requireBinding?: boolean } = {}
 ): Promise<void> {
   rejectUnverifiedWalletOptOut()
+  if (options.requireBinding) {
+    await ensureWalletStartupVerified(wallet, config)
+    return
+  }
   const identity = loadWalletBindingIdentity()
   if (!identity) {
-    if (options.requireBinding) {
-      throw new DefiniteSpendFailure(
-        `Wallet binding required before signing. Set ${WALLET_BINDING_ENV.join(', ')}.`
-      )
-    }
     return
   }
   const expected = await expectedFactoryAddress(identity, config)
