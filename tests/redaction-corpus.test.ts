@@ -4,7 +4,16 @@
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { guardRequest, guardToolCall, TEXT_OUTPUT_MAX_BYTES } from '../src/utils/tool-guard.js'
+import { CallToolResultSchema } from '@modelcontextprotocol/sdk/types.js'
+import {
+  REDACTION_GUARD_ERROR_TEXT,
+  guardRequest,
+  guardToolCall,
+  TEXT_OUTPUT_MAX_BYTES,
+} from '../src/utils/tool-guard.js'
+import { formatUntrustedBody } from '../src/utils/format.js'
+import { PRE_SCRUB_CAP_BYTES, PRE_SCRUB_CUT_MARKER, testScrubBudgetMs } from '../src/utils/scrub-bounds.js'
+import { maskSensitiveTextFields } from '../src/utils/sink-sensitive-text.js'
 import {
   _resetStdioConsoleSinkForTests,
   _resetStdioProtocolModeForTests,
@@ -19,14 +28,74 @@ import {
 import * as sinkModule from '../src/utils/sink.js'
 import * as sinkSensitive from '../src/utils/sink-sensitive-text.js'
 
+type GeneratorSpec = {
+  prefix: string
+  repeat: string
+  count: number
+  suffix: string
+  bytes: number
+  filler?: string
+  payload?: string
+  token?: string
+  cap_ref?: string
+  token_start_offsets_from_cap?: number[]
+}
+
 type CorpusRow = {
   id: string
   source_receipt: string
-  input: string
-  kind: 'secret_absent' | 'benign_intact'
-  needle: string
+  input: string | null
+  kind:
+    | 'secret_absent'
+    | 'benign_intact'
+    | 'idempotent'
+    | 'timing'
+    | 'cap_straddle'
+    | 'scrub_budget_exceeded'
+  needle: string | null
   note?: string
   log_overredaction_ok?: boolean
+  path_mode?: string
+  family?: string
+  fn?: string
+  fn_args?: Record<string, unknown>
+  generator?: GeneratorSpec
+  budget_ms?: number
+  min_partial?: number
+  retry?: boolean
+}
+
+function isStandardTableRow(row: CorpusRow): boolean {
+  if (['idempotent', 'timing', 'cap_straddle', 'scrub_budget_exceeded'].includes(row.kind)) return false
+  if (row.path_mode === 'raw_tool_guard') return false
+  return true
+}
+
+function expectValidCallToolResult(result: unknown): void {
+  CallToolResultSchema.parse(result)
+}
+
+function buildTimingInput(gen: GeneratorSpec): string {
+  const built = gen.prefix + gen.repeat.repeat(gen.count) + gen.suffix
+  if (built.length !== gen.bytes) throw new Error(`generator bytes mismatch for timing row`)
+  return built
+}
+
+function buildCapInput(gen: GeneratorSpec, offsetFromCap: number): string {
+  const token = gen.token ?? ''
+  const payload = gen.payload ?? ''
+  const filler = gen.filler ?? ' '
+  const idx = payload.indexOf(token)
+  const padBefore = PRE_SCRUB_CAP_BYTES + offsetFromCap - idx
+  return filler.repeat(Math.max(0, padBefore)) + payload + filler.repeat(64)
+}
+
+function assertNoPartialNeedle(out: string, token: string, minPartial: number): void {
+  for (let len = token.length; len >= minPartial; len--) {
+    for (let i = 0; i <= token.length - len; i++) {
+      expect(out).not.toContain(token.slice(i, i + len))
+    }
+  }
 }
 
 const corpus: CorpusRow[] = JSON.parse(
@@ -134,9 +203,11 @@ async function runPath(path: OutputPath, input: string): Promise<string> {
   }
 }
 
-const table = corpus.flatMap((row) =>
-  OUTPUT_PATHS.map((path) => ({ row, path, name: `${row.id} ${path}` as const }))
-)
+const table = corpus
+  .filter(isStandardTableRow)
+  .flatMap((row) =>
+    OUTPUT_PATHS.map((path) => ({ row, path, name: `${row.id} ${path}` as const }))
+  )
 
 describe('redaction corpus', () => {
   afterEach(() => {
@@ -146,11 +217,173 @@ describe('redaction corpus', () => {
   })
 
   it.each(table)('$name', async ({ row, path }) => {
-    const out = await runPath(path, row.input)
+    const out = await runPath(path, row.input!)
     if (row.kind === 'secret_absent') {
-      assertSecretAbsent(out, row.needle, row, path)
+      assertSecretAbsent(out, row.needle!, row, path)
     } else {
-      assertBenignPresent(out, row.needle, row, path)
+      assertBenignPresent(out, row.needle!, row, path)
+    }
+  })
+})
+
+const idempotentRows = corpus.filter((r) => r.kind === 'idempotent')
+const rawGuardRows = corpus.filter((r) => r.path_mode === 'raw_tool_guard')
+const timingRows = corpus.filter((r) => r.kind === 'timing')
+const capRows = corpus.filter((r) => r.kind === 'cap_straddle')
+const scrubBudgetRows = corpus.filter((r) => r.kind === 'scrub_budget_exceeded')
+
+describe('corpus idempotent safeText', () => {
+  afterEach(() => {
+    _resetStdioConsoleSinkForTests()
+    _resetStdioProtocolModeForTests()
+    vi.restoreAllMocks()
+    testScrubBudgetMs.value = undefined
+  })
+
+  it.each(idempotentRows)('$id idempotent triple', async (row) => {
+    const once = safeText(row.input!)
+    const twice = safeText(once)
+    const thrice = safeText(twice)
+    expect(twice).toBe(once)
+    expect(thrice).toBe(once)
+    for (const path of OUTPUT_PATHS) {
+      const out = await runPath(path, row.input!)
+      expect(out).not.toContain(row.needle!)
+    }
+  })
+})
+
+describe('corpus raw_tool_guard path', () => {
+  afterEach(() => vi.restoreAllMocks())
+
+  it.each(rawGuardRows)('$id raw_tool_guard', async (row) => {
+    const r = await guardToolCall('corpus-raw', () => ({
+      content: [{ type: 'text', text: row.input! }],
+    }))
+    expectValidCallToolResult(r)
+    const out = r.content.map((b) => b.text).join('|')
+    if (row.kind === 'secret_absent') {
+      expect(out).not.toContain(row.needle!)
+    } else {
+      expect(out).toContain(row.needle!)
+    }
+  })
+})
+
+describe('corpus timing budgets', () => {
+  afterEach(() => {
+    vi.restoreAllMocks()
+    testScrubBudgetMs.value = undefined
+  })
+
+  it.each(timingRows)('$id timing $family', { timeout: 10_000 }, (row) => {
+    const gen = row.generator!
+    const warm = buildTimingInput({ ...gen, count: Math.min(gen.count, 500), bytes: 0 })
+    const warmBuilt = gen.prefix + gen.repeat.repeat(Math.min(gen.count, 500)) + gen.suffix
+    if (row.fn === 'safeText') safeText(warmBuilt)
+    else formatUntrustedBody(warmBuilt, (row.fn_args?.maxLen as number) ?? 64 * 1024)
+
+    const input = buildTimingInput(gen)
+    const t0 = performance.now()
+    let out: string
+    if (row.fn === 'safeText') out = safeText(input)
+    else if (row.fn === 'formatUntrustedBody')
+      out = formatUntrustedBody(input, (row.fn_args?.maxLen as number) ?? 64 * 1024)
+    else throw new Error(`unknown fn ${row.fn}`)
+  const elapsed = performance.now() - t0
+    expect(typeof out).toBe('string')
+    expect(elapsed).toBeLessThan(row.budget_ms!)
+    expect(row.retry).toBe(false)
+  })
+})
+
+describe('corpus cap_straddle', () => {
+  afterEach(() => {
+    vi.restoreAllMocks()
+    testScrubBudgetMs.value = undefined
+  })
+
+  it.each(capRows)('$id cap_straddle', (row) => {
+    const gen = row.generator!
+    const token = gen.token!
+    const minPartial = row.min_partial ?? 4
+    for (const offset of gen.token_start_offsets_from_cap ?? []) {
+      const input = buildCapInput(gen, offset)
+      let out: string
+      if (row.fn === 'safeText') out = safeText(input)
+      else if (row.fn === 'formatUntrustedBody')
+        out = formatUntrustedBody(input, (row.fn_args?.maxLen as number) ?? 64 * 1024)
+      else throw new Error(`unknown fn ${row.fn}`)
+      assertNoPartialNeedle(out, token, minPartial)
+      expect(out).toContain(PRE_SCRUB_CUT_MARKER)
+    }
+  })
+})
+
+describe('corpus scrub_budget_exceeded', () => {
+  afterEach(() => {
+    _resetStdioConsoleSinkForTests()
+    _resetStdioProtocolModeForTests()
+    vi.restoreAllMocks()
+    testScrubBudgetMs.value = undefined
+  })
+
+  it.each(scrubBudgetRows)('$id scrub_budget $path_mode', { timeout: 10_000 }, async (row) => {
+    testScrubBudgetMs.value = 1
+    const originalMask = maskSensitiveTextFields
+    vi.spyOn(sinkSensitive, 'maskSensitiveTextFields').mockImplementation((text) => {
+      const end = performance.now() + 8
+      while (performance.now() < end) {
+        /* burn */
+      }
+      return originalMask(text)
+    })
+    const needle = row.needle!
+    const input = row.input!
+
+    if (row.path_mode === 'tool_text') {
+      const run = vi.fn(() => ({ content: [{ type: 'text', text: input }] }))
+      const r = await guardToolCall('scrub-budget', run)
+      expect(run).toHaveBeenCalledTimes(1)
+      expectValidCallToolResult(r)
+      expect(r.isError).toBe(true)
+      const text = r.content[0]!.text
+      expect(text).toBe(REDACTION_GUARD_ERROR_TEXT)
+      expect(text).toMatch(/payment may have executed/i)
+      expect(text).toMatch(/status/i)
+      expect(text).toMatch(/(do not|don't) retry/i)
+      expect(text).not.toContain(needle)
+      expect(JSON.stringify(r)).not.toContain(input)
+    } else if (row.path_mode === 'error_text') {
+      const run = vi.fn(() => {
+        throw new Error(input)
+      })
+      const r = await guardToolCall('scrub-budget-err', run)
+      expect(run).toHaveBeenCalledTimes(1)
+      expectValidCallToolResult(r)
+      expect(r.content[0]!.text).toBe(REDACTION_GUARD_ERROR_TEXT)
+      expect(JSON.stringify(r)).not.toContain(needle)
+    } else if (row.path_mode === 'untrusted_body') {
+      const run = vi.fn()
+      const out = formatUntrustedBody(input, (row.fn_args?.maxLen as number) ?? 4096)
+      expect(out).not.toContain(needle)
+      expect(out).not.toContain(input)
+      run()
+      expect(run).toHaveBeenCalledTimes(1)
+    } else if (row.path_mode === 'stderr') {
+      installStdioConsoleSink()
+      enterStdioProtocolMode()
+      const err = vi.spyOn(process.stderr, 'write').mockImplementation(() => true)
+      const out = vi.spyOn(process.stdout, 'write').mockImplementation(() => true)
+      logErr(input)
+      console.info(input)
+      const errWritten = err.mock.calls.map((c) => String(c[0])).join('')
+      expect(errWritten).toBe('[log withheld by redaction guard]\n[log withheld by redaction guard]\n')
+      expect(out.mock.calls.length).toBe(0)
+      err.mockRestore()
+      out.mockRestore()
+    } else {
+      throw new Error(`unknown path_mode ${row.path_mode}`)
     }
   })
 })
