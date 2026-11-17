@@ -64,8 +64,7 @@ describe('B1 sensitive text key matcher', () => {
     'masks 1–3 char key=value for wire key %s with sibling intact',
     (wireKey) => {
       const line = `${wireKey}: ${SHORT}; sibling_ok=visible`
-      // maskSensitiveTextFields is the B1 matcher; redactSecrets may reshape header-like KV lines.
-      const out = maskSensitiveTextFields(line)
+      const out = safeText(line)
       expect(out).not.toContain(SHORT)
       expect(out).toContain('[redacted]')
       expect(out).toContain('sibling_ok=visible')

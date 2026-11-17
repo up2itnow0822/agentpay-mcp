@@ -78,6 +78,17 @@ export const SENSITIVE_TEXT_KEY_WIRE_FORMS = [
   'db_password',
 ] as const
 
+/** Suffix-rule wire forms exercised only in guard e2e tests. */
+export const B1_GUARD_E2E_SUFFIX_WIRE_FORMS = ['SMTP_PASSWORD', 'webhookSecret'] as const
+
+/** Full B1 guardToolCall matrix: exact set wire forms plus suffix examples. */
+export const B1_GUARD_E2E_WIRE_FORMS = [
+  ...SENSITIVE_TEXT_KEY_WIRE_FORMS,
+  ...B1_GUARD_E2E_SUFFIX_WIRE_FORMS,
+] as const
+
+export const B1_TOKEN_FIELD_SURVIVORS = ['tokenAddress', 'tokenId', 'tokenAmount', 'tokenSymbol'] as const
+
 const JSON_STRING_FIELD_RE = /"((?:\\.|[^"\\])*)"\s*:\s*"((?:\\.|[^"\\])*)"/g
 
 const KV_FIELD_RE = /\b([A-Za-z][A-Za-z0-9_.\-]*)\s*[:=]\s*("(?:\\.|[^"\\])*"|[^\s,;&\]}]+)/g

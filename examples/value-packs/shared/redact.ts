@@ -108,11 +108,11 @@ const HTTP_HEADER_NON_COOKIE_ALT = HTTP_REDACT_HEADER_NAMES.filter(
   (n) => n !== 'cookie' && n !== 'set-cookie'
 ).join('|')
 const COOKIE_HEADER_LINE_RE = new RegExp(
-  `\\b(${HTTP_HEADER_COOKIE_ALT})(\\s*[:=]\\s*)([^\\r\\n]*)`,
+  `\\b(${HTTP_HEADER_COOKIE_ALT})(\\s*[:=]\\s*)([^\\r\\n;]*)`,
   'gi'
 )
 const HEADER_RE = new RegExp(
-  `\\b(${HTTP_HEADER_NON_COOKIE_ALT})(\\s*[:=]\\s*)(['"]?)[^\\r\\n'"]*\\3`,
+  `\\b(${HTTP_HEADER_NON_COOKIE_ALT})(\\s*[:=]\\s*)(['"]?)([^\\r\\n;'"]*)\\3`,
   'gi'
 )
 const JSON_HEADER_RE = new RegExp(
@@ -124,7 +124,7 @@ const SINGLE_QUOTED_HEADER_RE = new RegExp(
   'gi'
 )
 const SINGLE_QUOTED_COOKIE_HEADER_RE = new RegExp(
-  `'(${HTTP_HEADER_COOKIE_ALT})'\\s*:\\s*[^\\r\\n]*`,
+  `'(${HTTP_HEADER_COOKIE_ALT})'\\s*:\\s*[^\\r\\n;]*`,
   'gi'
 )
 const BEARER_RE = /\bBearer\s+[A-Za-z0-9._~+/=-]{8,}/g

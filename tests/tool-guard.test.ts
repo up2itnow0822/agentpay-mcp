@@ -1,6 +1,10 @@
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { REGISTERED_TOOLS } from './registered-tools.js'
+import {
+  B1_GUARD_E2E_WIRE_FORMS,
+  B1_TOKEN_FIELD_SURVIVORS,
+} from '../src/utils/sink-sensitive-text.js'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { CallToolResultSchema } from '@modelcontextprotocol/sdk/types.js'
 import * as format from '../src/utils/format.js'
@@ -20,6 +24,71 @@ function expectValidCallToolResult(result: unknown): void {
 }
 
 const TEXT_OUTPUT_MAX = 4 * 1024 * 1024
+/** Must not appear as a substring of sensitive wire key names (e.g. "xy" in "proxy"). */
+const B1_SHORT = 'q7q'
+
+describe('B1: guardToolCall end-to-end (safeText path)', () => {
+  it.each(B1_GUARD_E2E_WIRE_FORMS)(
+    'masks short JSON value for %s through guardToolCall',
+    async (wireKey) => {
+      const r = await guardToolCall('b1_json', () => ({
+        content: [
+          {
+            type: 'text',
+            text: JSON.stringify({ [wireKey]: B1_SHORT, sibling_ok: 'visible' }),
+          },
+        ],
+      }))
+      expect(JSON.stringify(r)).not.toContain(B1_SHORT)
+      expect(r.content[0]!.text).toContain('[redacted]')
+      expect(r.content[0]!.text).toContain('sibling_ok')
+      expect(r.content[0]!.text).toContain('visible')
+      expectValidCallToolResult(r)
+    }
+  )
+
+  it.each(B1_GUARD_E2E_WIRE_FORMS)(
+    'masks short key=value for %s through guardToolCall',
+    async (wireKey) => {
+      const r = await guardToolCall('b1_kv', () => ({
+        content: [{ type: 'text', text: `${wireKey}: ${B1_SHORT}; sibling_ok=visible` }],
+      }))
+      expect(JSON.stringify(r)).not.toContain(B1_SHORT)
+      expect(r.content[0]!.text).toContain('[redacted]')
+      expect(r.content[0]!.text).toContain('sibling_ok=visible')
+      expectValidCallToolResult(r)
+    }
+  )
+
+  it.each(B1_TOKEN_FIELD_SURVIVORS)(
+    'leaves %s value through guardToolCall JSON',
+    async (field) => {
+      const r = await guardToolCall('b1_token_ok', () => ({
+        content: [
+          {
+            type: 'text',
+            text: JSON.stringify({ [field]: B1_SHORT, sibling_ok: 'visible' }),
+          },
+        ],
+      }))
+      expect(r.content[0]!.text).toContain(B1_SHORT)
+      expect(r.content[0]!.text).toContain('sibling_ok')
+      expectValidCallToolResult(r)
+    }
+  )
+
+  it.each(B1_TOKEN_FIELD_SURVIVORS)(
+    'leaves %s value through guardToolCall key=value text',
+    async (field) => {
+      const r = await guardToolCall('b1_token_ok_kv', () => ({
+        content: [{ type: 'text', text: `${field}: ${B1_SHORT}; sibling_ok=visible` }],
+      }))
+      expect(r.content[0]!.text).toContain(B1_SHORT)
+      expect(r.content[0]!.text).toContain('sibling_ok=visible')
+      expectValidCallToolResult(r)
+    }
+  )
+})
 
 describe('S1: dispatcher boundary', () => {
   afterEach(() => vi.restoreAllMocks())
