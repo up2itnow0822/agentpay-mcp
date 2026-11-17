@@ -46,6 +46,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Internal bridge execution paths keep attestation guards for regression tests;
   the MCP `bridge_usdc` tool remains disabled on route A.
 - UAID resolution uses bounded timeout and cache TTL from operator env.
+- `verify_agent_uaid` never sets `verified: true` on 5.0.x; broker attestation and
+  raw broker claims only (on-chain ERC-8004 verification deferred to 8.0.0).
 
 ---
 

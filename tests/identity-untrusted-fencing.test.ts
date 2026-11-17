@@ -369,18 +369,14 @@ describe('verify_agent_uaid fencing', () => {
     expect(summary).toEqual({
       uaid: UAID,
       brokerAttested: true,
-      verified: true,
+      verified: false,
       protocol: 'erc8004',
       trustScore: 87,
-      identity: {
-        agentId: '7',
-        owner: getAddress(OWNER),
-        paymentAddress: getAddress(WALLET),
-        chain: 'eip155:8453',
-      },
+      identity: null,
       hasError: true,
       untrustedMetadata: true,
     })
+    assertOnlyInsideFence(result, [getAddress(OWNER)])
     assertOnlyInsideFence(result, [INJECTION, BACKTICKS, 'TAIL_MARKER_SHOULD_BE_CUT'])
     expect(result.content[1]!.text).not.toContain('TAIL_MARKER_SHOULD_BE_CUT')
   })

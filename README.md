@@ -13,6 +13,10 @@ a caller-controlled signing key from the local process environment.
 The current npm package is `agentpay-mcp` v5.0.0 on **agentwallet-sdk 7.0.0**
 (deprecated upstream). The next coordinated release targets **agentwallet-sdk 8.x**.
 
+`verify_agent_uaid` in 5.0.x reports **brokerAttested** only; **`verified` is always
+false** and broker identity claims stay in the untrusted fence. On-chain ERC-8004
+cross-check moves to the 8.0.0 line with SDK 8.x.
+
 ## Start without funds
 
 Check the installed command without loading wallet credentials:

@@ -200,11 +200,11 @@ describe('F4 #12 bounded CCTP attestation poll', () => {
   })
 })
 
-describe('F4 #6 brokerAttested vs on-chain verified', () => {
+describe('F4 #6 brokerAttested only (5.0.x — no on-chain verified)', () => {
   const UAID =
     'uaid:aid:eip155:8453:0x8004A169FB4a3325136EB29fA0ceB6D2e539a432;uid=42;proto=erc8004'
 
-  it('F4 #6 reports brokerAttested from the broker and verified only after ERC-8004 read', async () => {
+  it('F4 #6 never sets verified true and does not call ERC-8004 lookup', async () => {
     const resolver = identityIo.createBoundedUaidResolver()
     vi.spyOn(resolver, 'resolve').mockResolvedValue({
       resolved: true,
@@ -224,25 +224,14 @@ describe('F4 #6 brokerAttested vs on-chain verified', () => {
       },
     })
     vi.spyOn(identityIo, 'createBoundedUaidResolver').mockReturnValue(resolver as never)
-    const lookup = vi
-      .spyOn(ERC8004Client.prototype, 'lookupAgentIdentity')
-      .mockResolvedValue({
-        agentId: 42n,
-        owner: AGENT,
-        agentURI: 'ipfs://safe',
-        agentWallet: AGENT,
-        registrationFile: null,
-      } as never)
+    const lookup = vi.spyOn(ERC8004Client.prototype, 'lookupAgentIdentity').mockClear()
+    lookup.mockReset()
 
     const trusted = JSON.parse((await handleVerifyAgentUAID({ uaid: UAID })).content[0].text)
     expect(trusted.brokerAttested).toBe(true)
-    expect(lookup).toHaveBeenCalled()
-    expect(trusted.verified).toBe(true)
-
-    lookup.mockRejectedValueOnce(new Error('reverted'))
-    const failTrusted = JSON.parse((await handleVerifyAgentUAID({ uaid: UAID })).content[0].text)
-    expect(failTrusted.brokerAttested).toBe(true)
-    expect(failTrusted.verified).toBe(false)
+    expect(trusted.verified).toBe(false)
+    expect(trusted.identity).toBeNull()
+    expect(lookup).not.toHaveBeenCalled()
   })
 })
 
@@ -399,12 +388,12 @@ describe('SEC-20261116-05 bridge execution spend policy', () => {
   })
 })
 
-describe('F4 identity #6 on-chain verification gates', () => {
+describe('F4 identity #6 verified never true in 5.0.x', () => {
   const UAID =
     'uaid:aid:eip155:8453:0x8004A169FB4a3325136EB29fA0ceB6D2e539a432;uid=42;proto=erc8004'
   const OTHER_OWNER = '0x2222222222222222222222222222222222222222' as Address
 
-  it('#6(a) verified stays false when on-chain owner differs from broker owner', async () => {
+  it('#6(a) broker owner mismatch still leaves verified false', async () => {
     const resolver = identityIo.createBoundedUaidResolver()
     vi.spyOn(resolver, 'resolve').mockResolvedValue({
       resolved: true,
@@ -424,20 +413,15 @@ describe('F4 identity #6 on-chain verification gates', () => {
       },
     })
     vi.spyOn(identityIo, 'createBoundedUaidResolver').mockReturnValue(resolver as never)
-    vi.spyOn(ERC8004Client.prototype, 'lookupAgentIdentity').mockResolvedValue({
-      agentId: 42n,
-      owner: AGENT,
-      agentURI: 'ipfs://chain',
-      agentWallet: AGENT,
-      registrationFile: null,
-    } as never)
+    const lookup = vi.spyOn(ERC8004Client.prototype, 'lookupAgentIdentity').mockClear()
     const trusted = JSON.parse((await handleVerifyAgentUAID({ uaid: UAID })).content[0].text)
     expect(trusted.brokerAttested).toBe(true)
     expect(trusted.verified).toBe(false)
-    expect(trusted.identity.owner).toBe(AGENT)
+    expect(trusted.identity).toBeNull()
+    expect(lookup).not.toHaveBeenCalled()
   })
 
-  it('#6(b) verified false when ERC-8004 lookup rejects agentId', async () => {
+  it('#6(b) verified false without on-chain lookup even when broker attests', async () => {
     const resolver = identityIo.createBoundedUaidResolver()
     vi.spyOn(resolver, 'resolve').mockResolvedValue({
       resolved: true,
@@ -448,10 +432,11 @@ describe('F4 identity #6 on-chain verification gates', () => {
       identity: { agentId: '99', owner: AGENT, chain: 'eip155:8453', protocol: 'erc8004' },
     })
     vi.spyOn(identityIo, 'createBoundedUaidResolver').mockReturnValue(resolver as never)
-    vi.spyOn(ERC8004Client.prototype, 'lookupAgentIdentity').mockRejectedValue(new Error('no agent'))
+    const lookup = vi.spyOn(ERC8004Client.prototype, 'lookupAgentIdentity').mockClear()
     const trusted = JSON.parse((await handleVerifyAgentUAID({ uaid: UAID })).content[0].text)
     expect(trusted.verified).toBe(false)
     expect(trusted.brokerAttested).toBe(true)
+    expect(lookup).not.toHaveBeenCalled()
   })
 
   it('#6(d) verified false when broker agentId disagrees with UAID uid', async () => {
