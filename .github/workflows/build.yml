@@ -31,6 +31,12 @@ jobs:
         with:
           node-version: '24'
 
+      - name: Check dependency sources
+        run: node scripts/check-dependency-sources.mjs
+
+      - name: Dependency source fixtures
+        run: node test/fixtures/dep-sources/run.mjs
+
       - name: Detect toolchain and build
         shell: bash
         run: |
@@ -52,6 +58,7 @@ jobs:
               yarn install --frozen-lockfile || yarn install
               RUN="yarn"
             else
+              node scripts/check-dependency-sources.mjs
               if [ -f package-lock.json ]; then npm ci || npm install; else npm install; fi
               RUN="npm run"
             fi

@@ -1,0 +1,7 @@
+{
+  "name": "dep-sources-fixture",
+  "version": "1.0.0",
+  "devDependencies": {
+    "foo": "npm:bar@1"
+  }
+}

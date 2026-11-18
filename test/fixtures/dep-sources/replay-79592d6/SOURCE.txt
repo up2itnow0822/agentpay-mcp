@@ -1,0 +1,9 @@
+Reproduces the picomatch npm: override and lockfile name-mismatch entries
+from up2itnow0822/agentpay-mcp commit 79592d6d23068d16cb164167f895c13ccb6a0e03.
+
+package.json overrides.picomatch = "npm:@ryotsu/picomatch@4.0.7-a"
+package-lock.json packages["node_modules/picomatch"].name = "@ryotsu/picomatch"
+package-lock.json packages["node_modules/picomatch"].resolved =
+  https://registry.npmjs.org/@ryotsu/picomatch/-/picomatch-4.0.7-a.tgz
+package-lock.json packages["node_modules/picomatch"].integrity =
+  sha512-JroBFEmaejC7szGSfqOhF1QZHLKvX2wTA1+fWyfkpy3BjzdQKNPLKa2FtgeKVUDy5/UPUNkXEeCHJ5ZRBMLTVA==
