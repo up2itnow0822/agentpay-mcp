@@ -138,6 +138,24 @@ export const CASES = [
     ],
   },
   {
+    id: 'p7',
+    root: join(here, 'p7'),
+    expectExit: 1,
+    mustMatch: [/F2 /, /package\.json:dependencies\.foo/, /non-registry spec/],
+  },
+  {
+    id: 'dot-path',
+    root: join(here, 'dot-path'),
+    expectExit: 1,
+    mustMatch: [/F2 /, /package\.json:dependencies\.foo/, /non-registry spec/],
+  },
+  {
+    id: 'abs-path',
+    root: join(here, 'abs-path'),
+    expectExit: 1,
+    mustMatch: [/F2 /, /package\.json:dependencies\.foo/, /non-registry spec/],
+  },
+  {
     id: 'replay-79592d6',
     root: join(here, 'replay-79592d6'),
     expectExit: 1,

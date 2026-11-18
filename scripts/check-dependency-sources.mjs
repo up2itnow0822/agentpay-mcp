@@ -181,12 +181,21 @@ function isNpmjsHttpsUrl(value) {
   return true
 }
 
+function isPathSpec(spec) {
+  return (
+    spec.startsWith('~') ||
+    spec.startsWith('./') ||
+    spec.startsWith('../') ||
+    spec.startsWith('/')
+  )
+}
+
 function classifySpec(spec) {
   if (typeof spec !== 'string') return { kind: 'invalid' }
   const trimmed = spec.trim()
   if (trimmed.length === 0) return { kind: 'non-registry' }
   if (NPM_ALIAS.test(trimmed)) return { kind: 'npm-alias' }
-  if (NON_REGISTRY_PROTOCOL.test(trimmed) || /:\/\//.test(trimmed)) {
+  if (isPathSpec(trimmed) || NON_REGISTRY_PROTOCOL.test(trimmed) || /:\/\//.test(trimmed)) {
     return { kind: 'non-registry' }
   }
   if (GITHUB_SHORTHAND.test(trimmed)) return { kind: 'non-registry' }
