@@ -23,6 +23,12 @@ const DEP_FIELDS = [
   'peerDependencies',
   'overrides',
 ]
+const LOCK_ROOT_DEP_FIELDS = [
+  'dependencies',
+  'devDependencies',
+  'optionalDependencies',
+  'peerDependencies',
+]
 
 const UNKNOWN_FLAG = /^--?/
 const NPM_ALIAS = /^npm:/i
@@ -188,10 +194,10 @@ function classifySpec(spec) {
   return { kind: 'ok' }
 }
 
-function walkDepTree(value, parts, findings) {
+function walkDepTree(value, parts, findings, source) {
   if (typeof value === 'string') {
     const classified = classifySpec(value)
-    const key = `package.json:${pathKey(parts)}`
+    const key = `${source}:${pathKey(parts)}`
     if (classified.kind === 'npm-alias') {
       findings.push({ code: 'F1', key, detail: 'npm: alias' })
     } else if (classified.kind === 'non-registry' || classified.kind === 'invalid') {
@@ -201,16 +207,25 @@ function walkDepTree(value, parts, findings) {
   }
   if (value !== null && typeof value === 'object' && !Array.isArray(value)) {
     for (const [child, nested] of Object.entries(value)) {
-      walkDepTree(nested, [...parts, child], findings)
+      walkDepTree(nested, [...parts, child], findings, source)
     }
     return
   }
   if (value !== undefined) {
     findings.push({
       code: 'F2',
-      key: `package.json:${pathKey(parts)}`,
+      key: `${source}:${pathKey(parts)}`,
       detail: 'non-registry spec',
     })
+  }
+}
+
+function resolvedUrlPathname(resolved) {
+  if (typeof resolved !== 'string' || resolved.length === 0) return null
+  try {
+    return decodeURIComponent(new URL(resolved).pathname)
+  } catch {
+    return null
   }
 }
 
@@ -240,7 +255,6 @@ function checkLockfilePackages(lock, workspaceGlobs, findings) {
   }
 
   for (const [pkgPath, entry] of Object.entries(packages)) {
-    if (pkgPath === '') continue
     if (entry === null || typeof entry !== 'object' || Array.isArray(entry)) {
       findings.push({
         code: 'F7',
@@ -250,8 +264,18 @@ function checkLockfilePackages(lock, workspaceGlobs, findings) {
       continue
     }
 
-    const workspaceLink = isDeclaredWorkspaceLink(entry, workspaceGlobs)
     const lockKey = `package-lock.json:packages[${JSON.stringify(pkgPath)}]`
+
+    if (pkgPath === '') {
+      for (const field of LOCK_ROOT_DEP_FIELDS) {
+        if (field in entry) {
+          walkDepTree(entry[field], ['packages', '', field], findings, 'package-lock.json')
+        }
+      }
+      continue
+    }
+
+    const workspaceLink = isDeclaredWorkspaceLink(entry, workspaceGlobs)
 
     if (!workspaceLink) {
       if (!isNpmjsHttpsUrl(entry.resolved)) {
@@ -277,6 +301,19 @@ function checkLockfilePackages(lock, workspaceGlobs, findings) {
         key: `${lockKey}.name`,
         detail: `name ${JSON.stringify(entry.name)} differs from path ${JSON.stringify(implied)}`,
       })
+    }
+    if (!workspaceLink && implied) {
+      const pathname = resolvedUrlPathname(entry.resolved)
+      if (pathname !== null) {
+        const expected = `/${implied}/-/`
+        if (!pathname.startsWith(expected)) {
+          findings.push({
+            code: 'F4',
+            key: `${lockKey}.resolved`,
+            detail: `resolved pathname does not start with ${JSON.stringify(expected)}`,
+          })
+        }
+      }
     }
   }
 }
@@ -403,7 +440,7 @@ function main() {
 
   for (const field of DEP_FIELDS) {
     if (field in pkg) {
-      walkDepTree(pkg[field], [field], findings)
+      walkDepTree(pkg[field], [field], findings, 'package.json')
     }
   }
 

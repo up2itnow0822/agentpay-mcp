@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /**
- * Runs T0–T10 and the 79592d6 picomatch-override replay against
- * scripts/check-dependency-sources.mjs using Node built-ins only.
+ * Runs T0–T10, SO probes p1/p5, and the 79592d6 picomatch-override replay
+ * against scripts/check-dependency-sources.mjs using Node built-ins only.
  */
 import { spawnSync } from 'node:child_process'
 import { dirname, join, resolve } from 'node:path'
@@ -116,6 +116,25 @@ export const CASES = [
       /allowlist \(1 entries\)/,
       /package\.json:overrides\.picomatch/,
       /dependency-source check: PASS/,
+    ],
+  },
+  {
+    id: 'p1',
+    root: join(here, 'p1-lockfile-only-alias'),
+    expectExit: 1,
+    mustMatch: [
+      /F4 /,
+      /package-lock\.json:packages\["node_modules\/picomatch"\]\.resolved/,
+    ],
+  },
+  {
+    id: 'p5',
+    root: join(here, 'p5-root-lock-npm-alias'),
+    expectExit: 1,
+    mustMatch: [
+      /F1 /,
+      /package-lock\.json:packages\[""\]\.dependencies\.picomatch/,
+      /npm: alias/,
     ],
   },
   {
