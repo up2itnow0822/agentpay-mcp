@@ -1,0 +1,25 @@
+{
+  "auditReportVersion": 2,
+  "vulnerabilities": {
+    "broken-parent": {
+      "name": "broken-parent",
+      "severity": "high",
+      "isDirect": true,
+      "via": ["missing-child"],
+      "effects": [],
+      "range": "*",
+      "nodes": ["node_modules/broken-parent"],
+      "fixAvailable": false
+    }
+  },
+  "metadata": {
+    "vulnerabilities": {
+      "info": 0,
+      "low": 0,
+      "moderate": 0,
+      "high": 1,
+      "critical": 0,
+      "total": 1
+    }
+  }
+}
