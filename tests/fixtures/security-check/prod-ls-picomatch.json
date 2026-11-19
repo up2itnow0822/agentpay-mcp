@@ -1,0 +1,15 @@
+{
+  "name": "agentpay-mcp",
+  "version": "5.0.0",
+  "dependencies": {
+    "agentwallet-sdk": {
+      "version": "7.0.0",
+      "dependencies": {
+        "picomatch": {
+          "version": "4.0.7",
+          "resolved": "https://registry.npmjs.org/picomatch/-/picomatch-4.0.7.tgz"
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,85 @@
+{
+  "auditReportVersion": 2,
+  "vulnerabilities": {
+    "picomatch": {
+      "name": "picomatch",
+      "severity": "high",
+      "isDirect": false,
+      "via": [
+        {
+          "source": 1240001,
+          "name": "picomatch",
+          "dependency": "picomatch",
+          "title": "picomatch ReDoS through single-branch repeated extglobs",
+          "url": "https://github.com/advisories/GHSA-fc5q-39xc-vjpf",
+          "severity": "high",
+          "range": "<=4.0.7"
+        }
+      ],
+      "effects": ["tinyglobby"],
+      "range": "<=4.0.7",
+      "nodes": ["node_modules/picomatch"],
+      "fixAvailable": false
+    },
+    "tinyglobby": {
+      "name": "tinyglobby",
+      "severity": "high",
+      "isDirect": false,
+      "via": ["picomatch"],
+      "effects": ["vite"],
+      "range": "*",
+      "nodes": ["node_modules/tinyglobby"],
+      "fixAvailable": false
+    },
+    "vite": {
+      "name": "vite",
+      "severity": "high",
+      "isDirect": false,
+      "via": ["tinyglobby"],
+      "effects": ["vitest"],
+      "range": "*",
+      "nodes": ["node_modules/vite"],
+      "fixAvailable": false
+    },
+    "vitest": {
+      "name": "vitest",
+      "severity": "high",
+      "isDirect": true,
+      "via": ["vite"],
+      "effects": [],
+      "range": "*",
+      "nodes": ["node_modules/vitest"],
+      "fixAvailable": false
+    },
+    "@hono/node-server": {
+      "name": "@hono/node-server",
+      "severity": "moderate",
+      "isDirect": true,
+      "via": [
+        {
+          "source": 1243661,
+          "name": "@hono/node-server",
+          "dependency": "@hono/node-server",
+          "title": "@hono/node-server: serveStatic double-decodes the request path",
+          "url": "https://github.com/advisories/GHSA-rmxm-3fg6-px4f",
+          "severity": "moderate",
+          "range": ">=1.19.10 <2.1.3"
+        }
+      ],
+      "effects": [],
+      "range": "1.19.10 - 2.1.2",
+      "nodes": ["node_modules/@hono/node-server"],
+      "fixAvailable": false
+    }
+  },
+  "metadata": {
+    "vulnerabilities": {
+      "info": 0,
+      "low": 0,
+      "moderate": 1,
+      "high": 4,
+      "critical": 0,
+      "total": 5
+    }
+  }
+}

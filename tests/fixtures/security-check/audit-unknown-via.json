@@ -1,0 +1,29 @@
+{
+  "auditReportVersion": 2,
+  "vulnerabilities": {
+    "mystery": {
+      "name": "mystery",
+      "severity": "high",
+      "isDirect": true,
+      "via": [
+        {
+          "title": "unidentified advisory without a GHSA url"
+        }
+      ],
+      "effects": [],
+      "range": "*",
+      "nodes": ["node_modules/mystery"],
+      "fixAvailable": false
+    }
+  },
+  "metadata": {
+    "vulnerabilities": {
+      "info": 0,
+      "low": 0,
+      "moderate": 0,
+      "high": 1,
+      "critical": 0,
+      "total": 1
+    }
+  }
+}

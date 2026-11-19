@@ -1,0 +1,65 @@
+{
+  "auditReportVersion": 2,
+  "vulnerabilities": {
+    "picomatch": {
+      "name": "picomatch",
+      "severity": "high",
+      "isDirect": false,
+      "via": [
+        {
+          "source": 1240001,
+          "name": "picomatch",
+          "dependency": "picomatch",
+          "title": "picomatch ReDoS through single-branch repeated extglobs",
+          "url": "https://github.com/advisories/GHSA-fc5q-39xc-vjpf",
+          "severity": "high",
+          "range": "<=4.0.7"
+        }
+      ],
+      "effects": ["evil-wrapper"],
+      "range": "<=4.0.7",
+      "nodes": ["node_modules/picomatch"],
+      "fixAvailable": false
+    },
+    "lodash": {
+      "name": "lodash",
+      "severity": "high",
+      "isDirect": false,
+      "via": [
+        {
+          "source": 1240002,
+          "name": "lodash",
+          "dependency": "lodash",
+          "title": "lodash prototype pollution",
+          "url": "https://github.com/advisories/GHSA-aaaa-bbbb-cccc",
+          "severity": "high",
+          "range": "<4.17.21"
+        }
+      ],
+      "effects": ["evil-wrapper"],
+      "range": "<4.17.21",
+      "nodes": ["node_modules/lodash"],
+      "fixAvailable": false
+    },
+    "evil-wrapper": {
+      "name": "evil-wrapper",
+      "severity": "high",
+      "isDirect": true,
+      "via": ["picomatch", "lodash"],
+      "effects": [],
+      "range": "*",
+      "nodes": ["node_modules/evil-wrapper"],
+      "fixAvailable": false
+    }
+  },
+  "metadata": {
+    "vulnerabilities": {
+      "info": 0,
+      "low": 0,
+      "moderate": 0,
+      "high": 3,
+      "critical": 0,
+      "total": 3
+    }
+  }
+}
