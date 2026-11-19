@@ -84,4 +84,19 @@ describe('dependency-source check', () => {
       build.indexOf('npm ci'),
     )
   })
+
+  it('rejects http registries, shrinkwrap drift, and unvalidated lockfiles', () => {
+    const ciInstall = namedStep(ci, 'Install dependencies')
+    expect(checkerSource).toMatch(/publishConfig/)
+    expect(checkerSource).toMatch(/npm-shrinkwrap\.json/)
+    expect(checkerSource).toMatch(/pnpm-lock\.yaml/)
+    expect(checkerSource).toMatch(/yarn\.lock/)
+    expect(ciInstall).toMatch(/run:\s*npm ci/)
+    expect(ciInstall).not.toMatch(/\|\| npm install/)
+    expect(build).not.toMatch(/\|\| pnpm install/)
+    expect(build).not.toMatch(/\|\| yarn install/)
+    expect(build).not.toMatch(/\|\| npm install/)
+    expect(build).toMatch(/pnpm-lock\.yaml is present and not validated/)
+    expect(build).toMatch(/yarn\.lock is present and not validated/)
+  })
 })

@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 /**
- * Runs T0–T10, SO probes p1/p5, and the 79592d6 picomatch-override replay
- * against scripts/check-dependency-sources.mjs using Node built-ins only.
+ * Runs T0–T10, SO probes, path-spec cases, HTTPS/shrinkwrap/unchecked-lock
+ * probes, and the 79592d6 picomatch-override replay against
+ * scripts/check-dependency-sources.mjs using Node built-ins only.
  */
 import { spawnSync } from 'node:child_process'
 import { dirname, join, resolve } from 'node:path'
@@ -154,6 +155,71 @@ export const CASES = [
     root: join(here, 'abs-path'),
     expectExit: 1,
     mustMatch: [/F2 /, /package\.json:dependencies\.foo/, /non-registry spec/],
+  },
+  {
+    id: 'http-npmrc',
+    root: join(here, 'http-npmrc'),
+    expectExit: 1,
+    mustMatch: [/F6 /, /\.npmrc:registry/, /registry is not registry\.npmjs\.org/],
+  },
+  {
+    id: 'http-npmrc-scope',
+    root: join(here, 'http-npmrc-scope'),
+    expectExit: 1,
+    mustMatch: [/F6 /, /\.npmrc:@foo:registry/, /registry is not registry\.npmjs\.org/],
+  },
+  {
+    id: 'http-publishconfig',
+    root: join(here, 'http-publishconfig'),
+    expectExit: 1,
+    mustMatch: [/F6 /, /package\.json:publishConfig\.registry/, /registry is not registry\.npmjs\.org/],
+  },
+  {
+    id: 'http-resolved',
+    root: join(here, 'http-resolved'),
+    expectExit: 1,
+    mustMatch: [
+      /F3 /,
+      /package-lock\.json:packages\["node_modules\/foo"\]\.resolved/,
+      /resolved is not https:\/\/registry\.npmjs\.org\//,
+    ],
+  },
+  {
+    id: 'shrinkwrap-evil',
+    root: join(here, 'shrinkwrap-evil'),
+    expectExit: 1,
+    mustMatch: [
+      /F7 /,
+      /npm-shrinkwrap\.json/,
+      /differs from package-lock\.json/,
+      /F1 /,
+      /npm-shrinkwrap\.json:packages\[""\]\.dependencies\.foo/,
+      /npm: alias/,
+    ],
+  },
+  {
+    id: 'shrinkwrap-differ',
+    root: join(here, 'shrinkwrap-differ'),
+    expectExit: 1,
+    mustMatch: [/F7 /, /npm-shrinkwrap\.json/, /differs from package-lock\.json/],
+  },
+  {
+    id: 'shrinkwrap-ok',
+    root: join(here, 'shrinkwrap-ok'),
+    expectExit: 0,
+    mustMatch: [/dependency-source check: PASS/],
+  },
+  {
+    id: 'pnpm-lock',
+    root: join(here, 'pnpm-lock'),
+    expectExit: 1,
+    mustMatch: [/F7 /, /pnpm-lock\.yaml/, /present and not validated/],
+  },
+  {
+    id: 'yarn-lock',
+    root: join(here, 'yarn-lock'),
+    expectExit: 1,
+    mustMatch: [/F7 /, /yarn\.lock/, /present and not validated/],
   },
   {
     id: 'replay-79592d6',

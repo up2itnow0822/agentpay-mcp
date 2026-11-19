@@ -50,16 +50,19 @@ jobs:
           if [ -f package.json ]; then
             echo "Detected Node.js $(node -v)"
             if [ -f pnpm-lock.yaml ]; then
-              corepack enable
-              pnpm install --frozen-lockfile || pnpm install
-              RUN="pnpm run"
+              echo "F7 pnpm-lock.yaml is present and not validated" >&2
+              exit 1
             elif [ -f yarn.lock ]; then
-              corepack enable
-              yarn install --frozen-lockfile || yarn install
-              RUN="yarn"
+              echo "F7 yarn.lock is present and not validated" >&2
+              exit 1
             else
               node scripts/check-dependency-sources.mjs
-              if [ -f package-lock.json ]; then npm ci || npm install; else npm install; fi
+              if [ -f package-lock.json ] || [ -f npm-shrinkwrap.json ]; then
+                npm ci
+              else
+                echo "refusing install without a validated lockfile" >&2
+                exit 1
+              fi
               RUN="npm run"
             fi
 

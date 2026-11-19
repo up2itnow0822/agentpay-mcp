@@ -2,11 +2,13 @@
 /**
  * Blocking dependency-source check.
  *
- * Reads package.json, package-lock.json and .npmrc from disk only (no
- * network, no npm CLI). Fails closed on npm: aliases, non-registry specs,
- * lockfile entries that did not come from registry.npmjs.org, lockfile
- * name/path mismatches, missing integrity, a non-npmjs .npmrc registry,
- * or an unreadable/old lockfile.
+ * Reads package.json, package-lock.json, npm-shrinkwrap.json and .npmrc
+ * from disk only (no network, no npm CLI). Fails closed on npm: aliases,
+ * non-registry specs, lockfile entries that did not come from
+ * https://registry.npmjs.org/, lockfile name/path mismatches, missing
+ * integrity, a non-https or non-npmjs registry in .npmrc or publishConfig,
+ * an unreadable/old lockfile, a shrinkwrap that differs from the lockfile,
+ * or an unvalidated pnpm-lock.yaml / yarn.lock.
  *
  * Unknown flags fail closed. Never prints environment values.
  */
@@ -252,12 +254,12 @@ function impliedNameFromLockKey(pkgPath) {
   return rest[0]
 }
 
-function checkLockfilePackages(lock, workspaceGlobs, findings) {
+function checkLockfilePackages(lock, workspaceGlobs, findings, lockName) {
   const packages = lock.packages
   if (packages === null || typeof packages !== 'object' || Array.isArray(packages)) {
     findings.push({
       code: 'F7',
-      key: 'package-lock.json:packages',
+      key: `${lockName}:packages`,
       detail: 'missing or invalid packages map',
     })
     return
@@ -267,18 +269,18 @@ function checkLockfilePackages(lock, workspaceGlobs, findings) {
     if (entry === null || typeof entry !== 'object' || Array.isArray(entry)) {
       findings.push({
         code: 'F7',
-        key: `package-lock.json:packages[${JSON.stringify(pkgPath)}]`,
+        key: `${lockName}:packages[${JSON.stringify(pkgPath)}]`,
         detail: 'invalid lockfile entry',
       })
       continue
     }
 
-    const lockKey = `package-lock.json:packages[${JSON.stringify(pkgPath)}]`
+    const lockKey = `${lockName}:packages[${JSON.stringify(pkgPath)}]`
 
     if (pkgPath === '') {
       for (const field of LOCK_ROOT_DEP_FIELDS) {
         if (field in entry) {
-          walkDepTree(entry[field], ['packages', '', field], findings, 'package-lock.json')
+          walkDepTree(entry[field], ['packages', '', field], findings, lockName)
         }
       }
       continue
@@ -325,6 +327,63 @@ function checkLockfilePackages(lock, workspaceGlobs, findings) {
       }
     }
   }
+}
+
+function checkPublishConfig(pkg, findings) {
+  const publishConfig = pkg.publishConfig
+  if (publishConfig === undefined) return
+  if (publishConfig === null || typeof publishConfig !== 'object' || Array.isArray(publishConfig)) {
+    findings.push({
+      code: 'F6',
+      key: 'package.json:publishConfig',
+      detail: 'registry is not registry.npmjs.org',
+    })
+    return
+  }
+  for (const [key, value] of Object.entries(publishConfig)) {
+    const isRegistryKey = key.toLowerCase() === 'registry' || SCOPED_REGISTRY_KEY.test(key)
+    if (!isRegistryKey) continue
+    const named = `package.json:publishConfig.${key}`
+    if (typeof value !== 'string' || INTERPOLATION.test(value) || !isNpmjsHttpsUrl(value)) {
+      findings.push({
+        code: 'F6',
+        key: named,
+        detail: 'registry is not registry.npmjs.org',
+      })
+    }
+  }
+}
+
+function checkUncheckedLockfiles(root, findings) {
+  for (const name of ['pnpm-lock.yaml', 'yarn.lock']) {
+    if (existsSync(join(root, name))) {
+      findings.push({
+        code: 'F7',
+        key: name,
+        detail: 'present and not validated',
+      })
+    }
+  }
+}
+
+function checkLockfileDocument(lock, lockName, workspaceGlobs, findings) {
+  if (lock === null || typeof lock !== 'object' || Array.isArray(lock)) {
+    findings.push({
+      code: 'F7',
+      key: lockName,
+      detail: 'is not an object',
+    })
+    return
+  }
+  const lockfileVersion = lock.lockfileVersion
+  if (typeof lockfileVersion !== 'number' || !Number.isFinite(lockfileVersion) || lockfileVersion < 2) {
+    findings.push({
+      code: 'F7',
+      key: `${lockName}:lockfileVersion`,
+      detail: `lockfileVersion ${JSON.stringify(lockfileVersion)} is missing or < 2`,
+    })
+  }
+  checkLockfilePackages(lock, workspaceGlobs, findings, lockName)
 }
 
 function checkNpmrc(root, findings) {
@@ -410,11 +469,15 @@ function main() {
   const allow = new Set(allowlist.entries)
   const packageJsonPath = join(root, 'package.json')
   const lockPath = join(root, 'package-lock.json')
+  const wrapPath = join(root, 'npm-shrinkwrap.json')
 
   if (!existsSync(packageJsonPath)) {
     failClosed(`F7 ${packageJsonPath} is missing`)
   }
-  if (!existsSync(lockPath)) {
+
+  const hasLock = existsSync(lockPath)
+  const hasWrap = existsSync(wrapPath)
+  if (!hasLock && !hasWrap) {
     failClosed('F7 package-lock.json is missing')
   }
 
@@ -428,24 +491,43 @@ function main() {
     failClosed('F7 package.json is not an object')
   }
 
-  let lock
-  try {
-    lock = parseJsonFile(lockPath, 'package-lock.json')
-  } catch (err) {
-    failClosed(`F7 ${err instanceof Error ? err.message : 'package-lock.json parse error'}`)
-  }
-  if (lock === null || typeof lock !== 'object' || Array.isArray(lock)) {
-    failClosed('F7 package-lock.json is not an object')
-  }
+  checkUncheckedLockfiles(root, findings)
 
-  const lockfileVersion = lock.lockfileVersion
-  if (typeof lockfileVersion !== 'number' || !Number.isFinite(lockfileVersion) || lockfileVersion < 2) {
+  let lockText = null
+  let wrapText = null
+  if (hasLock) {
+    try {
+      lockText = readText(lockPath)
+    } catch (err) {
+      failClosed(`F7 package-lock.json: ${err instanceof Error ? err.message : 'unreadable'}`)
+    }
+  }
+  if (hasWrap) {
+    try {
+      wrapText = readText(wrapPath)
+    } catch (err) {
+      failClosed(`F7 npm-shrinkwrap.json: ${err instanceof Error ? err.message : 'unreadable'}`)
+    }
+  }
+  if (hasLock && hasWrap && lockText !== wrapText) {
     findings.push({
       code: 'F7',
-      key: 'package-lock.json:lockfileVersion',
-      detail: `lockfileVersion ${JSON.stringify(lockfileVersion)} is missing or < 2`,
+      key: 'npm-shrinkwrap.json',
+      detail: 'differs from package-lock.json',
     })
   }
+
+  const activeName = hasWrap ? 'npm-shrinkwrap.json' : 'package-lock.json'
+  const activeText = hasWrap ? wrapText : lockText
+  let lock
+  try {
+    lock = JSON.parse(activeText)
+  } catch (err) {
+    const detail = err instanceof Error ? err.message : 'parse error'
+    failClosed(`F7 ${activeName}: parse error (${detail})`)
+  }
+
+  checkLockfileDocument(lock, activeName, workspacePatterns(pkg), findings)
 
   for (const field of DEP_FIELDS) {
     if (field in pkg) {
@@ -453,7 +535,7 @@ function main() {
     }
   }
 
-  checkLockfilePackages(lock, workspacePatterns(pkg), findings)
+  checkPublishConfig(pkg, findings)
   checkNpmrc(root, findings)
 
   const blocking = findings.filter((finding) => !allow.has(finding.key))
