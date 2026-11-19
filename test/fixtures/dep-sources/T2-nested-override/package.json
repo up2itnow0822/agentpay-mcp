@@ -1,0 +1,9 @@
+{
+  "name": "dep-sources-fixture",
+  "version": "1.0.0",
+  "overrides": {
+    "vitest": {
+      "picomatch": "npm:x@1"
+    }
+  }
+}

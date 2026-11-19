@@ -33,7 +33,7 @@
     "test:coverage": "vitest run --coverage",
     "typecheck": "tsc --noEmit",
     "lint": "eslint src/ tests/ --config eslint.config.mjs",
-    "security": "node scripts/security-check.mjs",
+    "security": "node scripts/check-dependency-sources.mjs && node scripts/security-check.mjs",
     "prepublishOnly": "npm run clean && npm run build && npm run typecheck && npm run smoke:clean-install",
     "smoke:clean-install": "node scripts/clean-install-x402-smoke.mjs"
   },
