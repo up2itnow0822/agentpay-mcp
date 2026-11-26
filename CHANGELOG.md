@@ -48,6 +48,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - UAID resolution uses bounded timeout and cache TTL from operator env.
 - `verify_agent_uaid` never sets `verified: true` on 5.0.x; broker attestation and
   raw broker claims only (on-chain ERC-8004 verification deferred to 8.0.0).
+- Decoy PAYMENT-REQUIRED headers cannot skip 402 body bounds or resource.url binding; comparable URL normalization is linear-time with 8 KiB / 256-param caps.
 
 ---
 

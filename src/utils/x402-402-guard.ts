@@ -12,6 +12,10 @@ export const X402_MAX_402_JSON_DEPTH = 32
 export const X402_MAX_402_ACCEPTS = 16
 /** Max time to stream-read a 402 body before refusal (F25). */
 export const X402_READ_BODY_TIMEOUT_MS = 10_000
+/** Max resource/request URL length before comparable-URL normalize (B2). */
+export const X402_MAX_COMPARABLE_URL_LENGTH = 8 * 1024
+/** Max query-parameter entries (including duplicate keys) before normalize (B2). */
+export const X402_MAX_QUERY_PARAMETER_COUNT = 256
 
 export class X402MalformedPaymentRequiredError extends DefiniteSpendFailure {
   constructor(message: string) {
@@ -154,8 +158,18 @@ export function assertBounded402Header(headerValue: string | null): void {
   }
 }
 
+function assertComparableUrlLength(raw: string): void {
+  if (raw.length > X402_MAX_COMPARABLE_URL_LENGTH) {
+    throw new X402MalformedPaymentRequiredError(
+      `x402 URL exceeds ${X402_MAX_COMPARABLE_URL_LENGTH} bytes.`
+    )
+  }
+}
+
 /** Normalize x402 URLs for binding (scheme/host case, default port, trailing slash, sorted query). */
 export function normalizeX402ComparableUrl(raw: string, base?: string): string {
+  assertComparableUrlLength(raw)
+  if (typeof base === 'string') assertComparableUrlLength(base)
   let parsed: URL
   try {
     parsed = new URL(raw, base)
@@ -176,13 +190,14 @@ export function normalizeX402ComparableUrl(raw: string, base?: string): string {
   if (path.length > 1 && path.endsWith('/')) {
     path = path.slice(0, -1)
   }
-  const sorted = new URLSearchParams()
-  for (const key of [...parsed.searchParams.keys()].sort()) {
-    for (const value of parsed.searchParams.getAll(key)) {
-      sorted.append(key, value)
-    }
+  const entries = [...parsed.searchParams]
+  if (entries.length > X402_MAX_QUERY_PARAMETER_COUNT) {
+    throw new X402MalformedPaymentRequiredError(
+      `x402 URL has too many query parameters (max ${X402_MAX_QUERY_PARAMETER_COUNT}).`
+    )
   }
-  const query = sorted.toString()
+  const sorted = entries.sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+  const query = new URLSearchParams(sorted).toString()
   return `${parsed.protocol}//${parsed.host}${path}${query ? `?${query}` : ''}`
 }
 
@@ -232,6 +247,52 @@ function assertX402ResourceUrlMatches(requestUrl: string, payload: unknown): voi
   assertX402FollowUpUrlMatches(requestUrl, resourceUrl)
 }
 
+/**
+ * Same validity test the SDK's parse402Response uses before trusting a
+ * PAYMENT-REQUIRED header. A decoy that fails this must never skip the body.
+ */
+function isValidX402PaymentRequired(value: unknown): boolean {
+  if (!value || typeof value !== 'object') return false
+  const candidate = value as {
+    x402Version?: unknown
+    resource?: { url?: unknown }
+    accepts?: unknown
+  }
+  if (candidate.x402Version !== 1) return false
+  if (!candidate.resource || typeof candidate.resource.url !== 'string') return false
+  if (!Array.isArray(candidate.accepts) || candidate.accepts.length === 0) return false
+  return candidate.accepts.every(
+    (req) =>
+      !!req &&
+      typeof req === 'object' &&
+      typeof (req as { scheme?: unknown }).scheme === 'string' &&
+      typeof (req as { network?: unknown }).network === 'string' &&
+      typeof (req as { asset?: unknown }).asset === 'string' &&
+      typeof (req as { amount?: unknown }).amount === 'string' &&
+      /^\d+$/.test((req as { amount: string }).amount) &&
+      typeof (req as { payTo?: unknown }).payTo === 'string' &&
+      typeof (req as { maxTimeoutSeconds?: unknown }).maxTimeoutSeconds === 'number' &&
+      (req as { maxTimeoutSeconds: number }).maxTimeoutSeconds > 0 &&
+      (req as { maxTimeoutSeconds: number }).maxTimeoutSeconds <= 300
+  )
+}
+
+/** Hand the SDK a clone of only the bytes we already bounded and validated. */
+function pinValidated402Body(probe: Response, bodyBytes: Uint8Array): void {
+  const headers = new Headers(probe.headers)
+  const status = probe.status
+  const statusText = probe.statusText
+  const rebuilt = () => new Response(bodyBytes, { status, statusText, headers })
+  try {
+    Object.defineProperty(probe, 'clone', {
+      configurable: true,
+      value: () => rebuilt(),
+    })
+  } catch {
+    /* Response.clone may be non-configurable; body was still validated */
+  }
+}
+
 export async function guardX402ProbeResponse(requestUrl: string, probe: Response): Promise<void> {
   const header =
     probe.headers.get('payment-required') ?? probe.headers.get('x-payment-required')
@@ -240,21 +301,38 @@ export async function guardX402ProbeResponse(requestUrl: string, probe: Response
     assertX402FollowUpUrlMatches(requestUrl, probe.url)
   }
   if (header) {
+    let decoded: unknown
+    let decodedOk = false
     try {
-      const decoded = decodeX402PaymentHeader(header)
-      assertBoundedX402PaymentRequired(decoded)
-      assertX402ResourceUrlMatches(requestUrl, decoded)
-    } catch (error: unknown) {
-      if (error instanceof X402MalformedPaymentRequiredError) throw error
+      decoded = decodeX402PaymentHeader(header)
+      decodedOk = true
+    } catch {
+      decodedOk = false
+    }
+    if (decodedOk && isValidX402PaymentRequired(decoded)) {
+      try {
+        assertBoundedX402PaymentRequired(decoded)
+        assertX402ResourceUrlMatches(requestUrl, decoded)
+      } catch (error: unknown) {
+        if (error instanceof X402MalformedPaymentRequiredError) throw error
+        throw new X402MalformedPaymentRequiredError('x402 PAYMENT-REQUIRED header is not valid.')
+      }
+      return
+    }
+  }
+  const bodyBytes = await readBounded402BodyBytes(probe)
+  if (bodyBytes.byteLength === 0) {
+    if (header) {
       throw new X402MalformedPaymentRequiredError('x402 PAYMENT-REQUIRED header is not valid.')
     }
     return
   }
-  const bodyBytes = await readBounded402BodyBytes(probe)
-  if (bodyBytes.byteLength === 0) {
-    return
+  let text: string
+  try {
+    text = new TextDecoder('utf-8', { fatal: true }).decode(bodyBytes)
+  } catch {
+    throw new X402MalformedPaymentRequiredError('x402 response body is not valid UTF-8.')
   }
-  const text = new TextDecoder('utf-8', { fatal: true }).decode(bodyBytes)
   let body: unknown
   try {
     body = JSON.parse(text)
@@ -263,4 +341,5 @@ export async function guardX402ProbeResponse(requestUrl: string, probe: Response
   }
   assertBoundedX402PaymentRequired(body)
   assertX402ResourceUrlMatches(requestUrl, body)
+  pinValidated402Body(probe, bodyBytes)
 }
