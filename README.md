@@ -10,7 +10,12 @@ AgentPay MCP is a stdio Model Context Protocol server for x402 payments and
 wallet operations. It exposes Agent Wallet SDK functions as MCP tools and loads
 a caller-controlled signing key from the local process environment.
 
-The current npm package is `agentpay-mcp` v5.0.0.
+The current npm package is `agentpay-mcp` v5.0.0 on **agentwallet-sdk 7.0.0**
+(deprecated upstream). The next coordinated release targets **agentwallet-sdk 8.x**.
+
+`verify_agent_uaid` in 5.0.x reports **brokerAttested** only; **`verified` is always
+false** and broker identity claims stay in the untrusted fence. On-chain ERC-8004
+cross-check moves to the 8.0.0 line with SDK 8.x.
 
 ## Start without funds
 
@@ -131,7 +136,9 @@ These boundaries matter more than the feature list:
   DNS resolved once with the
   socket pinned to the validated address, no automatic redirects, and
   response bodies capped at 2 MiB (1 MiB rendered).
-- `send_payment`, `send_token`, `swap_tokens`, `bridge_usdc`, `create_escrow`,
+- `send_payment`, `send_token`, `create_escrow`,
+  `swap_tokens` and `bridge_usdc` (registered for schema compatibility but
+  **disabled in MCP 5.0.0 route A** — no on-chain swap or CCTP via the tool),
   `x402_pay`, and `x402_session_start` run inside a spend intent. Identical retries replay;
   `idempotencyKey` distinguishes equal payments; an unclear post-broadcast
   outcome locks the intent with no timer. Locks are process-local unless
@@ -182,6 +189,10 @@ v5.0.0 is a breaking security release. Before upgrading:
   `AGENTPAY_ALLOWED_PRIVATE_HOSTS` (production) or
   `AGENTPAY_ALLOW_PRIVATE_NETWORK=1` (development only).
 - Set `AGENTPAY_STATE_DIR` on long-lived servers.
+- Configure wallet deployment identity before the first value-moving write (no opt-out):
+  `AGENT_WALLET_CODE_HASH` **or** (`AGENT_WALLET_FACTORY`, `AGENT_WALLET_TOKEN_CONTRACT`,
+  `AGENT_WALLET_TOKEN_ID`). Placeholders in `.env.example`.
+  Optional `AGENTPAY_RECEIPT_TIMEOUT_MS` caps receipt polling for sends (default 120s).
 
 [`docs/security-remediation-2026-10.md`](docs/security-remediation-2026-10.md)
 maps every finding to its fix and test.

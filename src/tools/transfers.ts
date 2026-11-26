@@ -4,7 +4,7 @@
  * Wraps agentwallet-sdk v6 agentTransferToken + getBalances.
  */
 import { z } from 'zod'
-import { getGlobalRegistry, agentTransferToken, getBalances, parseAmount } from 'agentwallet-sdk'
+import { getGlobalRegistry, getBalances, parseAmount } from 'agentwallet-sdk'
 import type { Address } from 'viem'
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type AnyCtx = any
@@ -14,11 +14,15 @@ import { assertConfiguredChain } from '../utils/wallet-chain.js'
 import {
   IDEMPOTENCY_KEY_JSON_SCHEMA,
   IdempotencyKeyZodSchema,
+  QueuedSpendError,
+  requireExecutedTransfer,
   requireSettlementHash,
   runClassifiedSpend,
   sendTokenIntentIdentity,
   withSpendIntent,
 } from '../utils/spend-intent.js'
+import { assertExpectedSmartWallet } from '../utils/wallet-binding.js'
+import { UnverifiedSpendError, agentTransferTokenWithOutcome } from '../utils/agent-transfer-outcome.js'
 import { withReservedSpend } from './budget.js'
 
 // ─── send_token ────────────────────────────────────────────────────────────
@@ -92,6 +96,7 @@ export async function handleSendToken(
       idempotencyKey: input.idempotencyKey,
     })
 
+    const config = getConfig()
     const { value, replayed } = await withSpendIntent(intent.key, () =>
       // Reserve → execute → commit | release | lock: a definite pre-broadcast
       // failure releases the policy capacity so the transfer can be retried;
@@ -99,16 +104,17 @@ export async function handleSendToken(
       withReservedSpend(
         { merchant: input.recipientAddress, amount: rawAmount, decimals: token.decimals },
         async () => {
-          // A failure before the wallet write (simulation revert, RPC refusal,
-          // insufficient balance) moved nothing: it is classified definite and
-          // stays retryable instead of occupying an unresolved-lock slot.
+          await assertExpectedSmartWallet(wallet, config, { requireBinding: true })
           const txHash = requireSettlementHash(
-            await runClassifiedSpend(wallet.walletClient, () =>
-              agentTransferToken(wallet, {
-                token: token.address as Address,
-                to: input.recipientAddress as Address,
-                amount: rawAmount,
-              })
+            await runClassifiedSpend(wallet.walletClient, async () =>
+              requireExecutedTransfer(
+                await agentTransferTokenWithOutcome(wallet, {
+                  token: token.address as Address,
+                  to: input.recipientAddress as Address,
+                  amount: rawAmount,
+                }),
+                'send_token'
+              )
             ),
             'send_token'
           )
@@ -140,6 +146,18 @@ export async function handleSendToken(
       ],
     }
   } catch (error: unknown) {
+    if (error instanceof QueuedSpendError) {
+      return {
+        content: [textContent(JSON.stringify({ success: false, queued: true, message: error.message }))],
+        isError: true,
+      }
+    }
+    if (error instanceof UnverifiedSpendError) {
+      return {
+        content: [textContent(JSON.stringify({ success: false, sentUnverified: true, message: error.message }))],
+        isError: true,
+      }
+    }
     return {
       content: [textContent(formatError(error, 'send_token'))],
       isError: true,

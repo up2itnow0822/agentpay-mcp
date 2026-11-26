@@ -4,6 +4,29 @@
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
+vi.mock('../src/utils/wallet-binding.js', () => ({
+  assertExpectedSmartWallet: vi.fn().mockResolvedValue(undefined),
+}))
+
+vi.mock('../src/utils/agent-transfer-outcome.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/utils/agent-transfer-outcome.js')>()
+  return {
+    ...actual,
+    agentTransferTokenWithOutcome: vi.fn(async (wallet: unknown, params: unknown) => {
+      const { agentTransferToken } = await import('agentwallet-sdk')
+      const txHash = await agentTransferToken(wallet as never, params as never)
+      return { status: 'executed', txHash: txHash as `0x${string}` }
+    }),
+  }
+})
+
+vi.mock('../src/utils/agent-execute-outcome.js', () => ({
+  agentExecuteWithOutcome: vi.fn(async (wallet: unknown, params: unknown) => {
+    const { agentExecute } = await import('agentwallet-sdk')
+    return agentExecute(wallet as never, params as never)
+  }),
+}))
+
 // ─── Mock agentwallet-sdk ──────────────────────────────────────────────────
 
 const USDC_BASE = '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913';
@@ -337,6 +360,42 @@ describe('send_payment tool', () => {
 
     expect(result.isError).toBe(true);
     expect(result.content[0]!.text).toContain('Insufficient gas');
+  });
+});
+
+describe('send_payment spend-cap decimals (SEC-20261116-04 / finding #4)', () => {
+  const VALID_TO = '0xabcdefabcdefabcdefabcdefabcdefabcdefabcd';
+  const UNREGISTERED = '0x1111111111111111111111111111111111111111';
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    _resetPolicyStore();
+    _resetSpendIntentStore();
+    mockAgentTransferToken.mockResolvedValue(MOCK_TX_HASH);
+    mockAgentExecute.mockResolvedValue({ executed: true, txHash: MOCK_TX_HASH });
+  });
+
+  it('rejects an unregistered token with caller decimals (fail closed)', async () => {
+    expect(() => resolveTokenDecimals(UNREGISTERED, 6, 8453)).toThrow(
+      'Spend cap requires a registered token'
+    );
+  });
+});
+
+describe('send_payment spend-cap decimals (#4)', () => {
+  const VALID_TO = '0xabcdefabcdefabcdefabcdefabcdefabcdefabcd';
+  const UNREGISTERED = '0x1111111111111111111111111111111111111111';
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockAgentTransferToken.mockResolvedValue(MOCK_TX_HASH);
+    mockAgentExecute.mockResolvedValue({ executed: true, txHash: MOCK_TX_HASH });
+  });
+
+  it('rejects caller decimals on an unregistered token', () => {
+    expect(() => resolveTokenDecimals(UNREGISTERED as `0x${string}`, 6, 8453)).toThrow(
+      'Spend cap requires a registered token'
+    );
   });
 });
 

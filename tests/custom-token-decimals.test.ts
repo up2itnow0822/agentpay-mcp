@@ -6,7 +6,18 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 
 const readContract = vi.hoisted(() => vi.fn())
-const agentTransferToken = vi.hoisted(() => vi.fn())
+const agentTransferTokenWithOutcome = vi.hoisted(() => vi.fn())
+
+vi.mock('../src/utils/wallet-binding.js', () => ({
+  assertExpectedSmartWallet: vi.fn().mockResolvedValue(undefined),
+}))
+
+vi.mock('../src/utils/agent-execute-outcome.js', () => ({
+  agentExecuteWithOutcome: vi.fn(async (wallet: unknown, params: unknown) => {
+    const { agentExecute } = await import('agentwallet-sdk')
+    return agentExecute(wallet as never, params as never)
+  }),
+}))
 
 vi.mock('../src/utils/client.js', () => ({
   getConfig: vi.fn(() => ({ chainId: 8453, walletAddress: '0x1234567890123456789012345678901234567890' })),
@@ -18,9 +29,14 @@ vi.mock('../src/utils/client.js', () => ({
   _resetSingletons: vi.fn(),
 }))
 
+vi.mock('../src/utils/agent-transfer-outcome.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/utils/agent-transfer-outcome.js')>()
+  return { ...actual, agentTransferTokenWithOutcome }
+})
+
 vi.mock('agentwallet-sdk', async (importOriginal) => {
   const actual = await importOriginal<typeof import('agentwallet-sdk')>()
-  return { ...actual, agentTransferToken }
+  return { ...actual }
 })
 
 import { handleAddCustomToken, _resetCustomTokenQuota } from '../src/tools/tokens.js'
@@ -36,7 +52,10 @@ beforeEach(() => {
   _resetCustomTokenQuota()
   _resetSpendIntentStore()
   readContract.mockReset().mockResolvedValue(6)
-  agentTransferToken.mockReset().mockResolvedValue('0x' + 'ab'.repeat(32))
+  agentTransferTokenWithOutcome.mockReset().mockResolvedValue({
+    status: 'executed',
+    txHash: '0x' + 'ab'.repeat(32),
+  })
 })
 
 describe('add_custom_token on-chain decimals verification', () => {
@@ -59,7 +78,7 @@ describe('add_custom_token on-chain decimals verification', () => {
       token: TOKEN,
     })
     expect(pay.isError).toBeFalsy()
-    expect(agentTransferToken.mock.calls[0]![1].amount).toBe(1_000_000n)
+    expect(agentTransferTokenWithOutcome.mock.calls[0]![1].amount).toBe(1_000_000n)
   })
 
   it('refuses tokens on a chain other than the configured one, and unreadable contracts', async () => {

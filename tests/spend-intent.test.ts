@@ -113,6 +113,7 @@ describe('swapTokensIntentKey', () => {
     fromTokenAddress: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913',
     toTokenAddress: '0x4200000000000000000000000000000000000006',
     rawAmountIn: 100_000_000n,
+    rawMinAmountOut: 0n,
   }
 
   it('normalises token address case so checksum retries collide', () => {
@@ -646,6 +647,7 @@ describe('idempotencyKey discovery schema', () => {
     toSymbol: 'WETH',
     amount: '1',
     chainId: 8453,
+    minAmountOut: '0',
   }
   const bridgeBase = { fromChain: 'base' as const, toChain: 'optimism' as const, amount: '1' }
   const sendBase = {
